@@ -13,3 +13,4 @@ agent/.venv-build/
 desktop/windows/bin/
 desktop/windows/obj/
 desktop/out/
+desktop/out-release/

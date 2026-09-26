@@ -1,0 +1,36 @@
+name: desktop
+
+on:
+  push:
+    branches: [main]
+    paths: ["agent/**", "desktop/**", ".github/workflows/desktop.yml"]
+  pull_request:
+    paths: ["agent/**", "desktop/**", ".github/workflows/desktop.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      # backend binary (smoke-tested without Python) + self-contained WinUI app + Velopack installer
+      - name: Build app, portable zip and installer
+        shell: pwsh
+        run: ./desktop/scripts/Build-Windows.ps1 -Zip -Installer
+      - uses: actions/upload-artifact@v7
+        with:
+          name: winhand-windows-x64
+          path: |
+            desktop/out/*.zip
+            desktop/out/releases/*
+          if-no-files-found: error
