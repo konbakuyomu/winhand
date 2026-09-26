@@ -1,28 +1,20 @@
 ﻿# UI Automation helper for winhand's `ui` tool (Windows PowerShell 5.1 or 7).
-# inspect: list the controls of a window; act: find one control and invoke/toggle/select/
-# expand/collapse/set a value/focus it. Output is one JSON document on stdout.
+# inspect: list the controls of a window; act: invoke/toggle/select/expand/collapse/set a
+# value/focus the control at -Index of that list. winhand matches names itself and drives
+# classic Win32 controls (often bare panes to this managed client) with window messages.
+# Output is one JSON document on stdout.
 param(
     [Parameter(Mandatory)][long] $Hwnd,
     [ValidateSet('inspect', 'act')][string] $Mode = 'inspect',
-    [string] $Name = '',
-    [string] $AutomationId = '',
-    [string] $ControlType = '',
-    [int] $Index = 0,
+    [int] $Index = -1,
+    [string] $ExpectName = '',
     [string] $Do = 'invoke',
     [string] $Value = '',
-    [int] $MaxElements = 250,
-    [string] $Filter = ''
+    [int] $MaxElements = 600
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-# Without the client-side providers, classic Win32/WinForms/VCL controls (buttons, edits,
-# checkboxes) all show up as nameless "Pane"s with no Invoke/Value support.
-try {
-    Add-Type -AssemblyName UIAutomationClientsideProviders
-    [Windows.Automation.ClientSettings]::RegisterClientSideProviderAssembly(
-        [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.GetName())
-} catch { }
 $A = [Windows.Automation.AutomationElement]
 $root = $A::FromHandle([IntPtr]$Hwnd)
 if (-not $root) { throw "no window with handle $Hwnd" }
@@ -41,12 +33,15 @@ function Describe($e, $i) {
         name = $c.Name
         automation_id = $c.AutomationId
         class = $c.ClassName
+        hwnd = $c.NativeWindowHandle
         enabled = $c.IsEnabled
         rect = if ($r.IsEmpty) { $null } else { @([int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height) }
         patterns = @(Patterns $e)
     }
     $vp = $null
-    if ($e.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) { $item.value = $vp.Current.Value }
+    if ($e.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
+        $item.value = if ($c.IsPassword) { '(hidden)' } else { try { $vp.Current.Value } catch { $null } }
+    }
     $tp = $null
     if ($e.TryGetCurrentPattern([Windows.Automation.TogglePattern]::Pattern, [ref]$tp)) { $item.toggle = "$($tp.Current.ToggleState)" }
     $sp = $null
@@ -60,7 +55,7 @@ foreach ($e in $all) {
     $c = $e.Current
     if ($c.IsOffscreen -and -not $c.Name) { continue }
     $type = $c.ControlType.ProgrammaticName
-    $useful = $c.Name -or $c.AutomationId -or ($type -match 'Button|Edit|CheckBox|RadioButton|ComboBox|ListItem|MenuItem|TabItem|TreeItem|Hyperlink|Slider|Document')
+    $useful = $c.Name -or $c.AutomationId -or $c.NativeWindowHandle -or ($type -match 'Button|Edit|CheckBox|RadioButton|ComboBox|ListItem|MenuItem|TabItem|TreeItem|Hyperlink|Slider|Document')
     if (-not $useful) { continue }
     $interesting += $e
 }
@@ -69,32 +64,18 @@ if ($Mode -eq 'inspect') {
     $out = @()
     $i = 0
     foreach ($e in $interesting) {
-        $d = Describe $e $i
+        $out += Describe $e $i
         $i++
-        if ($Filter -and -not ("$($d.name) $($d.automation_id) $($d.type) $($d.value)" -like "*$Filter*")) { continue }
-        $out += $d
         if ($out.Count -ge $MaxElements) { break }
     }
-    $title = $root.Current.Name
-    [ordered]@{ window = $title; count = $interesting.Count; shown = $out.Count; elements = $out } | ConvertTo-Json -Depth 5 -Compress
+    [ordered]@{ window = $root.Current.Name; count = $interesting.Count; elements = $out } | ConvertTo-Json -Depth 5 -Compress
     exit 0
 }
 
-# act: pick the control
-$found = @()
-$i = 0
-foreach ($e in $interesting) {
-    $c = $e.Current
-    $ok = $true
-    if ($Name -and -not ($c.Name -eq $Name -or $c.Name -like $Name -or $c.Name -like "*$Name*")) { $ok = $false }
-    if ($AutomationId -and $c.AutomationId -ne $AutomationId) { $ok = $false }
-    if ($ControlType -and ($c.ControlType.ProgrammaticName -replace '^ControlType\.', '') -ne $ControlType) { $ok = $false }
-    if ($ok) { $found += , @($e, $i) }
-    $i++
-}
-if ($found.Count -eq 0) { throw "no control matches name='$Name' automation_id='$AutomationId' type='$ControlType'" }
-if ($Index -ge $found.Count) { throw "only $($found.Count) controls match; index $Index is out of range" }
-$target = $found[$Index][0]
+# act: the control at -Index, checked against the name winhand saw there
+if ($Index -lt 0 -or $Index -ge $interesting.Count) { throw "the window changed; inspect it again (index $Index of $($interesting.Count))" }
+$target = $interesting[$Index]
+if ($ExpectName -and $target.Current.Name -ne $ExpectName) { throw "the window changed; inspect it again" }
 $done = $null
 $p = $null
 switch ($Do) {
@@ -112,4 +93,4 @@ switch ($Do) {
     'focus' { $target.SetFocus(); $done = 'focused' }
 }
 # `done` null: the control offers no pattern for this; the caller falls back to a real click
-[ordered]@{ done = $done; matches = $found.Count; element = (Describe $target $found[$Index][1]) } | ConvertTo-Json -Depth 5 -Compress
+[ordered]@{ done = $done; element = (Describe $target $Index) } | ConvertTo-Json -Depth 5 -Compress

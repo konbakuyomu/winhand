@@ -376,8 +376,10 @@ Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object Windows.Forms.Form -Property @{ Text = 'winhand-ui-test'; Width = 420; Height = 220; TopMost = $true }
 $box = New-Object Windows.Forms.TextBox -Property @{ Name = 'NameBox'; Left = 20; Top = 20; Width = 360 }
 $btn = New-Object Windows.Forms.Button -Property @{ Name = 'Go'; Text = 'Press me'; Left = 20; Top = 70; Width = 160; Height = 50 }
-$btn.Add_Click({ $f.Text = 'winhand-ui-test pressed: ' + $box.Text })
-$f.Controls.Add($box); $f.Controls.Add($btn)
+$chk = New-Object Windows.Forms.CheckBox -Property @{ Text = 'Remember me'; Left = 200; Top = 80; Width = 180 }
+$pwd = New-Object Windows.Forms.TextBox -Property @{ Left = 20; Top = 130; Width = 200; UseSystemPasswordChar = $true; Text = 'hunter2' }
+$btn.Add_Click({ $f.Text = 'winhand-ui-test pressed: ' + $box.Text + ' / ' + $chk.Checked })
+$f.Controls.AddRange(@($box, $btn, $chk, $pwd))
 [void]$f.ShowDialog()
 """
 
@@ -415,15 +417,23 @@ async def test_ui_automation_fills_and_presses_controls(test_form):
             "ui",
             {"window": "winhand-ui-test", "action": "set_value", "control_type": "Edit", "value": "你好 UIA"},
         )
+        await client.call_tool("ui", {"window": "winhand-ui-test", "action": "toggle", "name": "Remember me"})
         await client.call_tool("ui", {"window": "winhand-ui-test", "action": "invoke", "name": "Press me"})
-    time.sleep(0.5)
-    assert desktop.find_window(test_form["hwnd"])["title"] == "winhand-ui-test pressed: 你好 UIA"
+        time.sleep(0.5)
+        assert desktop.find_window(test_form["hwnd"])["title"] == "winhand-ui-test pressed: 你好 UIA / True"
+        found = (await client.call_tool("ui", {"window": "winhand-ui-test"})).structured_content
+    edits = [e for e in found["elements"] if e["type"] == "Edit"]
+    assert "hunter2" not in json.dumps(found) and {e.get("value") for e in edits} >= {"你好 UIA"}, edits
+    assert next(e for e in found["elements"] if e["name"] == "Remember me")["toggle"] == "On"
 
 
 async def test_real_mouse_click_lands_where_the_screenshot_shows(test_form):
     from winhand import desktop
 
-    desktop.window_action(test_form["hwnd"], "focus")
+    try:
+        desktop.window_action(test_form["hwnd"], "focus")
+    except desktop.DesktopError:
+        pass  # the form is topmost: visible and clickable either way
     data, fmt, facts = desktop.screenshot(window=test_form["hwnd"])
     assert facts["width"] > 100 and fmt in ("png", "jpeg")
     # the button sits at client (20..180, 70..120); click its middle in screenshot pixels
@@ -438,9 +448,11 @@ async def test_real_mouse_click_lands_where_the_screenshot_shows(test_form):
 
 
 def _uia_elements(window):
-    from winhand.tools_desktop import _run_uia
+    from winhand import desktop
+    from winhand.tools_desktop import _run_uia, merge_controls
 
-    return _run_uia(window["hwnd"], Mode="inspect")["elements"]
+    uia = _run_uia(window["hwnd"], Mode="inspect")["elements"]
+    return merge_controls(uia, desktop.native_controls(window["hwnd"]))
 
 
 def test_screenshot_of_the_desktop_and_window_list():

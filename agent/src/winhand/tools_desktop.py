@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fnmatch
 import hashlib
 import json
 import mimetypes
@@ -63,6 +64,61 @@ def _run_uia(hwnd: int, **params: Any) -> dict:
             "UI Automation: " + error.splitlines()[0][:400] if error else "UI Automation failed"
         )
     return json.loads(out)
+
+
+_VAGUE_TYPES = {"Pane", "Custom", "Window", ""}
+_VERB_PATTERNS = {
+    "invoke": {"Invoke", "Toggle", "SelectionItem", "ExpandCollapse"},
+    "toggle": {"Toggle"},
+    "select": {"SelectionItem"},
+    "expand": {"ExpandCollapse"},
+    "collapse": {"ExpandCollapse"},
+    "set_value": {"Value"},
+}
+
+
+def merge_controls(uia: list[dict], native: list[dict]) -> list[dict]:
+    """One list of a window's controls: what UI Automation reports, with classic Win32 controls
+    (which it often sees only as nameless panes) filled in from the controls themselves."""
+    by_hwnd = {c["hwnd"]: c for c in native}
+    out: list[dict] = []
+    for element in uia:
+        item = dict(element)
+        item["uia_index"] = item.pop("index")
+        item["_expect"] = item.get("name") or ""
+        classic = by_hwnd.pop(item.get("hwnd") or 0, None)
+        if classic:
+            item["native"] = True
+            if item.get("type") in _VAGUE_TYPES or not item.get("patterns"):
+                item["type"] = classic["type"]
+            for key in ("name", "value", "toggle"):
+                if classic.get(key) and not item.get(key):
+                    item[key] = classic[key]
+        out.append(item)
+    out += [{**c, "native": True, "patterns": []} for c in native if c["hwnd"] in by_hwnd]
+    for i, item in enumerate(out):
+        item["index"] = i
+    return out
+
+
+def match_controls(
+    elements: list[dict], name: str | None, automation_id: str | None, control_type: str | None
+) -> list[dict]:
+    def fits(e: dict) -> bool:
+        text = e.get("name") or ""
+        if name and not (text == name or fnmatch.fnmatchcase(text, name) or name.lower() in text.lower()):
+            return False
+        if automation_id and e.get("automation_id") != automation_id:
+            return False
+        return not control_type or (e.get("type") or "").lower() == control_type.lower()
+
+    found = [e for e in elements if fits(e)]
+    exact = [e for e in found if name and e.get("name") == name]
+    return exact or found
+
+
+def _public(element: dict) -> dict:
+    return {k: v for k, v in element.items() if not k.startswith("_")}
 
 
 def register(mcp: FastMCP) -> None:
@@ -241,35 +297,63 @@ def register(mcp: FastMCP) -> None:
             str | None, Field(description="For inspect: only controls containing this text")
         ] = None,
     ) -> dict:
-        """Read and operate a window's controls through UI Automation (buttons, fields, checkboxes,
-        lists, menus): more reliable than clicking pixels. inspect lists them; the other actions
-        find one by name/automation_id/type and use it (falling back to a real click when needed)."""
+        """Read and operate a window's controls (buttons, fields, checkboxes, lists, menus) by
+        name instead of pixels, also in classic Win32/WinForms/Delphi programs and installers.
+        inspect lists them; invoke/toggle/select/set_value/... find one by name/automation_id/
+        type and use it without moving the mouse; click is a real mouse click on it."""
 
         def work():
             w = desktop.find_window(window)
+            hwnd = w["hwnd"]
+            elements = merge_controls(
+                _run_uia(hwnd, Mode="inspect")["elements"], desktop.native_controls(hwnd)
+            )
             if action == "inspect":
-                return _run_uia(w["hwnd"], Mode="inspect", Filter=filter)
-            verb = "invoke" if action == "click" else action
-            result = _run_uia(
-                w["hwnd"], Mode="act", Name=name, AutomationId=automation_id, ControlType=control_type,
-                Index=index, Do=verb, Value=value,
-            )  # fmt: skip
-            rect = (result.get("element") or {}).get("rect")
-            if (
-                (action == "click" or not result.get("done"))
-                and verb in ("invoke", "toggle", "select")
-                and rect
-            ):
-                cx, cy = rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
+                shown = [
+                    _public(e)
+                    for e in elements
+                    if not filter
+                    or filter.lower()
+                    in f"{e.get('name')} {e.get('automation_id')} {e.get('type')} {e.get('value')}".lower()
+                ]
+                return {
+                    "window": w["title"],
+                    "count": len(elements),
+                    "shown": len(shown[:250]),
+                    "elements": shown[:250],
+                }
+            found = match_controls(elements, name, automation_id, control_type)
+            if not found:
+                raise desktop.DesktopError(
+                    f"no control matches name={name!r} automation_id={automation_id!r} "
+                    f"type={control_type!r}; use action='inspect' to see the controls"
+                )
+            if index >= len(found):
+                raise desktop.DesktopError(f"only {len(found)} controls match; index {index} is out of range")
+            target = found[index]
+            done = None
+            if action != "click":
+                patterns = set(target.get("patterns") or ())
+                can = action == "focus" or patterns & _VERB_PATTERNS.get(action, set())
+                if target.get("uia_index") is not None and can:
+                    done = _run_uia(
+                        hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
+                        Do=action, Value=value,
+                    )["done"]  # fmt: skip
+                if not done and target.get("native"):
+                    done = desktop.native_act(target, action, value)
+            if not done and action in ("click", "invoke", "toggle", "select") and target.get("rect"):
+                left, top, width, height = target["rect"]
+                cx, cy = left + width // 2, top + height // 2
                 try:
-                    desktop.window_action(w["hwnd"], "focus")
+                    desktop.window_action(hwnd, "focus")
                 except desktop.DesktopError:
                     pass  # the control may be visible anyway (topmost, or already in front)
                 desktop.input_action("click", cx, cy, coordinates="screen")
-                result["done"] = f"clicked at ({cx}, {cy})"
-            if not result.get("done"):
-                raise desktop.DesktopError(f"the control does not support {action}: {result.get('element')}")
-            return result
+                done = f"clicked at ({cx}, {cy})"
+            if not done:
+                raise desktop.DesktopError(f"the control does not support {action}: {_public(target)}")
+            return {"done": done, "matches": len(found), "element": _public(target)}
 
         return await asyncio.to_thread(_errors, work)
 

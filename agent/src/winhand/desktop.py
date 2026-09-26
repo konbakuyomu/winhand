@@ -85,6 +85,14 @@ if IS_WINDOWS:
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.BringWindowToTop.argtypes = [wintypes.HWND]
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageTimeoutW.argtypes = [
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p, wintypes.UINT, wintypes.UINT,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]  # fmt: skip
+    user32.EnumChildWindows.argtypes = [wintypes.HWND, WNDENUMPROC, wintypes.LPARAM]
+    user32.RealGetWindowClassW.argtypes = [wintypes.HWND, wintypes.LPWSTR, wintypes.UINT]
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindowEnabled.argtypes = [wintypes.HWND]
     user32.SetWindowPos.argtypes = [
         wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT
     ]  # fmt: skip
@@ -324,6 +332,115 @@ def window_action(
         return {"action": action, "window": find_window(w["hwnd"])}
     except DesktopError:
         return {"action": action, "window": None, "note": "the window is gone"}
+
+
+# --------------------------------------------------------- classic controls
+#
+# Win32, WinForms, VCL (Delphi), MFC and installer (Inno/NSIS) controls are real child windows.
+# The managed UI Automation client sees many of them only as nameless "Pane"s, so they are read
+# and driven here with the standard control messages, which also works while the window is in
+# the background.
+
+_REAL_TYPES = {
+    "EDIT": "Edit",
+    "RICHEDIT20W": "Edit",
+    "RICHEDIT50W": "Edit",
+    "COMBOBOX": "ComboBox",
+    "LISTBOX": "List",
+    "STATIC": "Text",
+    "SYSLISTVIEW32": "List",
+    "SYSTREEVIEW32": "Tree",
+    "MSCTLS_TRACKBAR32": "Slider",
+    "MSCTLS_PROGRESS32": "ProgressBar",
+    "SYSTABCONTROL32": "Tab",
+}
+
+
+def _real_class(hwnd) -> str:
+    buffer = ctypes.create_unicode_buffer(256)
+    user32.RealGetWindowClassW(hwnd, buffer, 256)  # the system class a control is built on
+    return buffer.value
+
+
+def _send_timeout(hwnd, message: int, wparam: int = 0, lparam=None) -> int | None:
+    result = ctypes.c_size_t()
+    ok = user32.SendMessageTimeoutW(hwnd, message, wparam, lparam, 0x0002, 3000, ctypes.byref(result))
+    return result.value if ok else None  # SMTO_ABORTIFHUNG
+
+
+def _control_text(hwnd) -> str:
+    length = _send_timeout(hwnd, 0x000E) or 0  # WM_GETTEXTLENGTH
+    if not length:
+        return ""
+    buffer = ctypes.create_unicode_buffer(min(length, 65535) + 1)
+    _send_timeout(hwnd, 0x000D, len(buffer), buffer)  # WM_GETTEXT
+    return buffer.value
+
+
+def _control_type(hwnd) -> str | None:
+    real = _real_class(hwnd).upper()
+    if real == "BUTTON":
+        kind = user32.GetWindowLongW(hwnd, -16) & 0x0F
+        if kind in (2, 3, 5, 6):
+            return "CheckBox"
+        if kind in (4, 9):
+            return "RadioButton"
+        return "Group" if kind == 7 else "Button"
+    return _REAL_TYPES.get(real)
+
+
+def native_controls(top: int) -> list[dict]:
+    """The visible classic controls inside a window, in tab order."""
+    _require_windows()
+    _dpi_aware()
+    handles: list[int] = []
+    user32.EnumChildWindows(wintypes.HWND(top), WNDENUMPROC(lambda h, _: handles.append(h) or True), 0)
+    out = []
+    for handle in handles:
+        hwnd = wintypes.HWND(handle)
+        if not user32.IsWindowVisible(hwnd):
+            continue
+        kind = _control_type(hwnd)
+        if kind is None:
+            continue
+        r = RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(r))
+        control = {
+            "hwnd": int(handle),
+            "type": kind,
+            "name": _title(hwnd) if kind != "Edit" else "",
+            "class": _class(hwnd),
+            "enabled": bool(user32.IsWindowEnabled(hwnd)),
+            "rect": [r.left, r.top, r.right - r.left, r.bottom - r.top],
+        }
+        if kind in ("Edit", "ComboBox"):
+            secret = kind == "Edit" and user32.GetWindowLongW(hwnd, -16) & 0x20  # ES_PASSWORD
+            control["value"] = "(hidden)" if secret else _control_text(hwnd)[:2000]
+        if kind in ("CheckBox", "RadioButton"):
+            state = _send_timeout(hwnd, 0x00F0)  # BM_GETCHECK
+            control["toggle"] = {0: "Off", 1: "On", 2: "Indeterminate"}.get(state or 0, "Off")
+        out.append(control)
+    return out
+
+
+def native_act(control: dict, verb: str, value: str | None = None) -> str | None:
+    """Operate a classic control; None when this kind of control cannot do `verb` this way."""
+    hwnd = wintypes.HWND(control["hwnd"])
+    if not user32.IsWindow(hwnd):
+        raise DesktopError("the control is gone")
+    if not user32.IsWindowEnabled(hwnd):
+        raise DesktopError(f"the control is disabled: {control.get('name') or control['type']}")
+    kind = control["type"]
+    if verb in ("invoke", "toggle", "select") and kind in ("Button", "CheckBox", "RadioButton"):
+        # posted: a button that opens a modal dialog must not block this call
+        user32.PostMessageW(hwnd, 0x00F5, 0, 0)  # BM_CLICK
+        time.sleep(0.15)
+        return {"Button": "invoked", "CheckBox": "toggled", "RadioButton": "selected"}[kind]
+    if verb == "set_value" and kind in ("Edit", "ComboBox"):
+        if _send_timeout(hwnd, 0x000C, 0, ctypes.c_wchar_p(value or "")) is None:  # WM_SETTEXT
+            raise DesktopError("the window did not respond")
+        return "value set"
+    return None
 
 
 # ------------------------------------------------------------- screenshots
