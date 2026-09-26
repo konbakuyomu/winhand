@@ -98,6 +98,10 @@ def merge_controls(uia: list[dict], native: list[dict]) -> list[dict]:
             for key in ("name", "value", "toggle"):
                 if classic.get(key) and not item.get(key):
                     item[key] = classic[key]
+        elif item.get("type") in _VAGUE_TYPES and not (
+            item.get("name") or item.get("automation_id") or item.get("patterns")
+        ):
+            continue  # a bare container window: nothing to read or operate
         out.append(item)
     out += [{**c, "native": True, "patterns": []} for c in native if c["hwnd"] in by_hwnd]
     for i, item in enumerate(out):
