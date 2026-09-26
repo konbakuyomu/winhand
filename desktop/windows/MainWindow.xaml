@@ -27,6 +27,9 @@
         <muxc:NavigationViewItem Content="会话" Tag="sessions">
           <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE756;" /></muxc:NavigationViewItem.Icon>
         </muxc:NavigationViewItem>
+        <muxc:NavigationViewItem Content="MCP 服务" Tag="mcp">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE71B;" /></muxc:NavigationViewItem.Icon>
+        </muxc:NavigationViewItem>
         <muxc:NavigationViewItem Content="设置" Tag="settings">
           <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE713;" /></muxc:NavigationViewItem.Icon>
         </muxc:NavigationViewItem>

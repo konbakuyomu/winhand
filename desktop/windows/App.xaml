@@ -42,6 +42,11 @@
         <Setter Property="IsTextSelectionEnabled" Value="True" />
       </Style>
       <Thickness x:Key="SurfaceCardPadding">16</Thickness>
+      <Style x:Key="ErrorCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyCopyStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCriticalBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="IsTextSelectionEnabled" Value="True" />
+      </Style>
       <Style x:Key="SurfaceCardStyle" TargetType="ContentControl">
         <Setter Property="Padding" Value="{StaticResource SurfaceCardPadding}" />
         <Setter Property="HorizontalAlignment" Value="Stretch" />

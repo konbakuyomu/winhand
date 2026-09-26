@@ -70,7 +70,7 @@ public sealed partial class MainWindow
             Children =
             {
                 Text("本机数据", "SectionHeadingStyle"),
-                Text("本地 MCP 网关（pyocd、usb-camera 等）也在 config.toml 里配置，修改后点概览里的“重新连接”生效。", "SecondaryCopyStyle"),
+                Text("本机的其他 MCP 服务（pyocd、usb-camera 等）在“MCP 服务”页管理，也保存在 config.toml 里。", "SecondaryCopyStyle"),
                 _pathsText,
                 buttons
             }

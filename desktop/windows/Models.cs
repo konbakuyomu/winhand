@@ -122,7 +122,7 @@ internal sealed class ActivityEntry(JsonElement data)
         _ => Status
     };
 
-    public string KindLabel => Kind switch { "tool" => "工具", "connection" => "连接", "session" => "会话", _ => Kind };
+    public string KindLabel => Kind switch { "tool" => "工具", "connection" => "连接", "session" => "会话", "mcp" => "MCP 服务", _ => Kind };
 
     /// <summary>The one argument that best says what the call did (command, path, text…).</summary>
     public string ArgsLine

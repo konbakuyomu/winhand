@@ -113,6 +113,7 @@ public sealed partial class MainWindow : Window
         _counts = Json.Obj(snapshot, "counts");
         _backendVersion = Json.Str(snapshot, "version");
         _sessions = Json.Arr(snapshot, "sessions").ToList();
+        ApplyMcp(Json.Obj(snapshot, "mcp"));
         LoadActivity(Json.Arr(snapshot, "activity"));
         RenderSessions();
         RenderSettings();
@@ -134,6 +135,9 @@ public sealed partial class MainWindow : Window
                 _sessions = Json.Arr(e.Data, "sessions").ToList();
                 RenderSessions();
                 RenderOverview();
+                break;
+            case "mcp":
+                ApplyMcp(e.Data);
                 break;
         }
     }
@@ -210,7 +214,7 @@ public sealed partial class MainWindow : Window
     private void ShowPage(string page, bool fromNavigation = false)
     {
         _currentPage = page;
-        PageTitle.Text = page switch { "activity" => "活动", "sessions" => "会话", "settings" => "设置", _ => "概览" };
+        PageTitle.Text = page switch { "activity" => "活动", "sessions" => "会话", "mcp" => "MCP 服务", "settings" => "设置", _ => "概览" };
         PageHost.Content = _pages[page];
         if (!fromNavigation)
             RootNavigation.SelectedItem = RootNavigation.MenuItems.OfType<NavigationViewItem>().First(i => (string)i.Tag == page);
@@ -221,6 +225,7 @@ public sealed partial class MainWindow : Window
         _pages["overview"] = BuildOverview();
         _pages["activity"] = BuildActivity();
         _pages["sessions"] = BuildSessions();
+        _pages["mcp"] = BuildMcp();
         _pages["settings"] = BuildSettings();
     }
 
