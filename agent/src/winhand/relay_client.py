@@ -160,6 +160,8 @@ async def run_forever(url: str, token: str, *, mcp=None, stop: asyncio.Event | N
                         ping_interval=None,
                         open_timeout=20,
                         close_timeout=5,
+                        # Race IPv6/IPv4: half-working IPv6 is common and otherwise stalls the connect.
+                        happy_eyeballs_delay=0.25,
                     ) as ws:
                         log.info("connected to relay %s", url)
                         backoff = 1.0
