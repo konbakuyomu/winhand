@@ -78,7 +78,7 @@ if ($Zip) {
     Write-Host "== portable zip: $archive"
 }
 if ($Installer) {
-    if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) { Invoke-Native 'vpk install' { dotnet tool install -g vpk } }
+    if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) { Invoke-Native 'vpk install' { dotnet tool install -g vpk --version 1.2.0 } }
     Invoke-Native 'vpk pack' {
         vpk pack --packId winhand --packVersion $version --packDir $app --mainExe WinhandDesktop.exe `
             --packTitle winhand --icon (Join-Path $repo 'desktop\windows\Assets\winhand.ico') `
