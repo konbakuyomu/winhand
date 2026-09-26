@@ -198,6 +198,7 @@ def sys_info() -> dict:
         "cpu_count": os.cpu_count(),
         "memory_gb": round(psutil.virtual_memory().total / 1073741824, 1),
         "tools": {t: shutil.which(t) for t in _TOOLS if shutil.which(t)},
+        "redirection_guard": winenv.redirection_guard_enforced(),
     }
     if winenv.IS_WINDOWS:
         import ctypes

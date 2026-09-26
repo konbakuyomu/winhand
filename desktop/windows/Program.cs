@@ -20,7 +20,9 @@ public static class Program
         // Installer/updater hooks must run and exit before anything else starts.
         Velopack.VelopackApp.Build().SetAutoApplyOnStartup(false).Run();
         WinRT.ComWrappersSupport.InitializeComWrappers();
-        StartInBackground = args.Contains(Autostart.BackgroundArgument);
+        StartInBackground = args.Contains(Autostart.BackgroundArgument) || CleanLaunch.TakeBackgroundRequest();
+        if (CleanLaunch.RelaunchIfRestricted(StartInBackground))
+            return;
         var current = AppInstance.GetCurrent();
         var main = AppInstance.FindOrRegisterForKey(InstanceKey);
         if (!main.IsCurrent)

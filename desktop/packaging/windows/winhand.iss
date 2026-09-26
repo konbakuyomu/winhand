@@ -107,7 +107,10 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
   ValueData: """{app}\current\WinhandDesktop.exe"" --background"; Tasks: autostart
 
 [Run]
-Filename: "{app}\winhand.exe"; Description: "{cm:LaunchProgram,winhand}"; Flags: nowait postinstall skipifsilent
+; started through Explorer: a child of Setup would inherit its RedirectionGuard mitigation and
+; could not follow user-created junctions (scoop, mise ...) in anything it runs
+Filename: "{win}\explorer.exe"; Parameters: """{app}\winhand.exe"""; Description: "{cm:LaunchProgram,winhand}"; \
+  Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; updates replace these after installation, so they are not all in the install log

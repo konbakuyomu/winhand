@@ -102,6 +102,30 @@ def user_default_environment() -> dict[str, str]:
         kernel32.CloseHandle(token)
 
 
+def redirection_guard_enforced() -> bool:
+    """True when this process inherited RedirectionGuard (e.g. started by an installer): then it and
+    everything it starts refuse junctions a normal user made, so scoop/mise shims fail with
+    "could not create process". Restarting winhand from the Start menu clears it."""
+    if not IS_WINDOWS:
+        return False
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessMitigationPolicy.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    flags = ctypes.c_uint32()
+    try:
+        ok = kernel32.GetProcessMitigationPolicy(kernel32.GetCurrentProcess(), 16, ctypes.byref(flags), 4)
+    except (AttributeError, OSError):
+        return False
+    return bool(ok) and bool(flags.value & 1)
+
+
 def resolve_executable(name: str, env: dict[str, str] | None = None) -> str:
     """Resolve a command name to a path, honouring PATHEXT (npm -> npm.cmd).
 
