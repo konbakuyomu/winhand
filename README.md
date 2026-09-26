@@ -1,6 +1,6 @@
 # winhand
 
-让 AI 通过**一个 MCP** 接管一台 Windows 电脑。它能驱动真终端和各种交互式程序，包括调试器、仿真器、REPL、串口和网络控制台、menuconfig 这类全屏界面、需要登录或确认的安装程序；同时提供文件读写、进程管理，还能把本机已有的其他 MCP 统一转发出去。
+让 AI 通过**一个 MCP** 接管一台 Windows 电脑。它能驱动真终端和各种交互式程序，包括调试器、仿真器、REPL、串口和网络控制台、menuconfig 这类全屏界面、需要登录或确认的安装程序；同时提供文件读写、进程管理，还能把本机已有的其他 MCP 服务各自作为独立的远程地址提供出去。
 
 ```
 claude.ai 连接器 ──HTTPS + OAuth──▶ relay（Cloudflare Worker，你的域名）
@@ -9,7 +9,7 @@ claude.ai 连接器 ──HTTPS + OAuth──▶ relay（Cloudflare Worker，你
 Claude Desktop / Codex ──stdio──▶ winhand agent（跑在你的电脑上）
                                    ├─ 通用会话引擎：pty | pipe | serial | tcp
                                    ├─ 文件 / 进程 / 系统信息
-                                   └─ 网关：pyocd-debug、usb-camera … 等本地 stdio MCP
+                                   └─ 本机 MCP 服务：pyocd-debug、usb-camera … 各自在 /mcp/<名称>
 ```
 
 ## 为什么要自己写
@@ -52,7 +52,7 @@ cd winhand\agent
 uv sync
 uv run winhand doctor          # 查看它在这台机器上能找到什么
 uv run winhand profiles        # 列出内置 profile
-uv run winhand import-codex    # 把 ~/.codex/config.toml 里的 MCP 导入网关（可选）
+uv run winhand mcp import      # 从 Codex / Claude Desktop / Claude Code 的配置导入本机 MCP 服务（可选）
 ```
 
 接入本地 MCP 客户端（stdio 方式），以 Codex 的 `config.toml` 为例：
@@ -111,8 +111,34 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 会话 | `session_start` `session_send` `session_wait` `session_read` `session_screen` `session_list` `session_stop` `session_resize` `session_prompt_user` `profile_list` |
 | 一次性命令和进程 | `run` `proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_search` `fs_stat` |
-| 网关 | `<名称>_<工具>`，例如 `pyocd-debug_pyocd_probe_list` |
+| 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
+| 文件交接 | `fs_send` `fs_write_bytes` `fs_pick`；`fs_read` 也能看图片、PDF、Word、PowerPoint、Excel |
+| 后台任务 | `job_start` `job_status` `job_stop` |
 | 其他 | `help`：给 AI 的使用指南 |
+
+## 本机的其他 MCP 服务
+
+电脑上已有的 MCP 服务（pyocd-debug、usb-camera、FreeCAD …）不会混进 winhand 的工具列表，而是**各自成为一个独立的远程 MCP 地址**：
+
+```
+https://<你的中转域名>/mcp/<名称>
+```
+
+在 claude.ai 里把每个地址分别添加为自定义连接器即可（授权一次口令；同一个中转下的地址共用授权）。winhand 原样转发，不改工具名，进度通知、图片、服务端发起的请求都能往返；服务在第一次被调用时启动，崩溃后下一次调用自动重启。
+
+在托盘应用的“MCP 服务”页添加、编辑、测试、启停，或从 Codex / Claude Desktop / Claude Code 的配置导入；配置保存在 `~/.winhand/config.toml`：
+
+```toml
+[mcp_servers.pyocd-debug]
+command = "uv"
+args = ["--directory", 'D:\Dev\PYOCD调试MCP', "run", "pyocd-debug-mcp"]
+env = { PYOCD_LOG = "info" }
+
+[mcp_servers.docs]            # 本机已经以 HTTP 提供的 MCP 服务，直接转发
+url = "http://127.0.0.1:8000/mcp"
+```
+
+命令行：`winhand mcp list`、`winhand mcp import [名称…]`、`winhand mcp test [名称…]`。
 
 ## Profile
 
