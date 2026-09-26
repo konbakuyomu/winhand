@@ -36,6 +36,12 @@ winhand 把这些都当作**会话**，用同一套模型管理：
 | 声明式 profile | 接入一个新工具只需要写一份 TOML 配置，不用写代码 |
 | Windows 适配 | 自动补全缺失的 `ComSpec`、`SystemRoot`；统一 UTF-8 编码；关闭分页器；按 `PATHEXT` 找到 `npm.cmd` 这类包装脚本；兼容中文、空格路径和超长路径；自动识别 GBK 文件；编辑文件时保留原有的 CRLF 换行 |
 
+## 桌面端（推荐的日常用法）
+
+下载 [Releases](https://github.com/konbakuyomu/winhand/releases) 里的 `winhand-win-Setup.exe`，安装后在通知区域运行，不需要 Python 或 .NET。在设置里填好中转地址和设备令牌，打开“登录 Windows 后自动启动”即可。窗口里能实时看到连接状态、Claude 的每次工具调用（时间线）和打开的会话。新版本在后台下载，你点“立即更新”或退出时安装。详见 [desktop/README.md](desktop/README.md)。
+
+安装包使用自签名证书（`CN=winhand`，SHA-256 `711736B2…DBEC2`），想让自己的电脑信任它，见 [Windows 签名与信任](docs/windows-signing.md)。
+
 ## 安装与使用
 
 需要 [uv](https://docs.astral.sh/uv/)。
