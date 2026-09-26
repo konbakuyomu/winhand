@@ -93,6 +93,16 @@ def tile(mascot: Image.Image) -> Image.Image:
     return icon
 
 
+def check_filled(icon: Image.Image) -> None:
+    """The icon must sit on a solid plate: only the rounded corners may be transparent."""
+    alpha = np.asarray(icon.getchannel("A"))
+    radius = round(CANVAS * 0.225)
+    inset = round(CANVAS * 0.02)
+    interior = alpha[inset + radius : CANVAS - inset - radius, inset + 2 : CANVAS - inset - 2]
+    if interior.min() < 255 or alpha[inset + 2 : CANVAS - inset - 2, CANVAS // 2].min() < 255:
+        raise ValueError("icon plate has transparent pixels inside; the taskbar would show through")
+
+
 def windows_icon(image: Image.Image) -> bytes:
     frames = []
     for size in WINDOWS_SIZES:
@@ -114,6 +124,7 @@ def main() -> None:
     art = remove_checkerboard(rgb)
     mascot = centered(art, CANVAS, 0.96)
     icon = tile(art)
+    check_filled(icon)
 
     WINDOWS_ASSETS.mkdir(parents=True, exist_ok=True)
     for folder in (BRANDING, WINDOWS_ASSETS):

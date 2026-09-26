@@ -32,6 +32,9 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.9",
 ]
+build = [
+    "pyinstaller==6.22.3",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

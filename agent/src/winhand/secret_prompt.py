@@ -10,14 +10,26 @@ import json
 import subprocess
 import sys
 
-_DIALOG = r"""
-import json, sys, tkinter as tk
-from tkinter import simpledialog
-title, message = json.loads(sys.argv[1])
-root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-value = simpledialog.askstring(title, message, show="*", parent=root)
-sys.stdout.write(json.dumps({"value": value}))
-"""
+
+def dialog_main(payload: str) -> int:
+    """Child-process side: show the masked dialog and print the answer as JSON."""
+    import tkinter as tk
+    from tkinter import simpledialog
+
+    title, message = json.loads(payload)
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    value = simpledialog.askstring(title, message, show="*", parent=root)
+    sys.stdout.write(json.dumps({"value": value}))
+    return 0
+
+
+def _dialog_command(payload: str) -> list[str]:
+    # In the frozen binary sys.executable is winhand.exe itself; there is no Python to run.
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "secret-dialog", payload]
+    return [sys.executable, "-m", "winhand.cli", "secret-dialog", payload]
 
 
 class PromptUnavailable(RuntimeError):
@@ -28,7 +40,7 @@ def ask_secret(title: str, message: str, timeout_s: float = 300) -> str | None:
     """Return what the person typed, or None if they cancelled."""
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", _DIALOG, json.dumps([title, message])],
+            _dialog_command(json.dumps([title, message])),
             capture_output=True,
             timeout=timeout_s,
         )

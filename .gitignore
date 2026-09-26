@@ -8,3 +8,4 @@ node_modules/
 .dev.vars
 dist/
 relay/wrangler.deploy.jsonc
+agent/.build/

@@ -1,0 +1,42 @@
+name: binary
+
+on:
+  push:
+    branches: [main]
+    paths: ["agent/**", "desktop/windows/Assets/**", ".github/workflows/binary.yml"]
+  pull_request:
+    paths: ["agent/**", "desktop/windows/Assets/**", ".github/workflows/binary.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked --group build
+      # --smoke runs the packaged binary with every Python/uv folder removed from PATH
+      - run: uv run --group build python scripts/build_binary.py --smoke --zip --result-file build-result.json
+      - name: Locate archive
+        id: out
+        shell: bash
+        run: echo "zip=$(uv run python -c "import json;print(json.load(open('build-result.json'))['zip'])")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: winhand-${{ runner.os }}
+          path: ${{ steps.out.outputs.zip }}
+          if-no-files-found: error
