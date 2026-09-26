@@ -339,6 +339,8 @@ def register(mcp: FastMCP) -> None:
             if index >= len(found):
                 raise desktop.DesktopError(f"only {len(found)} controls match; index {index} is out of range")
             target = found[index]
+            if target.get("enabled") is False:
+                raise desktop.DesktopError(f"the control is disabled right now: {_public(target)}")
             done = None
             if action != "click":
                 patterns = set(target.get("patterns") or ())
