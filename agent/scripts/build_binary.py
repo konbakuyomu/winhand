@@ -32,7 +32,7 @@ NAME = "winhand"
 IS_WINDOWS = os.name == "nt"
 ICON = REPO / "desktop/windows/Assets/winhand.ico"
 # packages whose data files, native libraries or metadata PyInstaller cannot see statically
-COLLECT_ALL = ["winhand", "pyte"] + (["winpty"] if IS_WINDOWS else [])
+COLLECT_ALL = ["winhand", "pyte", "pypdfium2", "pypdfium2_raw"] + (["winpty"] if IS_WINDOWS else [])
 COLLECT_DATA = ["fastmcp", "mcp"]  # not collect-all: their optional CLIs import typer/rich extras
 HIDDEN = ["tkinter", "serial.urlhandler.protocol_loop", "serial.urlhandler.protocol_socket"]
 COPY_METADATA = ["fastmcp", "mcp", "pydantic", "pydantic-core", "httpx", "uvicorn", "websockets", "starlette"]

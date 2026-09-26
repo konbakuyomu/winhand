@@ -4,12 +4,17 @@ processes and mounted local MCP servers."""
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.utilities.types import Image
+from mcp.types import TextContent
 from pydantic import Field
 
-from . import __version__, fs, proc, profiles
+from . import __version__, fs, media, proc, profiles, tools_desktop, winenv
 from .config import Config
 from .config import load as load_config
 from .gateway import mount_servers
@@ -38,8 +43,23 @@ Quick rules
 - Profiles (profile_list) know prompts, exit commands and quirks of common tools: gdb, pyocd-gdbserver,
   pyocd-commander, openocd, jlink, rtthread-msh, serial, telnet, menuconfig, python, shell.
 - Files: fs_read (numbered) / fs_edit (exact replace) / fs_write / fs_search / fs_list / fs_stat.
+  fs_read also shows images and reads PDF (scans as page images), Word, PowerPoint and Excel.
+  fs_send hands any file to you as-is; fs_write_bytes writes binary content here;
+  fs_pick lets the person choose files in a dialog (their way to "upload" to you).
+- The desktop like a person: screenshot (desktop, monitor, region or a window) -> input
+  (click/type/keys/scroll/drag in the screenshot's pixels) or, more reliably, ui (UI Automation:
+  inspect a window's controls, then invoke/set_value/toggle by name). window lists/focuses windows;
+  clipboard reads/writes text, images and copied files.
+- job_start runs PowerShell in the background, independent of winhand (long work, anything that
+  restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
+  follow it with job_status.
 - Local MCP servers configured in ~/.winhand/config.toml appear as <name>_<tool>.
 """
+
+
+def _text(value: str) -> TextContent:
+    return TextContent(type="text", text=value)
+
 
 Ids = Annotated[list[str] | str, Field(description="Session id, or a list of ids to watch together")]
 
@@ -437,9 +457,40 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
 
     @mcp.tool
     async def fs_read(
-        path: str, offset: Annotated[int, Field(description="1-based first line")] = 1, limit: int = 2000
-    ) -> dict:
-        """Read a text file with line numbers (UTF-8/GBK/BOM detected)."""
+        path: str,
+        offset: Annotated[int, Field(description="Text: 1-based first line")] = 1,
+        limit: Annotated[int, Field(description="Text: number of lines")] = 2000,
+        pages: Annotated[str | None, Field(description="PDF/PowerPoint: pages such as '1-3,5'")] = None,
+        render_pages: Annotated[bool, Field(description="PDF: also return the pages as images")] = False,
+    ):
+        """Read any file. Text: numbered lines (UTF-8/GBK/BOM detected). Images: returned as a
+        picture you can see. PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx): extracted text;
+        PDF pages without text (scans) come back as page images. Other binaries: use fs_send."""
+        kind = media.kind_of(path)
+        full = winenv.long_path(path)
+        if kind in ("image", "document") and not os.path.isfile(full):
+            return {"error": f"no such file: {path}"}
+        try:
+            if kind == "image":
+                data, fmt, facts = await asyncio.to_thread(media.read_image, full)
+                facts["path"] = path
+                return [_text(json.dumps(facts, ensure_ascii=False)), Image(data=data, format=fmt)]
+            if kind == "document":
+                result = await asyncio.to_thread(media.read_document, full, pages, render_pages)
+                result["facts"]["path"] = path
+                # explicit content blocks: a list of plain strings would be merged into one JSON string
+                return [
+                    _text(json.dumps(result["facts"], ensure_ascii=False)),
+                    _text(result["text"] or "(no text found)"),
+                    *[Image(data=data, format=fmt) for data, fmt, _ in result["images"]],
+                ]
+        except (media.MediaError, ImportError, OSError, ValueError) as exc:
+            return {"error": str(exc)}
+        if kind == "legacy_office":
+            return {
+                "error": f"{Path(path).suffix} is the old binary Office format; open and save it as "
+                ".docx/.xlsx/.pptx (or convert with LibreOffice via run) to read it"
+            }
         return await asyncio.to_thread(_fs, fs.fs_read, path, offset, limit)
 
     @mcp.tool
@@ -482,6 +533,8 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
     async def fs_stat(path: str) -> dict:
         """Existence, type, size and modification time of a path."""
         return await asyncio.to_thread(_fs, fs.fs_stat, path)
+
+    tools_desktop.register(mcp)
 
     mcp.sessions = sessions  # type: ignore[attr-defined]  # for tests and the relay client
     return mcp

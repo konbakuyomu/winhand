@@ -8,6 +8,7 @@ Set WINHAND_COM_PAIR=COM1,COM2 to exercise a virtual serial port pair.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -20,6 +21,8 @@ import pytest
 from conftest import wait_until_exited
 
 from winhand import fs, proc
+from winhand.config import Config
+from winhand.server import build_server
 from winhand.session import SessionSpec, wait_for
 
 pytestmark = [
@@ -145,7 +148,6 @@ def test_run_args_with_quotes_spaces_and_cjk(weird_dir):
         ["-c", "import sys, json; print(json.dumps(sys.argv[1:], ensure_ascii=False))", *tricky],
         cwd=str(weird_dir),
     )
-    import json
 
     assert json.loads(res["stdout"]) == tricky, res
 
@@ -365,3 +367,112 @@ def test_user_default_environment_restores_standard_variables():
     defaults = winenv.user_default_environment()
     names = {name.upper() for name in defaults}
     assert {"PROGRAMFILES(X86)", "PROGRAMDATA", "USERPROFILE", "PATH"} <= names
+
+
+# ---------------------------------------------------------------- desktop
+
+_FORM = r"""
+Add-Type -AssemblyName System.Windows.Forms
+$f = New-Object Windows.Forms.Form -Property @{ Text = 'winhand-ui-test'; Width = 420; Height = 220; TopMost = $true }
+$box = New-Object Windows.Forms.TextBox -Property @{ Name = 'NameBox'; Left = 20; Top = 20; Width = 360 }
+$btn = New-Object Windows.Forms.Button -Property @{ Name = 'Go'; Text = 'Press me'; Left = 20; Top = 70; Width = 160; Height = 50 }
+$btn.Add_Click({ $f.Text = 'winhand-ui-test pressed: ' + $box.Text })
+$f.Controls.Add($box); $f.Controls.Add($btn)
+[void]$f.ShowDialog()
+"""
+
+
+@pytest.fixture
+def test_form(tmp_path):
+    script = tmp_path / "form.ps1"
+    script.write_text(_FORM, encoding="utf-8-sig")
+    proc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)])
+    from winhand import desktop
+
+    for _ in range(60):
+        try:
+            yield desktop.find_window("winhand-ui-test")
+            break
+        except desktop.DesktopError:
+            time.sleep(0.25)
+    else:
+        proc.kill()
+        pytest.fail("test form did not appear")
+    proc.kill()
+
+
+async def test_ui_automation_fills_and_presses_controls(test_form):
+    from fastmcp import Client
+
+    from winhand import desktop
+
+    async with Client(build_server(Config())) as client:
+        found = (
+            await client.call_tool("ui", {"window": "winhand-ui-test", "filter": "Press"})
+        ).structured_content
+        assert any(e["name"] == "Press me" and e["type"] == "Button" for e in found["elements"])
+        await client.call_tool(
+            "ui",
+            {"window": "winhand-ui-test", "action": "set_value", "control_type": "Edit", "value": "你好 UIA"},
+        )
+        await client.call_tool("ui", {"window": "winhand-ui-test", "action": "invoke", "name": "Press me"})
+    time.sleep(0.5)
+    assert desktop.find_window(test_form["hwnd"])["title"] == "winhand-ui-test pressed: 你好 UIA"
+
+
+async def test_real_mouse_click_lands_where_the_screenshot_shows(test_form):
+    from winhand import desktop
+
+    desktop.window_action(test_form["hwnd"], "focus")
+    data, fmt, facts = desktop.screenshot(window=test_form["hwnd"])
+    assert facts["width"] > 100 and fmt in ("png", "jpeg")
+    # the button sits at client (20..180, 70..120); click its middle in screenshot pixels
+    # (client area starts below the title bar, so aim a little low)
+    button = next(e for e in _uia_elements(test_form) if e["name"] == "Press me")
+    left, top, width, height = button["rect"]
+    x = (left + width / 2 - facts["screen_left"]) * facts["scale"]
+    y = (top + height / 2 - facts["screen_top"]) * facts["scale"]
+    desktop.input_action("click", x, y)
+    time.sleep(0.5)
+    assert desktop.find_window(test_form["hwnd"])["title"].startswith("winhand-ui-test pressed")
+
+
+def _uia_elements(window):
+    from winhand.tools_desktop import _run_uia
+
+    return _run_uia(window["hwnd"], Mode="inspect")["elements"]
+
+
+def test_screenshot_of_the_desktop_and_window_list():
+    from winhand import desktop
+
+    data, fmt, facts = desktop.screenshot()
+    assert facts["desktop"] and len(data) > 1000 and facts["width"] <= 1568
+    screens = desktop.monitors()
+    assert screens and any(m["primary"] for m in screens)
+    assert desktop.windows(), "at least one visible window"
+
+
+def test_clipboard_text_roundtrip_restores_the_original():
+    from winhand import desktop
+
+    before = desktop.clipboard_get()
+    try:
+        desktop.clipboard_set(text="winhand 剪贴板 ✓")
+        assert desktop.clipboard_get() == {"kind": "text", "text": "winhand 剪贴板 ✓"}
+    finally:
+        if before["kind"] == "text":
+            desktop.clipboard_set(text=before["text"])
+
+
+def test_background_job_reports_output_and_exit_code():
+    from winhand import jobs
+
+    started = jobs.start("Write-Output '你好 job'; cmd /c exit 3", name="winhand-test")
+    for _ in range(80):
+        status = jobs.status(started["id"])
+        if status["state"] != "running":
+            break
+        time.sleep(0.25)
+    assert status["state"] == "finished" and status["exit_code"] == 3, status
+    assert "你好 job" in status["output"]
