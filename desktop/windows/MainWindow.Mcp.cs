@@ -104,7 +104,7 @@ public sealed partial class MainWindow
             var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             row.Children.Add(Text("远程地址", "SecondaryCopyStyle"));
             row.Children.Add(new TextBlock { Text = publicUrl, Style = Resource<Style>("DataCopyStyle"), IsTextSelectionEnabled = true, VerticalAlignment = VerticalAlignment.Center });
-            row.Children.Add(ActionButton("复制", () => CopyText(publicUrl, $"已复制 {name} 的地址", "在 claude.ai 的“设置 → 连接器 → 添加自定义连接器”里粘贴。")));
+            row.Children.Add(Named(ActionButton("复制", () => CopyText(publicUrl, $"已复制 {name} 的地址", "在 claude.ai 的“设置 → 连接器 → 添加自定义连接器”里粘贴。")), $"复制 {name} 的远程地址"));
             body.Children.Add(row);
         }
 
@@ -122,7 +122,7 @@ public sealed partial class MainWindow
         if (enabled && Json.Str(status, "error") is { Length: > 0 } error)
             body.Children.Add(Text(error, "ErrorCopyStyle"));
 
-        var toggle = new ToggleSwitch { IsOn = enabled, OnContent = "启用", OffContent = "停用", MinWidth = 0 };
+        var toggle = Named(new ToggleSwitch { IsOn = enabled, OnContent = "启用", OffContent = "停用", MinWidth = 0 }, $"启用 {name}");
         toggle.Toggled += async (_, _) =>
         {
             if (toggle.IsOn != enabled)
@@ -131,14 +131,14 @@ public sealed partial class MainWindow
         var actions = new StackPanel { Spacing = 8, VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Right };
         actions.Children.Add(toggle);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        buttons.Children.Add(ActionButton("测试", () => _ = TestMcpAsync(name)));
+        buttons.Children.Add(Named(ActionButton("测试", () => _ = TestMcpAsync(name)), $"测试 {name}"));
         if (!http && enabled)
         {
             var running = state is "running" or "starting";
-            buttons.Children.Add(ActionButton(running ? "停止" : "启动", () => _ = RequestMcpAsync(running ? "mcp_stop" : "mcp_start", name)));
+            buttons.Children.Add(Named(ActionButton(running ? "停止" : "启动", () => _ = RequestMcpAsync(running ? "mcp_stop" : "mcp_start", name)), $"{(running ? "停止" : "启动")} {name}"));
         }
-        buttons.Children.Add(ActionButton("编辑", () => _ = EditMcpAsync(server)));
-        buttons.Children.Add(ActionButton("删除", () => _ = DeleteMcpAsync(name)));
+        buttons.Children.Add(Named(ActionButton("编辑", () => _ = EditMcpAsync(server)), $"编辑 {name}"));
+        buttons.Children.Add(Named(ActionButton("删除", () => _ = DeleteMcpAsync(name)), $"删除 {name}"));
         actions.Children.Add(buttons);
         if (Json.Str(status, "log_file") is { } log)
         {
@@ -373,7 +373,7 @@ public sealed partial class MainWindow
         {
             var name = Json.Str(candidate, "name") ?? "";
             var already = Json.Bool(candidate, "already");
-            var box = new CheckBox
+            var box = Named(new CheckBox
             {
                 IsChecked = !already,
                 IsEnabled = !already,
@@ -385,7 +385,7 @@ public sealed partial class MainWindow
                         new TextBlock { Text = $"{Json.Str(candidate, "source")} · {Json.Str(candidate, "summary")}", Style = Resource<Style>("DataCopyStyle"), TextWrapping = TextWrapping.Wrap }
                     }
                 }
-            };
+            }, name);
             boxes.Add((box, name));
             panel.Children.Add(box);
         }
@@ -419,6 +419,13 @@ public sealed partial class MainWindow
         package.SetText(text);
         Clipboard.SetContent(package);
         ShowNotice(title, message, InfoBarSeverity.Success);
+    }
+
+    /// <summary>What screen readers (and UI automation) call a control whose visible text repeats on every card.</summary>
+    private static T Named<T>(T element, string name) where T : DependencyObject
+    {
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(element, name);
+        return element;
     }
 
     private static string Quote(string arg) => arg.Contains(' ') ? $"\"{arg}\"" : arg;
