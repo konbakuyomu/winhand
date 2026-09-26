@@ -76,7 +76,7 @@ if IS_WINDOWS:
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
-    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsIconic.argtypes = [wintypes.HWND]
     user32.IsZoomed.argtypes = [wintypes.HWND]
@@ -247,13 +247,37 @@ def find_window(selector: str | int) -> dict:
 def _force_foreground(hwnd) -> bool:
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-    # Windows only lets the foreground process hand focus over; a tapped Alt counts as input
-    user32.keybd_event(0x12, 0, 0, 0)
-    user32.keybd_event(0x12, 0, 2, 0)
-    user32.BringWindowToTop(hwnd)
-    ok = bool(user32.SetForegroundWindow(hwnd))
+    if user32.GetForegroundWindow() == hwnd:
+        return True
+    # Windows only lets the process that owns the foreground hand it over. Sharing the input
+    # queue of the current foreground thread (and the target's) makes this thread count as it.
+    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    me = kernel32.GetCurrentThreadId()
+    foreground = user32.GetForegroundWindow()
+    threads = {
+        t
+        for t in (
+            user32.GetWindowThreadProcessId(foreground, None) if foreground else 0,
+            user32.GetWindowThreadProcessId(hwnd, None),
+        )
+        if t and t != me
+    }
+    for thread in threads:
+        user32.AttachThreadInput(me, thread, True)
+    try:
+        user32.keybd_event(0x12, 0, 0, 0)  # a tapped Alt also counts as recent input
+        user32.keybd_event(0x12, 0, 2, 0)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        for thread in threads:
+            user32.AttachThreadInput(me, thread, False)
     time.sleep(0.15)
-    return ok and user32.GetForegroundWindow() == hwnd
+    if user32.GetForegroundWindow() != hwnd:
+        user32.SwitchToThisWindow(hwnd, True)
+        time.sleep(0.2)
+    return user32.GetForegroundWindow() == hwnd
 
 
 def window_action(

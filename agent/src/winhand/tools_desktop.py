@@ -261,7 +261,10 @@ def register(mcp: FastMCP) -> None:
                 and rect
             ):
                 cx, cy = rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
-                desktop.window_action(w["hwnd"], "focus")
+                try:
+                    desktop.window_action(w["hwnd"], "focus")
+                except desktop.DesktopError:
+                    pass  # the control may be visible anyway (topmost, or already in front)
                 desktop.input_action("click", cx, cy, coordinates="screen")
                 result["done"] = f"clicked at ({cx}, {cy})"
             if not result.get("done"):
