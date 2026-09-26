@@ -16,6 +16,13 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+# Without the client-side providers, classic Win32/WinForms/VCL controls (buttons, edits,
+# checkboxes) all show up as nameless "Pane"s with no Invoke/Value support.
+try {
+    Add-Type -AssemblyName UIAutomationClientsideProviders
+    [Windows.Automation.ClientSettings]::RegisterClientSideProviderAssembly(
+        [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.GetName())
+} catch { }
 $A = [Windows.Automation.AutomationElement]
 $root = $A::FromHandle([IntPtr]$Hwnd)
 if (-not $root) { throw "no window with handle $Hwnd" }
