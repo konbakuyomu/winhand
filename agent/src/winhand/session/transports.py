@@ -123,14 +123,16 @@ class _ConPty:
     def read(self) -> str | None:
         # A blocking read holds the GIL inside pywinpty, freezing every other thread
         # (the MCP event loop included) while the program is silent: poll instead.
+        # End of stream is the output pipe reaching EOF, not the process exiting:
+        # ConPTY still holds (often most of) the output when a fast writer exits,
+        # and a non-blocking read raises when nothing is available *right now*.
         try:
             data = self._pty.read(blocking=False)
         except Exception:
-            # raised once the console is gone; anything else is transient
-            if not self._pty.isalive() or self._pty.iseof():
-                return None
             data = ""
         if not data:
+            if self._pty.iseof():
+                return None
             time.sleep(0.01)
         return data
 

@@ -164,7 +164,7 @@ class Session:
         self._ended.set()
         self._event("ended", exit_code=self.transport.exit_code())
 
-    def _drain(self, quiet_s: float = 0.5, cap_s: float = 10.0) -> None:
+    def _drain(self, quiet_s: float = 2.0, cap_s: float = 30.0) -> None:
         deadline = time.monotonic() + cap_s
         last_data = time.monotonic()
         while time.monotonic() < deadline and time.monotonic() - last_data < quiet_s:
