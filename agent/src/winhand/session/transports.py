@@ -78,8 +78,78 @@ class _Decoder:
 # --------------------------------------------------------------------------- pty
 
 
+def _kill_tree(pid: int | None, force: bool = True) -> None:
+    """End a process and all its descendants (a venv python.exe on Windows is only a
+    launcher for the real interpreter, so killing the parent alone leaves it running)."""
+    if not pid:
+        return
+    import psutil
+
+    try:
+        root = psutil.Process(pid)
+        procs = [*root.children(recursive=True), root]
+    except psutil.Error:
+        return
+    for p in procs:
+        try:
+            p.kill() if force else p.terminate()
+        except psutil.Error:
+            pass
+    psutil.wait_procs(procs, timeout=3)
+
+
+class _ConPty:
+    """Direct use of pywinpty's low-level ConPTY handle.
+
+    pywinpty's `PtyProcess` wrapper relays output through a helper thread and a local
+    socket; that thread quits silently on any exception and uses partial `send()`s, so
+    under heavy output the session looked closed after ~1400 lines while the program
+    sat blocked on a full console buffer. Reading the handle directly avoids all of it.
+    """
+
+    def __init__(self, argv: list[str], cwd: str | None, env: dict[str, str], cols: int, rows: int) -> None:
+        import subprocess as sp
+
+        from winpty import PTY, Backend  # type: ignore[import-not-found]
+
+        self._pty = PTY(cols, rows, backend=Backend.ConPTY)
+        block = "\0".join(f"{k}={v}" for k, v in env.items()) + "\0"
+        cmdline = (" " + sp.list2cmdline(argv[1:])) if len(argv) > 1 else None
+        if not self._pty.spawn(argv[0], cmdline=cmdline, cwd=cwd or os.getcwd(), env=block):
+            raise TransportError(f"ConPTY refused to start {argv[0]!r}")
+        self.pid = self._pty.pid
+
+    def read(self) -> str | None:
+        try:
+            return self._pty.read(blocking=True)
+        except Exception:
+            # raised once the console is gone; anything else is transient
+            if not self._pty.isalive() or self._pty.iseof():
+                return None
+            return ""
+
+    def write(self, data: str) -> None:
+        self._pty.write(data)
+
+    def isalive(self) -> bool:
+        return bool(self._pty.isalive())
+
+    def exitstatus(self) -> int | None:
+        return None if self._pty.isalive() else self._pty.get_exitstatus()
+
+    def set_size(self, cols: int, rows: int) -> None:
+        self._pty.set_size(cols, rows)
+
+    def terminate(self, force: bool) -> None:
+        _kill_tree(self.pid, force=True)
+        try:
+            self._pty.cancel_io()
+        except Exception:
+            pass
+
+
 class PtyTransport(Transport):
-    """A real pseudo-terminal: ConPTY on Windows (pywinpty), openpty elsewhere.
+    """A real pseudo-terminal: ConPTY on Windows, openpty elsewhere.
 
     Programs see a genuine TTY, so they print prompts, colours, password
     requests and full-screen UIs exactly as they would for a person.
@@ -106,43 +176,47 @@ class PtyTransport(Transport):
         argv = [exe, *argv[1:]]
         try:
             if IS_WINDOWS:
-                from winpty import PtyProcess  # type: ignore[import-not-found]
-
-                self._proc = PtyProcess.spawn(argv, cwd=cwd, env=env, dimensions=(rows, cols))
+                self._win: _ConPty | None = _ConPty(argv, cwd, env, cols, rows)
+                self._proc = None
             else:
                 from ptyprocess import PtyProcess
 
+                self._win = None
                 self._proc = PtyProcess.spawn(
                     argv, cwd=cwd, env=env, dimensions=(rows, cols), preexec_fn=_default_sigint
                 )
+        except TransportError:
+            raise
         except Exception as exc:  # FileNotFoundError, OSError, winpty errors
             raise TransportError(f"cannot start {argv[0]!r}: {exc}") from exc
 
     @property
     def pid(self) -> int | None:
-        return getattr(self._proc, "pid", None)
+        return self._win.pid if self._win else getattr(self._proc, "pid", None)
 
     def read(self) -> str | None:
+        if self._win:
+            return self._win.read()
         try:
             data = self._proc.read(65536)
         except EOFError:
             return None
         except OSError:
             return None if not self.alive() else ""
-        if self._decoder is not None:  # POSIX ptyprocess yields bytes
-            return self._decoder.decode(data)
-        return data
+        return self._decoder.decode(data)
 
     def write(self, data: str) -> None:
-        if self._decoder is not None:
-            self._proc.write(data.encode(self._encoding, errors="replace"))
+        if self._win:
+            self._win.write(data)
         else:
-            self._proc.write(data)
+            self._proc.write(data.encode(self._encoding, errors="replace"))
 
     def alive(self) -> bool:
-        return bool(self._proc.isalive())
+        return self._win.isalive() if self._win else bool(self._proc.isalive())
 
     def exit_code(self) -> int | None:
+        if self._win:
+            return self._win.exitstatus()
         if self.alive():
             return None
         status = getattr(self._proc, "exitstatus", None)
@@ -152,22 +226,29 @@ class PtyTransport(Transport):
         return status
 
     def resize(self, cols: int, rows: int) -> None:
-        self._proc.setwinsize(rows, cols)
+        if self._win:
+            self._win.set_size(cols, rows)
+        else:
+            self._proc.setwinsize(rows, cols)
 
     def close(self, force: bool = False) -> None:
+        if self._win:
+            if self._win.isalive():
+                self._win.terminate(force)
+            return
+        pid = self.pid
         try:
             if self.alive():
                 self._proc.terminate(force=force)
-                if force and self.alive():
+                if self.alive():
                     self._proc.terminate(force=True)
         except Exception:
             pass
-        close = getattr(self._proc, "close", None)
-        if close:
-            try:
-                close(force=True) if not IS_WINDOWS else close()
-            except Exception:
-                pass
+        _kill_tree(pid)  # grandchildren the shell left behind
+        try:
+            self._proc.close(force=True)
+        except Exception:
+            pass
 
     def describe(self) -> dict:
         return {"transport": self.kind, "argv": self.argv, "cwd": self.cwd, "pid": self.pid}
