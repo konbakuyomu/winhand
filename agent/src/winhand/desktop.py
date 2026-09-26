@@ -12,6 +12,7 @@ import ctypes
 import sys
 import threading
 import time
+import uuid
 from ctypes import wintypes
 
 from . import media
@@ -377,16 +378,64 @@ def _control_text(hwnd) -> str:
     return buffer.value
 
 
+if IS_WINDOWS:
+
+    class VARIANT(ctypes.Structure):
+        _fields_ = [("vt", ctypes.c_ushort), ("pad", ctypes.c_ushort * 3), ("value", ctypes.c_longlong),
+                    ("extra", ctypes.c_void_p)]  # fmt: skip
+
+    _IID_IACCESSIBLE = (ctypes.c_byte * 16).from_buffer_copy(
+        uuid.UUID("618736e0-3c3d-11cf-810c-00aa00389b71").bytes_le
+    )
+
+
+def _msaa_role_state(hwnd) -> tuple[int, int] | None:
+    """Role and state from the control's accessibility object (owner-drawn buttons, as WinForms
+    and Delphi draw them, only tell there whether they are a checkbox and whether it is checked)."""
+    ole32, oleacc = ctypes.windll.ole32, ctypes.windll.oleacc
+    initialized = ole32.CoInitializeEx(None, 2) in (0, 1)
+    pointer = ctypes.c_void_p()
+    try:
+        if oleacc.AccessibleObjectFromWindow(
+            hwnd, ctypes.c_long(-4).value & 0xFFFFFFFF, ctypes.byref(_IID_IACCESSIBLE), ctypes.byref(pointer)
+        ) or not pointer.value:  # fmt: skip
+            return None
+        table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        getter = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, VARIANT, ctypes.POINTER(VARIANT))
+        values = []
+        for slot in (13, 14):  # IAccessible::get_accRole, get_accState
+            out = VARIANT()
+            getter(table[slot])(pointer, VARIANT(vt=3), ctypes.byref(out))  # CHILDID_SELF
+            values.append(out.value & 0xFFFFFFFF if out.vt == 3 else 0)
+        ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(table[2])(pointer)  # Release
+        return values[0], values[1]
+    except OSError:
+        return None
+    finally:
+        if initialized:
+            ole32.CoUninitialize()
+
+
 def _control_type(hwnd) -> str | None:
     real = _real_class(hwnd).upper()
     if real == "BUTTON":
         kind = user32.GetWindowLongW(hwnd, -16) & 0x0F
+        if kind == 0x0B:  # owner-drawn: ask its accessibility object what it is
+            role = (_msaa_role_state(hwnd) or (0, 0))[0]
+            return {0x2C: "CheckBox", 0x2D: "RadioButton"}.get(role, "Button")
         if kind in (2, 3, 5, 6):
             return "CheckBox"
         if kind in (4, 9):
             return "RadioButton"
         return "Group" if kind == 7 else "Button"
     return _REAL_TYPES.get(real)
+
+
+def _toggle_state(hwnd) -> str:
+    if user32.GetWindowLongW(hwnd, -16) & 0x0F == 0x0B:
+        state = (_msaa_role_state(hwnd) or (0, 0))[1]
+        return "On" if state & 0x10 else "Indeterminate" if state & 0x20 else "Off"
+    return {1: "On", 2: "Indeterminate"}.get(_send_timeout(hwnd, 0x00F0) or 0, "Off")  # BM_GETCHECK
 
 
 def native_controls(top: int) -> list[dict]:
@@ -417,8 +466,7 @@ def native_controls(top: int) -> list[dict]:
             secret = kind == "Edit" and user32.GetWindowLongW(hwnd, -16) & 0x20  # ES_PASSWORD
             control["value"] = "(hidden)" if secret else _control_text(hwnd)[:2000]
         if kind in ("CheckBox", "RadioButton"):
-            state = _send_timeout(hwnd, 0x00F0)  # BM_GETCHECK
-            control["toggle"] = {0: "Off", 1: "On", 2: "Indeterminate"}.get(state or 0, "Off")
+            control["toggle"] = _toggle_state(hwnd)
         out.append(control)
     return out
 
