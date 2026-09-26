@@ -265,14 +265,14 @@ public sealed partial class MainWindow
         if (entry.Args is { } args)
         {
             _activityDetail.Children.Add(Text("参数（已截断，env/令牌已隐藏）", "BodyCopyStyle"));
-            _activityDetail.Children.Add(new TextBox
+            var json = Text(Json.Pretty(args).Replace("\r\n", "\n"), "DataCopyStyle");
+            json.TextWrapping = TextWrapping.Wrap;
+            _activityDetail.Children.Add(new Border
             {
-                Text = Json.Pretty(args),
-                IsReadOnly = true,
-                AcceptsReturn = true,
-                TextWrapping = TextWrapping.Wrap,
-                FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Consolas"),
-                FontSize = 12
+                Child = json,
+                Padding = new Thickness(12),
+                CornerRadius = new CornerRadius(6),
+                Background = Resource<Microsoft.UI.Xaml.Media.Brush>("ControlFillColorSecondaryBrush")
             });
         }
     }

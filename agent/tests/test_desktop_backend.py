@@ -123,6 +123,9 @@ async def test_tool_calls_are_recorded_live_and_on_disk(tmp_path):
     run = next(e for e in hub.snapshot() if e["title"] == "run")
     assert run["args"] == {"command": "echo timeline"} and "exit_code=0" in run["summary"]
     assert run["duration_ms"] >= 0
+    missing = next(e for e in hub.snapshot() if e["title"] == "fs_read")
+    assert missing["status"] == "error" and "no such file" in missing["summary"]
+    assert hub.counts["error"] == 1
     lines = [json.loads(x) for x in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()]
     assert [x["status"] for x in lines if x["title"] == "run"] == ["ok"]  # only finished calls are persisted
 

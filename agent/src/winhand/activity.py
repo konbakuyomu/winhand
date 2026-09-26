@@ -67,6 +67,14 @@ def summarize(result: Any) -> str:
     return ""
 
 
+def _reports_error(result: Any) -> bool:
+    """winhand tools answer problems as {"error": ...} (so the model can read them); count those as failures."""
+    data = getattr(result, "structured_content", None)
+    if isinstance(data, dict) and set(data) == {"result"}:
+        data = data["result"]
+    return isinstance(data, dict) and bool(data.get("error"))
+
+
 class ActivityHub:
     def __init__(self, directory: Path | None = None, keep: int = 500) -> None:
         self.directory = directory
@@ -160,7 +168,7 @@ class ToolActivity(Middleware):
                 }
             )
             raise
-        failed = bool(getattr(result, "is_error", False))
+        failed = bool(getattr(result, "is_error", False)) or _reports_error(result)
         self.hub.counts["error" if failed else "ok"] += 1
         self.hub.publish(
             {
