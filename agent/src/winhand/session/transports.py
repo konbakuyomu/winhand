@@ -13,6 +13,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 from abc import ABC, abstractmethod
 
 from .. import winenv
@@ -120,13 +121,18 @@ class _ConPty:
         self.pid = self._pty.pid
 
     def read(self) -> str | None:
+        # A blocking read holds the GIL inside pywinpty, freezing every other thread
+        # (the MCP event loop included) while the program is silent: poll instead.
         try:
-            return self._pty.read(blocking=True)
+            data = self._pty.read(blocking=False)
         except Exception:
             # raised once the console is gone; anything else is transient
             if not self._pty.isalive() or self._pty.iseof():
                 return None
-            return ""
+            data = ""
+        if not data:
+            time.sleep(0.01)
+        return data
 
     def write(self, data: str) -> None:
         self._pty.write(data)
