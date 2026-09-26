@@ -139,3 +139,81 @@ def test_argument_preview_hides_secrets_and_truncates():
     assert shown["env"] == "•••"
     assert shown["content"].endswith("(1000 chars)") and len(shown["content"]) < 300
     assert shown["args"][-1] == "… (30 items)"
+
+
+async def test_local_mcp_servers_are_managed_from_the_app(tmp_path):
+    from pathlib import Path
+
+    fake = str(Path(__file__).parent / "fake_mcp_server.py")
+    (tmp_path / "config.toml").write_text(
+        "[relay]\nurl = 'wss://relay.example/agent'\ndevice_token = 'tok'\n", encoding="utf-8"
+    )
+    user = tmp_path / "user"
+    (user / ".codex").mkdir(parents=True)
+    (user / ".codex" / "config.toml").write_text(
+        "[mcp_servers.camera]\ncommand = 'uv'\nargs = ['run', 'camera-mcp']\n", encoding="utf-8"
+    )
+    env = {**os.environ, "WINHAND_HOME": str(tmp_path), "HOME": str(user), "USERPROFILE": str(user)}
+    env.pop("APPDATA", None)
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "winhand.cli", "desktop-backend",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env,
+    )  # fmt: skip
+    backend = BackendProcess(proc)
+    try:
+        init = (await backend.call("initialize", protocol_version=1, connect=False))["result"]
+        assert init["mcp"] == {"base_url": "https://relay.example/mcp", "servers": []}
+
+        entry = {
+            "name": "fake",
+            "command": sys.executable,
+            "args": ["-u", fake],
+            "env": {"API_KEY": "s3cret", "LEVEL": "1"},
+        }
+        state = (await backend.call("mcp_save", entry=entry))["result"]
+        (saved,) = state["servers"]
+        assert saved["public_url"] == "https://relay.example/mcp/fake"
+        assert saved["env"] == {"API_KEY": "••••••••", "LEVEL": "1"}  # secrets never reach the app
+
+        # the app sends the mask back for a secret it did not touch: the stored value stays
+        entry.update(env=saved["env"], description="测试服务")
+        await backend.call("mcp_save", entry=entry, original_name="fake")
+        stored = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+        assert stored["mcp_servers"]["fake"]["env"] == {"API_KEY": "s3cret", "LEVEL": "1"}
+        assert stored["relay"]["device_token"] == "tok"
+
+        bad = await backend.call("mcp_save", entry={**entry, "name": "has space"})
+        assert bad["error"]["code"] == "invalid_name"
+        dup = await backend.call("mcp_save", entry=entry)
+        assert dup["error"]["code"] == "duplicate"
+
+        tested = (await backend.call("mcp_test", name="fake"))["result"]
+        assert tested["ok"] and {"echo", "slow"} <= {t["name"] for t in tested["tools"]}
+
+        await backend.call("mcp_start", name="fake")
+        running = await backend.event(
+            "mcp", lambda d: d["servers"] and d["servers"][0]["status"].get("state") == "running"
+        )
+        assert running["servers"][0]["status"]["server"]["name"] == "fake-local"
+        off = (await backend.call("mcp_set_enabled", name="fake", enabled=False))["result"]
+        assert off["servers"][0]["enabled"] is False and off["servers"][0]["status"]["state"] == "stopped"
+
+        listed = (await backend.call("mcp_list"))["result"]
+        assert [(c["name"], c["source"], c["already"]) for c in listed["candidates"]] == [
+            ("camera", "Codex", False)
+        ]
+        imported = (await backend.call("mcp_import", names=["camera"]))["result"]
+        assert imported["added"] == ["camera"] and [s["name"] for s in imported["servers"]] == [
+            "fake",
+            "camera",
+        ]
+
+        left = (await backend.call("mcp_delete", name="fake"))["result"]
+        assert [s["name"] for s in left["servers"]] == ["camera"]
+        titles = [
+            a["title"] for a in (await backend.call("get_state"))["result"]["activity"] if a["kind"] == "mcp"
+        ]
+        assert "添加了 MCP 服务 fake" in titles and "删除了 MCP 服务 fake" in titles
+    finally:
+        backend.proc.stdin.close()
+        await asyncio.wait_for(backend.proc.wait(), 15)

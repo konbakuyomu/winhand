@@ -3,7 +3,7 @@
 winhand stdio                 serve MCP over stdio (Claude Desktop, Codex, Claude Code ...)
 winhand http [--port 8765]    serve MCP over streamable HTTP on localhost
 winhand connect               connect out to the relay so claude.ai can reach this machine
-winhand import-codex          copy MCP servers from ~/.codex/config.toml into the gateway
+winhand mcp list|import|test  local MCP servers offered at <relay>/mcp/<name>
 winhand doctor                print what winhand sees on this machine
 winhand profiles              list session profiles
 """
@@ -39,8 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     conn.add_argument("--url", help="relay agent URL, e.g. wss://mcp.example.com/agent")
     conn.add_argument("--token", help="device token issued by the relay")
     conn.add_argument("--save", action="store_true", help="store --url/--token in config.toml")
-    imp = sub.add_parser("import-codex", help="import MCP servers from ~/.codex/config.toml")
-    imp.add_argument("--path", help="path to a Codex config.toml")
+    mcp = sub.add_parser("mcp", help="local MCP servers offered through the relay at /mcp/<name>")
+    mcp.add_argument("action", choices=["list", "import", "test"])
+    mcp.add_argument("names", nargs="*", help="import: which ones (default all); test: which to test")
     sub.add_parser("doctor", help="show environment diagnostics")
     sub.add_parser("profiles", help="list session profiles")
     sub.add_parser("desktop-backend", help="engine for the tray app (JSON lines over stdio)")
@@ -75,28 +76,49 @@ def main(argv: list[str] | None = None) -> int:
         from .relay_client import AlreadyRunning
 
         try:
-            asyncio.run(run_forever(url, token))
+            from .mcp_bridge import Services
+
+            asyncio.run(run_forever(url, token, services=Services(cfg.servers)))
         except AlreadyRunning as exc:
             print(f"winhand: {exc}", file=sys.stderr)
             return 2
         except KeyboardInterrupt:
             pass
         return 0
-    if cmd == "import-codex":
-        from pathlib import Path
-
+    if cmd == "mcp":
         from . import config
 
-        cfg, added = config.import_codex(Path(args.path) if args.path else None)
-        path = config.save(cfg)
-        print(f"imported {len(added)} server(s): {', '.join(added) or '-'} -> {path}")
+        cfg = config.load()
+        if args.action == "list":
+            for entry in cfg.servers:
+                target = entry.url or " ".join([entry.command, *entry.args])
+                print(f"{entry.name:<20} {'on ' if entry.enabled else 'off'} {entry.kind:<5} {target}")
+            for c in config.import_candidates():
+                if c["name"] not in {e.name for e in cfg.servers}:
+                    print(f"{c['name']:<20} (can be imported from {c['source']})")
+            return 0
+        if args.action == "import":
+            cfg, added = config.import_servers(args.names or None, cfg)
+            path = config.save(cfg)
+            print(f"imported {len(added)} server(s): {', '.join(added) or '-'} -> {path}")
+            return 0
+        from .mcp_bridge import probe
+
+        chosen = [e for e in cfg.servers if not args.names or e.name in args.names]
+        for entry in chosen:
+            result = asyncio.run(probe(entry))
+            tools = ", ".join(t["name"] for t in result.get("tools", []))
+            status = "ok" if result["ok"] else f"FAILED: {result.get('error')}"
+            print(
+                f"{entry.name}: {status} ({result['duration_ms']} ms) {len(result.get('tools', []))} tools {tools}"
+            )
         return 0
     if cmd == "doctor":
         from . import config, proc
 
         info = proc.sys_info()
         info["config"] = str(config.config_path())
-        info["gateway_servers"] = [s.name for s in config.load().servers]
+        info["local_mcp_servers"] = [s.name for s in config.load().servers]
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return 0
     if cmd == "profiles":

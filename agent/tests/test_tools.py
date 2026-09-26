@@ -101,13 +101,17 @@ def test_sys_info_and_proc_list():
 # ------------------------------------------------------- config & profiles
 
 
-def test_import_codex_and_roundtrip(tmp_path):
-    codex = tmp_path / "codex.toml"
-    codex.write_text(
+def test_import_from_other_clients_and_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
         textwrap.dedent(r"""
         [mcp_servers.pyocd-debug]
         command = "uv"
         args = ["--directory", 'D:\Dev\20_个人项目\PYOCD调试MCP', "run", "pyocd-debug-mcp"]
+        startup_timeout_sec = 90
         [mcp_servers.cam]
         command = 'C:\Users\me\uv.exe'
         args = []
@@ -116,12 +120,33 @@ def test_import_codex_and_roundtrip(tmp_path):
     """),
         encoding="utf-8",
     )
-    cfg, added = config.import_codex(codex, Config())
-    assert added == ["pyocd-debug", "cam"]
+    (tmp_path / "AppData" / "Claude").mkdir(parents=True)
+    (tmp_path / "AppData" / "Claude" / "claude_desktop_config.json").write_text(
+        '{"mcpServers": {"docs server": {"type": "http", "url": "http://127.0.0.1:9000/mcp"},'
+        ' "old": {"type": "sse", "url": "http://127.0.0.1:9001/sse"}}}',
+        encoding="utf-8",
+    )
+    sources = {(c["name"], c["source"]) for c in config.import_candidates()}
+    assert sources == {("pyocd-debug", "Codex"), ("cam", "Codex"), ("docs server", "Claude Desktop")}
+
+    cfg, added = config.import_servers(None, Config())
+    assert added == ["pyocd-debug", "cam", "docs-server"]  # names become URL-safe
+    assert config.import_servers(None, cfg)[1] == []  # nothing twice
     path = config.save(cfg, tmp_path / "out.toml")
-    again = config.load(path)
-    assert again.servers[0].args[1] == r"D:\Dev\20_个人项目\PYOCD调试MCP"
-    assert again.servers[1].command == r"C:\Users\me\uv.exe" and again.servers[1].env == {"LEVEL": "debug"}
+    again = {s.name: s for s in config.load(path).servers}
+    assert again["pyocd-debug"].args[1] == r"D:\Dev\20_个人项目\PYOCD调试MCP"
+    assert again["pyocd-debug"].startup_timeout_s == 90
+    assert again["cam"].command == r"C:\Users\me\uv.exe" and again["cam"].env == {"LEVEL": "debug"}
+    assert again["docs-server"].kind == "http" and again["docs-server"].url == "http://127.0.0.1:9000/mcp"
+
+
+def test_legacy_gateway_section_still_loads(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[gateway.servers.cam]\ncommand = "uv"\nargs = ["run", "cam"]\n', encoding="utf-8")
+    (entry,) = config.load(path).servers
+    assert entry.name == "cam" and entry.args == ["run", "cam"] and entry.enabled
+    config.save(config.load(path), path)
+    assert "[mcp_servers.cam]" in path.read_text(encoding="utf-8")
 
 
 def test_profiles_fill_vars_and_user_overrides(winhand_home):
@@ -166,8 +191,10 @@ async def test_mcp_tools_end_to_end(tmp_path):
     mcp = build_server(cfg)
     async with Client(mcp) as c:
         names = {t.name for t in await c.list_tools()}
-        assert {"session_start", "session_wait", "fs_edit", "run", "pyocd_probe_list"} <= names
-        assert (await c.call_tool("pyocd_probe_list", {})).data == ["probe-A"]
+        assert {"session_start", "session_wait", "fs_edit", "run"} <= names
+        assert not any("probe_list" in n for n in names)  # local servers get their own endpoint
+        info = (await c.call_tool("sys_info", {})).structured_content
+        assert info["local_mcp_servers"]["names"] == ["pyocd"]
 
         start = (
             await c.call_tool(

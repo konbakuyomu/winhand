@@ -181,14 +181,16 @@ def single_instance(lock_path: Path):
                 lock_path.unlink()
 
 
-async def run_forever(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = None) -> None:
+async def run_forever(
+    url: str, token: str, *, mcp=None, services=None, stop: asyncio.Event | None = None
+) -> None:
     """Keep a tunnel to the relay up until `stop` is set (or forever)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from .config import home
 
     with single_instance(home() / "connect.lock"):
         try:
-            await run_tunnel(url, token, mcp=mcp, stop=stop)
+            await run_tunnel(url, token, mcp=mcp, services=services, stop=stop)
         except Replaced as exc:
             log.error("%s", exc)
             raise SystemExit(3) from None
@@ -199,6 +201,7 @@ async def run_tunnel(
     token: str,
     *,
     mcp=None,
+    services=None,
     stop: asyncio.Event | None = None,
     on_status: StatusCallback | None = None,
 ) -> None:
@@ -215,7 +218,9 @@ async def run_tunnel(
 
         mcp = build_server()
     port = _free_port()
-    server = await serve_local(mcp.http_app(), port)
+    from .mcp_bridge import compose_app
+
+    server = await serve_local(compose_app(mcp.http_app(), services), port)
     backoff = 1.0
     attempt = 0
     stop = stop or asyncio.Event()

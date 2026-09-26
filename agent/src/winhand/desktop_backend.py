@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import logging.handlers
@@ -23,12 +24,36 @@ from urllib.parse import urlparse
 
 from . import __version__, config
 from .activity import ActivityHub, ToolActivity
+from .mcp_bridge import Services, probe
 from .relay_client import AlreadyRunning, Replaced, run_tunnel, single_instance
 from .server import build_server
 from .session import SessionManager
 
 PROTOCOL_VERSION = 1
 log = logging.getLogger("winhand.desktop")
+
+MASK = "••••••••"
+_SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTH", "COOKIE", "CREDENTIAL", "PRIVATE")
+
+
+def _secret(name: str) -> bool:
+    upper = name.upper()
+    return any(hint in upper for hint in _SECRET_HINTS)
+
+
+def _masked(values: dict[str, str]) -> dict[str, str]:
+    return {k: (MASK if v and _secret(k) else v) for k, v in values.items()}
+
+
+def _unmasked(new: dict, old: dict[str, str]) -> dict[str, str]:
+    """Values the app sends back unchanged arrive as the mask: keep what was stored."""
+    out = {}
+    for key, value in (new or {}).items():
+        key, value = str(key).strip(), str(value)
+        if not key:
+            continue
+        out[key] = old.get(key, "") if value == MASK else value
+    return out
 
 
 class RpcError(Exception):
@@ -49,6 +74,8 @@ class Backend:
         self.cfg = config.load()
         self.mcp = build_server(self.cfg, self.sessions)
         self.mcp.add_middleware(ToolActivity(self.hub))
+        self.services = Services(self.cfg.servers, self.hub)
+        self.services.listeners.append(lambda _snapshot: self.emit("mcp", self.mcp_state()))
         self.status: dict[str, Any] = {}
         self.tunnel: asyncio.Task | None = None
         self.tunnel_stop: asyncio.Event | None = None
@@ -101,6 +128,7 @@ class Backend:
                 self.cfg.relay_url,
                 self.cfg.device_token,
                 mcp=self.mcp,
+                services=self.services,
                 stop=self.tunnel_stop,
                 on_status=self._on_tunnel_status,
             )
@@ -178,7 +206,7 @@ class Backend:
                 "logs": str(self.home / "logs"),
             },
             "relay": {"url": self.cfg.relay_url, "has_token": bool(self.cfg.device_token)},
-            "gateway": [s.name for s in self.cfg.servers if s.enabled],
+            "mcp": self.mcp_state(),
             "status": self.status,
             "counts": dict(self.hub.counts),
             "activity": self.hub.snapshot(),
@@ -228,6 +256,155 @@ class Backend:
         self.hub.record("session", f"在应用中停止了会话 {session.id}", status="ok", summary="")
         return result
 
+    # ------------------------------------------------------ local MCP servers
+
+    def public_base(self) -> str | None:
+        """https://<relay host>/mcp: where remote clients reach the local servers."""
+        if not self.cfg.relay_url:
+            return None
+        parsed = urlparse(self.cfg.relay_url)
+        scheme = "https" if parsed.scheme == "wss" else "http"
+        return f"{scheme}://{parsed.netloc}/mcp"
+
+    def mcp_state(self) -> dict:
+        base = self.public_base()
+        status = {s["name"]: s for s in self.services.snapshot()}
+        servers = []
+        for entry in self.cfg.servers:
+            servers.append(
+                {
+                    "name": entry.name,
+                    "description": entry.description,
+                    "kind": entry.kind,
+                    "command": entry.command,
+                    "args": entry.args,
+                    "env": _masked(entry.env),
+                    "cwd": entry.cwd or "",
+                    "url": entry.url or "",
+                    "headers": _masked(entry.headers),
+                    "enabled": entry.enabled,
+                    "startup_timeout_s": entry.startup_timeout_s,
+                    "idle_stop_minutes": entry.idle_stop_minutes,
+                    "public_url": f"{base}/{entry.name}" if base else None,
+                    "status": status.get(entry.name, {}),
+                }
+            )
+        return {"base_url": base, "servers": servers}
+
+    def _entry(self, name: str) -> config.ServerEntry:
+        for entry in self.cfg.servers:
+            if entry.name == name:
+                return entry
+        raise RpcError("not_found", f"没有名为 {name} 的 MCP 服务")
+
+    async def _apply_servers(self) -> None:
+        config.save(self.cfg)
+        stale = self.services.configure(self.cfg.servers)
+        await asyncio.gather(*(s.close() for s in stale), return_exceptions=True)
+        self.emit("mcp", self.mcp_state())
+
+    async def m_mcp_list(self, params: dict) -> dict:
+        known = {e.name for e in self.cfg.servers}
+        candidates = [
+            {
+                "name": c["name"],
+                "source": c["source"],
+                "already": config.safe_name(c["name"]) in known,
+                "summary": c["entry"].get("url")
+                or " ".join([str(c["entry"].get("command", "")), *map(str, c["entry"].get("args", []))]),
+            }
+            for c in await asyncio.to_thread(config.import_candidates)
+        ]
+        return {**self.mcp_state(), "candidates": candidates}
+
+    async def m_mcp_save(self, params: dict) -> dict:
+        data = params.get("entry") or {}
+        original = params.get("original_name")
+        name = str(data.get("name") or "").strip()
+        if not config.valid_name(name):
+            raise RpcError("invalid_name", "名称只能用字母、数字、- 和 _（会成为网址的一部分）")
+        if name != original and any(e.name == name for e in self.cfg.servers):
+            raise RpcError("duplicate", f"已经有名为 {name} 的服务")
+        old = self._entry(original) if original else config.ServerEntry(name=name)
+        url = str(data.get("url") or "").strip()
+        command = str(data.get("command") or "").strip()
+        if not url and not command:
+            raise RpcError("incomplete", "需要启动命令，或者本机 HTTP 地址")
+        if url and urlparse(url).scheme not in ("http", "https"):
+            raise RpcError("invalid_url", "地址应形如 http://127.0.0.1:8000/mcp")
+        entry = config.ServerEntry(
+            name=name,
+            command="" if url else command,
+            args=[] if url else [str(a) for a in data.get("args") or []],
+            env={} if url else _unmasked(data.get("env") or {}, old.env),
+            cwd=None if url else (str(data.get("cwd") or "").strip() or None),
+            url=url or None,
+            headers=_unmasked(data.get("headers") or {}, old.headers) if url else {},
+            enabled=bool(data.get("enabled", True)),
+            startup_timeout_s=float(data.get("startup_timeout_s") or 60),
+            idle_stop_minutes=float(data.get("idle_stop_minutes") or 0),
+            description=str(data.get("description") or ""),
+        )
+        if original:
+            self.cfg.servers = [entry if e.name == original else e for e in self.cfg.servers]
+        else:
+            self.cfg.servers.append(entry)
+        await self._apply_servers()
+        verb = "修改" if original else "添加"
+        self.hub.record("mcp", f"{verb}了 MCP 服务 {name}", status="ok", summary=entry.url or entry.command)
+        return self.mcp_state()
+
+    async def m_mcp_delete(self, params: dict) -> dict:
+        entry = self._entry(str(params.get("name")))
+        self.cfg.servers = [e for e in self.cfg.servers if e.name != entry.name]
+        await self._apply_servers()
+        self.hub.record("mcp", f"删除了 MCP 服务 {entry.name}", status="ok", summary="")
+        return self.mcp_state()
+
+    async def m_mcp_set_enabled(self, params: dict) -> dict:
+        entry = self._entry(str(params.get("name")))
+        self.cfg.servers = [
+            dataclasses.replace(e, enabled=bool(params.get("enabled"))) if e is entry else e for e in self.cfg.servers
+        ]
+        await self._apply_servers()
+        return self.mcp_state()
+
+    async def m_mcp_import(self, params: dict) -> dict:
+        names = params.get("names")
+        self.cfg, added = await asyncio.to_thread(config.import_servers, names, self.cfg)
+        await self._apply_servers()
+        if added:
+            self.hub.record("mcp", f"导入了 {len(added)} 个 MCP 服务", status="ok", summary=", ".join(added))
+        return {**self.mcp_state(), "added": added}
+
+    async def m_mcp_test(self, params: dict) -> dict:
+        entry = self._entry(str(params.get("name")))
+        result = await probe(entry)
+        self.hub.record(
+            "mcp",
+            f"测试 MCP 服务 {entry.name}",
+            status="ok" if result["ok"] else "error",
+            summary=f"{len(result.get('tools', []))} 个工具" if result["ok"] else str(result.get("error")),
+        )
+        return result
+
+    async def m_mcp_start(self, params: dict) -> dict:
+        service = self.services.get(str(params.get("name")))
+        if service is None:
+            raise RpcError("not_found", "服务不存在或已停用")
+        if service.entry.kind == "stdio":
+            try:
+                await service.ensure_started()
+            except Exception as exc:
+                raise RpcError("start_failed", str(exc)) from None
+        return self.mcp_state()
+
+    async def m_mcp_stop(self, params: dict) -> dict:
+        service = self.services.get(str(params.get("name")))
+        if service is not None:
+            await service.stop()
+        return self.mcp_state()
+
     async def m_shutdown(self, params: dict) -> dict:
         self.done.set()
         return {"ok": True}
@@ -252,6 +429,7 @@ class Backend:
 
     async def close(self) -> None:
         await self.stop_tunnel(quiet=True)
+        await self.services.close()
         await asyncio.to_thread(self.sessions.stop_all)
 
 

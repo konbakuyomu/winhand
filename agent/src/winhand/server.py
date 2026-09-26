@@ -1,5 +1,5 @@
 """The MCP surface: a small set of flat tools over the session engine, files,
-processes and mounted local MCP servers."""
+processes and the desktop."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from pydantic import Field
 from . import __version__, fs, media, proc, profiles, tools_desktop, winenv
 from .config import Config
 from .config import load as load_config
-from .gateway import mount_servers
 from .proc import split_command
 from .secret_prompt import PromptUnavailable, ask_secret
 from .session import SessionManager, SessionSpec, TransportError, wait_for
@@ -54,7 +53,8 @@ Quick rules
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
   follow it with job_status.
-- Local MCP servers configured in ~/.winhand/config.toml appear as <name>_<tool>.
+- Local MCP servers (pyocd-debug, usb-camera ...) are not tools here: each one configured in the
+  winhand app is its own MCP endpoint at <relay>/mcp/<name>, added as a separate connector.
 """
 
 
@@ -76,7 +76,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
     cfg = cfg if cfg is not None else load_config()
     sessions = manager or SessionManager()
     mcp = FastMCP("winhand", instructions=GUIDE, version=__version__)
-    mounted = mount_servers(mcp, cfg.servers)
+    local_servers = [s.name for s in cfg.servers if s.enabled]
 
     async def _progress(ctx: Context | None):
         if ctx is None:
@@ -95,18 +95,17 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
     @mcp.tool
     def help() -> str:
         """How to use winhand well (read once at the start)."""
-        extra = ""
-        if mounted:
-            names = ", ".join(f"{m['name']}_*" for m in mounted if m.get("enabled"))
-            extra = f"\nMounted local MCP servers: {names}\n"
-        return GUIDE + extra
+        return GUIDE
 
     @mcp.tool
     async def sys_info() -> dict:
-        """Machine facts: OS, shell, code page, available dev tools, serial ports, mounted MCP servers."""
+        """Machine facts: OS, shell, code page, available dev tools, serial ports, local MCP servers."""
         info = await asyncio.to_thread(proc.sys_info)
         info["winhand"] = __version__
-        info["gateway"] = mounted
+        info["local_mcp_servers"] = {
+            "names": local_servers,
+            "note": "each is its own MCP endpoint at <relay>/mcp/<name>; add it as a separate connector",
+        }
         return info
 
     # ------------------------------------------------------------ processes
