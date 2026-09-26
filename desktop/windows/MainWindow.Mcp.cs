@@ -494,14 +494,19 @@ public sealed partial class MainWindow
             {
                 var name = Json.Str(candidate, "name") ?? "";
                 var already = Json.Bool(candidate, "already");
+                var internalHelper = Json.Bool(candidate, "internal");
                 var summary = Text(Json.Str(candidate, "summary") ?? "", "DataCopyStyle");
                 summary.TextTrimming = TextTrimming.CharacterEllipsis;
                 summary.TextWrapping = TextWrapping.NoWrap;
+                var content = new StackPanel { Spacing = 2, Children = { Text(already ? $"{name}（已在 winhand 里）" : name, "LabelCopyStyle"), summary } };
+                if (internalHelper && !already)
+                    content.Children.Add(Text($"{group.Key} 自带的内部组件，远程客户端一般用不上。", "SecondaryCopyStyle"));
                 var box = Named(new CheckBox
                 {
-                    IsChecked = !already,
+                    IsChecked = !already && !internalHelper,
                     IsEnabled = !already,
-                    Content = new StackPanel { Spacing = 2, Children = { Text(already ? $"{name}（已在 winhand 里）" : name, "LabelCopyStyle"), summary } }
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    Content = content
                 }, name);
                 boxes.Add((box, name));
                 list.Children.Add(box);

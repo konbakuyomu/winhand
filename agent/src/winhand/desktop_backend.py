@@ -310,6 +310,7 @@ class Backend:
                 "name": c["name"],
                 "source": c["source"],
                 "already": config.safe_name(c["name"]) in known,
+                "internal": c["internal"],
                 "summary": c["entry"].get("url")
                 or " ".join([str(c["entry"].get("command", "")), *map(str, c["entry"].get("args", []))]),
             }

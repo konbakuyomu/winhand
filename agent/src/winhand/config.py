@@ -174,6 +174,13 @@ def save(cfg: Config, path: Path | None = None) -> Path:
     return path
 
 
+def _client_internal(entry: dict) -> bool:
+    """A client's own helper (Codex ships node_repl for its browser tooling): useless to anyone else."""
+    command = str(entry.get("command") or "").replace("/", "\\").lower()
+    env = entry.get("env") or {}
+    return "\\openai\\codex\\" in command or any(str(k).startswith("CODEX_") for k in env)
+
+
 def import_candidates() -> list[dict]:
     """MCP servers configured for other clients on this machine (Codex, Claude Desktop,
     Claude Code), offered for import. Nothing is read from them after importing."""
@@ -187,7 +194,7 @@ def import_candidates() -> list[dict]:
         kind = str(entry.get("type") or entry.get("transport") or "")
         if entry.get("url") and kind in ("sse",):
             return  # the legacy SSE transport is not bridged
-        found.append({"source": source, "name": name, "entry": entry})
+        found.append({"source": source, "name": name, "entry": entry, "internal": _client_internal(entry)})
 
     codex = Path.home() / ".codex" / "config.toml"
     if codex.exists():
@@ -211,13 +218,16 @@ def import_candidates() -> list[dict]:
 
 
 def import_servers(names: list[str] | None = None, cfg: Config | None = None) -> tuple[Config, list[str]]:
-    """Copy the chosen candidates (all when `names` is None) into winhand's own configuration."""
+    """Copy the chosen candidates into winhand's own configuration (`names` None: all of them
+    except other clients' internal helpers)."""
     cfg = cfg or load()
     existing = {s.name for s in cfg.servers}
     added = []
     for candidate in import_candidates():
         if names is not None and candidate["name"] not in names:
             continue
+        if names is None and candidate["internal"]:
+            continue  # only when asked for by name
         name = safe_name(candidate["name"])
         if name in existing:
             continue

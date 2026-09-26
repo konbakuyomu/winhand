@@ -117,6 +117,10 @@ def test_import_from_other_clients_and_roundtrip(tmp_path, monkeypatch):
         args = []
         [mcp_servers.cam.env]
         LEVEL = "debug"
+        [mcp_servers.node_repl]
+        command = 'C:\\Users\\me\\AppData\\Local\\OpenAI\\Codex\\runtimes\\node\\node_repl.exe'
+        [mcp_servers.node_repl.env]
+        CODEX_HOME = 'C:\\Users\\me\\.codex'
     """),
         encoding="utf-8",
     )
@@ -127,11 +131,18 @@ def test_import_from_other_clients_and_roundtrip(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     sources = {(c["name"], c["source"]) for c in config.import_candidates()}
-    assert sources == {("pyocd-debug", "Codex"), ("cam", "Codex"), ("docs server", "Claude Desktop")}
+    assert sources == {
+        ("pyocd-debug", "Codex"),
+        ("cam", "Codex"),
+        ("node_repl", "Codex"),
+        ("docs server", "Claude Desktop"),
+    }
+    assert [c["name"] for c in config.import_candidates() if c["internal"]] == ["node_repl"]
 
     cfg, added = config.import_servers(None, Config())
     assert added == ["pyocd-debug", "cam", "docs-server"]  # names become URL-safe
-    assert config.import_servers(None, cfg)[1] == []  # nothing twice
+    assert config.import_servers(None, cfg)[1] == []  # nothing twice, and Codex's own helper only by name
+    assert config.import_servers(["node_repl"], cfg)[1] == ["node_repl"]
     path = config.save(cfg, tmp_path / "out.toml")
     again = {s.name: s for s in config.load(path).servers}
     assert again["pyocd-debug"].args[1] == r"D:\Dev\20_个人项目\PYOCD调试MCP"
