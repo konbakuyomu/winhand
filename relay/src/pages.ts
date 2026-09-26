@@ -24,7 +24,7 @@ export function consentPage(opts: { handle: string; client: string; redirect: st
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>winhand 授权</title><style>${STYLE}</style></head><body><main>
 <h1>允许连接这台电脑？</h1>
-<p><strong>${escape(opts.client)}</strong> 请求通过 winhand 控制你的电脑（终端、文件、进程、已挂载的 MCP）。</p>
+<p><strong>${escape(opts.client)}</strong> 请求通过 winhand 使用你的电脑（终端、文件、进程，以及在 winhand 里启用的本机 MCP 服务）。</p>
 <p>授权后跳转到：<code>${escape(opts.redirect)}</code></p>
 ${opts.error ? `<p class="err">${escape(opts.error)}</p>` : ""}
 <form method="post" action="/authorize">
@@ -51,5 +51,6 @@ export function statusPage(status: Record<string, unknown>, mcpUrl: string): str
   }</p>
 <p>在 claude.ai 添加自定义连接器，地址填：</p>
 <p><code>${escape(mcpUrl)}</code></p>
+<p>本机的其他 MCP 服务（在 winhand 应用的“MCP 服务”页启用）各有自己的地址：<code>${escape(mcpUrl)}/&lt;名称&gt;</code>，分别添加为连接器。</p>
 </main></body></html>`;
 }

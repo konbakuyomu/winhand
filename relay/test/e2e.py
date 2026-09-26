@@ -23,7 +23,8 @@ import httpx
 from fastmcp.client import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
-from winhand.config import Config
+from winhand.config import Config, ServerEntry
+from winhand.mcp_bridge import Services
 from winhand.relay_client import run_forever
 from winhand.server import build_server
 
@@ -91,7 +92,11 @@ async def main() -> None:
 
         stop = asyncio.Event()
         ws_url = BASE.replace("http", "ws", 1) + "/agent"
-        agent = asyncio.create_task(run_forever(ws_url, AGENT_TOKEN, mcp=build_server(Config()), stop=stop))
+        fake = os.path.join(os.path.dirname(__file__), "..", "..", "agent", "tests", "fake_mcp_server.py")
+        services = Services([ServerEntry(name="fake", command=sys.executable, args=["-u", fake])])
+        agent = asyncio.create_task(
+            run_forever(ws_url, AGENT_TOKEN, mcp=build_server(Config()), services=services, stop=stop)
+        )
         for _ in range(100):
             if "电脑在线" in (await http.get(f"{BASE}/")).text:
                 break
@@ -117,8 +122,28 @@ async def main() -> None:
             check("42" in sent["output"] and sent["state"] == "awaiting_input", "interactive session through tunnel")
             await mcp.call_tool("session_stop", {"id": sid, "force": True})
 
+        # a local MCP server of the machine, as its own endpoint (a separate connector in claude.ai)
+        challenge = await http.post(f"{BASE}/mcp/fake", json={})
+        check(challenge.status_code == 401 and f"{BASE}/.well-known/oauth-protected-resource/mcp" in
+              challenge.headers.get("www-authenticate", ""), "local server endpoint asks for OAuth like /mcp")
+        for where in ("/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource/mcp/fake"):
+            meta = await http.get(f"{BASE}{where}")
+            check(meta.status_code == 200 and meta.json()["resource"] == f"{BASE}/mcp", f"resource metadata at {where}")
+        transport = StreamableHttpTransport(f"{BASE}/mcp/fake", headers={"Authorization": f"Bearer {token}"})
+        async with Client(transport) as local:
+            names = {t.name for t in await local.list_tools()}
+            check(names >= {"echo", "slow", "picture"} and "session_start" not in names, "local server's own tools, unmixed")
+            echoed = await local.call_tool("echo", {"text": "经过中转"})
+            check(echoed.content[0].text == "echo: 经过中转", "local server tool call through relay + tunnel")
+            picture = await local.call_tool("picture", {})
+            check(picture.content[0].type == "image", "image content passes through")
+        unknown = await http.post(f"{BASE}/mcp/nope", headers={"Authorization": f"Bearer {token}"},
+                                  json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        check(unknown.status_code == 404 and "enabled: fake" in unknown.text, "unknown local server explained")
+
         refused = await http.post(f"{BASE}/mcp", headers={"Authorization": "Bearer forged"}, json={})
         check(refused.status_code == 401, "forged OAuth token refused")
+        await services.close()
         stop.set()
         await agent
     print("ALL PASSED")

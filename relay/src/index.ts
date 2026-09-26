@@ -102,6 +102,22 @@ function html(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
+const PRM_PREFIX = "/.well-known/oauth-protected-resource";
+
+function protectedResourceMetadata(requestOrigin: string, env: Env): Response {
+  const origin = env.PUBLIC_ORIGIN?.replace(/\/$/, "") || requestOrigin;
+  return Response.json(
+    {
+      resource: `${origin}/mcp`,
+      authorization_servers: [origin],
+      scopes_supported: [SCOPE],
+      bearer_methods_supported: ["header"],
+      resource_name: "winhand",
+    },
+    { headers: { "access-control-allow-origin": "*", "cache-control": "max-age=3600" } },
+  );
+}
+
 const defaultHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -150,6 +166,12 @@ export default {
       const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
       if (!(await secretEquals(token, env.AGENT_TOKEN))) return new Response("bad agent token", { status: 401 });
       return bridge(env).fetch(new Request("https://bridge/connect", request));
+    }
+    // The machine's local MCP servers live at /mcp/<name> and share the /mcp resource (one
+    // grant covers them all). Clients that look for metadata at the path-specific location
+    // (RFC 9728 path insertion) are pointed at that shared resource.
+    if (url.pathname.startsWith(`${PRM_PREFIX}/mcp/`) && request.method === "GET") {
+      return protectedResourceMetadata(url.origin, env);
     }
     const origin = env.PUBLIC_ORIGIN?.replace(/\/$/, "") || url.origin;
     return getProvider(origin).fetch(request, env, ctx);
