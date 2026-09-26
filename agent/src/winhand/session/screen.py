@@ -16,7 +16,7 @@ class VirtualScreen:
         self._stream = pyte.Stream(self._screen)
         self._lock = threading.Lock()
         self.last_change = time.monotonic()
-        self._last_snapshot: tuple[str, ...] = ()
+        self._rows: dict[int, str] = {}
 
     def feed(self, text: str) -> None:
         with self._lock:
@@ -24,14 +24,25 @@ class VirtualScreen:
                 self._stream.feed(text)
             except Exception:  # pyte chokes on rare malformed sequences; keep going
                 self._stream = pyte.Stream(self._screen)
-            display = tuple(self._screen.display)
-            if display != self._last_snapshot:
-                self._last_snapshot = display
+            # Only rows pyte marked dirty can have changed. Rendering the whole display after
+            # every chunk cost more than parsing itself (ConPTY delivers output in small pieces).
+            changed = False
+            buffer, columns = self._screen.buffer, self._screen.columns
+            for y in self._screen.dirty:
+                row = buffer[y]
+                text_now = "".join(row[x].data for x in range(columns))
+                if self._rows.get(y) != text_now:
+                    self._rows[y] = text_now
+                    changed = True
+            self._screen.dirty.clear()
+            if changed:
                 self.last_change = time.monotonic()
 
     def resize(self, cols: int, rows: int) -> None:
         with self._lock:
             self._screen.resize(rows, cols)
+            self._rows.clear()
+            self.last_change = time.monotonic()
 
     def snapshot(self) -> dict:
         """Screen contents plus what a person would notice: cursor and highlights."""
