@@ -36,6 +36,13 @@ def build_env(extra: dict[str, str] | None = None, *, terminal: bool = False) ->
     """
     env = dict(os.environ)
     if IS_WINDOWS:
+        # A parent that passed a thinned-out environment (seen with some remote-control tools)
+        # leaves out ProgramFiles(x86), CommonProgramFiles, ProgramData ...; tools like signtool
+        # lookups, MSBuild and installers then fail in confusing ways. Fill only what is missing.
+        present = {key.upper() for key in env}
+        for key, value in user_default_environment().items():
+            if key.upper() not in present:
+                env[key] = value
         system_root = env.get("SystemRoot") or env.get("SYSTEMROOT") or r"C:\Windows"
         env.setdefault("SystemRoot", system_root)
         if not env.get("ComSpec") and not env.get("COMSPEC"):
@@ -48,6 +55,51 @@ def build_env(extra: dict[str, str] | None = None, *, terminal: bool = False) ->
     if extra:
         env.update({str(k): str(v) for k, v in extra.items()})
     return env
+
+
+def user_default_environment() -> dict[str, str]:
+    """The environment Windows would give a fresh process of this user (CreateEnvironmentBlock):
+    system and user variables from the registry plus the per-user profile ones."""
+    if not IS_WINDOWS:
+        return {}
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    userenv = ctypes.WinDLL("userenv", use_last_error=True)
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    userenv.CreateEnvironmentBlock.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        wintypes.HANDLE,
+        wintypes.BOOL,
+    ]
+    userenv.DestroyEnvironmentBlock.argtypes = [ctypes.c_void_p]
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008 | 0x0002, ctypes.byref(token)):
+        return {}
+    block = ctypes.c_void_p()
+    try:
+        if not userenv.CreateEnvironmentBlock(ctypes.byref(block), token, False):
+            return {}
+        result: dict[str, str] = {}
+        offset = 0
+        while True:  # NUL-separated "name=value" wide strings, ending with an empty one
+            entry = ctypes.wstring_at(block.value + offset)
+            if not entry:
+                break
+            offset += (len(entry) + 1) * ctypes.sizeof(ctypes.c_wchar)
+            name, sep, value = entry.partition("=")
+            if sep and name:  # skip "=C:=C:\\" style drive entries
+                result[name] = value
+        return result
+    except Exception:
+        return {}
+    finally:
+        if block:
+            userenv.DestroyEnvironmentBlock(block)
+        kernel32.CloseHandle(token)
 
 
 def resolve_executable(name: str, env: dict[str, str] | None = None) -> str:

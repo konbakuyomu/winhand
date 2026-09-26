@@ -357,3 +357,11 @@ def test_run_timeout_kills_grandchildren(tmp_path):
     grandchild = int(res["stdout"].split()[0])
     time.sleep(1)
     assert res["timed_out"] and not psutil.pid_exists(grandchild)
+
+
+def test_user_default_environment_restores_standard_variables():
+    from winhand import winenv
+
+    defaults = winenv.user_default_environment()
+    names = {name.upper() for name in defaults}
+    assert {"PROGRAMFILES(X86)", "PROGRAMDATA", "USERPROFILE", "PATH"} <= names

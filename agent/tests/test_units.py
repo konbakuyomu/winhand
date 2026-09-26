@@ -166,3 +166,19 @@ def test_screen_batches_parsing_but_never_shows_stale_content():
     screen.feed(" world")
     assert screen.last_change > before  # reading stability flushes pending output first
     assert screen.snapshot()["lines"] == ["hello world"]
+
+
+def test_build_env_fills_variables_a_thin_parent_left_out(monkeypatch):
+    from winhand import winenv
+
+    monkeypatch.setattr(winenv, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        winenv,
+        "user_default_environment",
+        lambda: {"ProgramFiles(x86)": r"C:\Program Files (x86)", "Path": r"C:\default", "HOME_ONLY": "x"},
+    )
+    monkeypatch.setattr(winenv.os, "environ", {"PATH": r"C:\mine", "SYSTEMROOT": r"C:\Windows"})
+    env = winenv.build_env()
+    assert env["ProgramFiles(x86)"] == r"C:\Program Files (x86)"  # missing: filled in
+    assert env["PATH"] == r"C:\mine" and "Path" not in env  # present (any case): never overridden
+    assert env["HOME_ONLY"] == "x"
