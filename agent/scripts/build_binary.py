@@ -2,6 +2,9 @@
 
     uv run --group build python scripts/build_binary.py [--smoke] [--zip]
 
+On a machine where `winhand connect` is running from .venv, build in a separate environment
+(its winhand.exe is locked):  $env:UV_PROJECT_ENVIRONMENT='.venv-build'  before the command.
+
 Each run writes only below a fresh `agent/.build/winhand-<stamp>/` directory. The smoke
 test starts the packaged executable with every Python/uv location removed from PATH and
 PYTHON* variables cleared, then drives it the way real clients do: CLI commands, an MCP

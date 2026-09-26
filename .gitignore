@@ -9,3 +9,4 @@ node_modules/
 dist/
 relay/wrangler.deploy.jsonc
 agent/.build/
+agent/.venv-build/
