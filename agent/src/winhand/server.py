@@ -17,6 +17,7 @@ from .proc import split_command
 from .secret_prompt import PromptUnavailable, ask_secret
 from .session import SessionManager, SessionSpec, TransportError, wait_for
 from .session.session import TRANSPORTS
+from .session.wait import MAX_WAIT_S
 
 GUIDE = """\
 winhand drives the Windows machine it runs on.
@@ -209,7 +210,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
                 sessions,
                 [session.id],
                 patterns=ready["patterns"],
-                timeout_s=min(float(ready.get("timeout_s", startup_wait_s)), 90),
+                timeout_s=min(float(ready.get("timeout_s", startup_wait_s)), MAX_WAIT_S),
                 progress=progress,
                 since={session.id: 0},
             )
@@ -310,7 +311,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         ] = None,
         min_chars: Annotated[int | None, Field(description="Stop once this much new output arrived")] = None,
         timeout_s: Annotated[
-            float, Field(description="Max wait for this call (capped at 90s; call again to keep waiting)")
+            float, Field(description="Max wait for this call (capped at 50s; call again to keep waiting)")
         ] = 30,
         include_screen: bool = False,
     ) -> dict:
