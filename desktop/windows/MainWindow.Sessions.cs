@@ -4,93 +4,115 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace Winhand.Desktop;
 
+/// <summary>The "会话" page: terminals, debuggers, serial and network consoles Claude opened with
+/// session_start. The list on the left, the selected session's state and actions on the right.</summary>
 public sealed partial class MainWindow
 {
-    private StackPanel? _sessionRows;
+    private ListView? _sessionList;
+    private ContentControl? _sessionDetail;
+    private string? _sessionSelection;
+    private bool _renderingSessions;
 
     private UIElement BuildSessions()
     {
-        _sessionRows = new StackPanel { Spacing = 12, Padding = new Thickness(24), MaxWidth = 1100 };
-        return new ScrollViewer { Content = _sessionRows };
+        _sessionList = new ListView { SelectionMode = ListViewSelectionMode.Single };
+        Named(_sessionList, "会话");
+        _sessionList.SelectionChanged += (_, _) =>
+        {
+            if (_renderingSessions || _sessionList.SelectedItem is not ListViewItem { Tag: string id })
+                return;
+            _sessionSelection = id;
+            RenderSessionDetail();
+        };
+        _sessionDetail = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
+        RenderSessions();
+        return SplitWorkspace("sessions", ListPane(null, _sessionList), _sessionDetail, 260, 220, 360);
     }
+
+    private static (string Label, Tone Tone) SessionState(string state) => state switch
+    {
+        "awaiting_input" => ("等待输入", Tone.Success),
+        "running" => ("运行中", Tone.Active),
+        "needs_user" => ("需要你操作", Tone.Warning),
+        "idle" => ("空闲", Tone.Success),
+        "blocked" => ("可能卡住", Tone.Warning),
+        "exited" => ("已退出", Tone.Neutral),
+        _ => (state, Tone.Neutral)
+    };
+
+    private static string SessionTarget(JsonElement session) => Json.Str(session, "transport") switch
+    {
+        "serial" => $"串口 {Json.Str(session, "port")} @ {Json.Num(session, "baudrate")}",
+        "tcp" => $"TCP {Json.Str(session, "host")}:{Json.Num(session, "port")}",
+        _ => string.Join(" ", Json.Arr(session, "argv").Select(a => a.GetString()))
+    };
 
     private void RenderSessions()
     {
-        if (_sessionRows is null)
+        if (_sessionList is null)
             return;
-        _sessionRows.Children.Clear();
-        _sessionRows.Children.Add(Text(
-            "Claude 通过 session_start 打开的终端、调试器、串口和网络控制台。每个会话的完整输出都记录在日志文件里。",
-            "SecondaryCopyStyle"));
-        if (_sessions.Count == 0)
+        _renderingSessions = true;
+        _sessionList.Items.Clear();
+        // live sessions first, newest first within each group
+        var ordered = _sessions.AsEnumerable().Reverse().OrderBy(s => Json.Str(s, "state") == "exited").ToList();
+        if (_sessionSelection is null || ordered.All(s => Json.Str(s, "id") != _sessionSelection))
+            _sessionSelection = ordered.Select(s => Json.Str(s, "id")).FirstOrDefault();
+        foreach (var session in ordered)
         {
-            _sessionRows.Children.Add(Card(Text("当前没有打开的会话。", "SecondaryCopyStyle")));
-            return;
+            var id = Json.Str(session, "id") ?? "";
+            var (label, tone) = SessionState(Json.Str(session, "state") ?? "");
+            var item = ListRow(id, id, $"{label} · {Json.Str(session, "transport")}", tone);
+            _sessionList.Items.Add(item);
+            if (id == _sessionSelection)
+                _sessionList.SelectedItem = item;
         }
-        foreach (var session in _sessions)
-            _sessionRows.Children.Add(SessionCard(session));
+        _renderingSessions = false;
+        RenderSessionDetail();
     }
 
-    private UIElement SessionCard(JsonElement session)
+    private void RenderSessionDetail()
     {
+        if (_sessionDetail is null)
+            return;
+        var page = PagePanel();
+        var session = _sessions.FirstOrDefault(s => Json.Str(s, "id") == _sessionSelection);
+        if (session.ValueKind != JsonValueKind.Object)
+        {
+            page.Children.Add(EmptyState("没有会话",
+                "Claude 用 session_start 打开终端、调试器、串口或网络控制台时，会话会出现在这里。每个会话的完整输出都记录在日志文件里。"));
+            _sessionDetail.Content = DetailPane(page);
+            return;
+        }
+
         var id = Json.Str(session, "id") ?? "";
         var state = Json.Str(session, "state") ?? "";
-        var tone = state switch
-        {
-            "awaiting_input" or "idle" => Tone.Success,
-            "running" => Tone.Active,
-            "needs_user" or "blocked" => Tone.Warning,
-            "exited" => Tone.Neutral,
-            _ => Tone.Neutral
-        };
-        var label = state switch
-        {
-            "awaiting_input" => "等待输入",
-            "running" => "运行中",
-            "needs_user" => "需要你操作",
-            "idle" => "空闲",
-            "blocked" => "可能卡住",
-            "exited" => "已退出",
-            _ => state
-        };
+        var (label, tone) = SessionState(state);
+        var profile = Json.Str(session, "profile");
+        page.Children.Add(DetailHeader(id, profile is null ? "" : $"profile：{profile}", Pill(label, tone), null));
 
-        var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        header.Children.Add(Text(id, "SectionHeadingStyle"));
-        header.Children.Add(Pill(label, tone));
-        if (Json.Str(session, "profile") is { } profile)
-            header.Children.Add(Pill(profile, Tone.Neutral));
-
-        var target = Json.Str(session, "transport") switch
-        {
-            "serial" => $"串口 {Json.Str(session, "port")} @ {Json.Num(session, "baudrate")}",
-            "tcp" => $"TCP {Json.Str(session, "host")}:{Json.Num(session, "port")}",
-            var transport => $"{transport} · " + string.Join(" ", Json.Arr(session, "argv").Select(a => a.GetString()))
-        };
-        var info = new StackPanel { Spacing = 4 };
-        info.Children.Add(header);
-        info.Children.Add(Text(target, "DataCopyStyle"));
-        if (Json.Str(session, "cwd") is { } cwd)
-            info.Children.Add(Text($"目录：{cwd}", "SecondaryCopyStyle"));
-        if (Json.Str(session, "reason") is { Length: > 0 } reason)
-            info.Children.Add(Text(reason, "SecondaryCopyStyle"));
         var unread = Json.Num(session, "unread_chars") ?? 0;
-        if (unread > 0)
-            info.Children.Add(Text($"有 {unread:0} 个字符尚未被 Claude 读取", "SecondaryCopyStyle"));
+        var facts = Facts(
+            ("状态", Json.Str(session, "reason") ?? label, false),
+            ("方式", Json.Str(session, "transport") ?? "", false),
+            ("目标", SessionTarget(session), true),
+            ("目录", Json.Str(session, "cwd") ?? "", true),
+            ("进程", Json.Num(session, "pid") is { } pid ? $"{pid:0}" : "", true),
+            ("未读输出", unread > 0 ? $"{unread:0} 个字符尚未被 Claude 读取" : "", false),
+            ("日志", Json.Str(session, "log_file") ?? "", true));
+        var actions = ActionRow();
+        if (Json.Str(session, "log_file") is { } log)
+            actions.Children.Add(Named(ActionButton("打开日志", () => OpenPath(log, select: true)), $"打开 {id} 的日志"));
+        if (state == "exited")
+            actions.Children.Add(Named(ActionButton("移出列表", () => _ = ForgetSessionAsync(id)), $"把 {id} 移出列表"));
+        else
+            actions.Children.Add(Named(ActionButton("停止…", () => _ = StopSessionAsync(id)), $"停止 {id}"));
+        page.Children.Add(Card(new StackPanel { Spacing = 12, Children = { facts, actions } }));
+        _sessionDetail.Content = DetailPane(page);
+    }
 
-        var log = Json.Str(session, "log_file");
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Top };
-        actions.Children.Add(ActionButton("打开日志", () => OpenPath(log, select: true)));
-        var stop = ActionButton("停止", () => _ = StopSessionAsync(id));
-        stop.IsEnabled = state != "exited";
-        actions.Children.Add(stop);
-
-        var grid = new Grid { ColumnSpacing = 16 };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.Children.Add(info);
-        Grid.SetColumn(actions, 1);
-        grid.Children.Add(actions);
-        return Card(grid);
+    private async Task ForgetSessionAsync(string id)
+    {
+        await RequestAsync("stop_session", new Dictionary<string, object?> { ["id"] = id, ["force"] = true });
     }
 
     private async Task StopSessionAsync(string id)
@@ -99,7 +121,7 @@ public sealed partial class MainWindow
         {
             XamlRoot = Content.XamlRoot,
             Title = $"停止会话 {id}？",
-            Content = "会结束这个会话里的程序（连同子进程）。Claude 如果还在用它，下一次调用会收到“会话不存在”。",
+            Content = Text("会结束这个会话里的程序（连同子进程）。Claude 如果还在用它，下一次调用会收到“会话不存在”。"),
             PrimaryButtonText = "停止",
             CloseButtonText = "取消",
             DefaultButton = ContentDialogButton.Close

@@ -40,9 +40,10 @@ public sealed partial class MainWindow
             RebuildActivityList();
         };
         _activitySearch = new TextBox { PlaceholderText = "按工具名、参数或结果筛选", Width = 280 };
+        Named(_activitySearch, "筛选活动");
         _activitySearch.TextChanged += (_, _) => RebuildActivityList();
         var openLog = ActionButton("打开审计日志", () => OpenPath(Json.Str(_paths, "activity")));
-        var toolbar = new Grid { ColumnSpacing = 12, Padding = new Thickness(24, 12, 24, 12) };
+        var toolbar = new Grid { ColumnSpacing = 12, Padding = new Thickness(PageInset, 12, PageInset, 12) };
         toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -58,30 +59,22 @@ public sealed partial class MainWindow
             BorderBrush = Resource<Microsoft.UI.Xaml.Media.Brush>("DividerStrokeColorDefaultBrush")
         });
 
-        var body = new Grid();
-        Grid.SetRow(body, 1);
-        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(420) });
+        var listHost = new Grid();
         _activityList = new ListView { SelectionMode = ListViewSelectionMode.Single, Padding = new Thickness(12, 8, 12, 8) };
+        Named(_activityList, "活动记录");
         _activityList.SelectionChanged += (_, _) =>
         {
             _selectedActivity = (_activityList.SelectedItem as FrameworkElement)?.Tag as string;
             RenderActivityDetail();
         };
         _activityEmpty = Text("还没有活动。Claude 调用工具、连接状态变化时会实时出现在这里。", "SecondaryCopyStyle");
-        _activityEmpty.Margin = new Thickness(24);
-        body.Children.Add(_activityList);
-        body.Children.Add(_activityEmpty);
+        _activityEmpty.Margin = new Thickness(PageInset);
+        listHost.Children.Add(_activityList);
+        listHost.Children.Add(_activityEmpty);
 
-        _activityDetail = new StackPanel { Spacing = 12, Padding = new Thickness(20) };
-        var detailHost = new Border
-        {
-            BorderThickness = new Thickness(1, 0, 0, 0),
-            BorderBrush = Resource<Microsoft.UI.Xaml.Media.Brush>("DividerStrokeColorDefaultBrush"),
-            Child = new ScrollViewer { Content = _activityDetail }
-        };
-        Grid.SetColumn(detailHost, 1);
-        body.Children.Add(detailHost);
+        _activityDetail = new StackPanel { Spacing = 12, MaxWidth = ContentMaxWidth };
+        var body = SplitWorkspace("activity", listHost, PageScroll(_activityDetail), 620, 420, 1200, 360);
+        Grid.SetRow(body, 1);
         root.Children.Add(body);
         RenderActivityDetail();
         return root;
@@ -244,36 +237,17 @@ public sealed partial class MainWindow
         _activityDetail.Children.Clear();
         if (_selectedActivity is null || !_activityById.TryGetValue(_selectedActivity, out var entry))
         {
-            _activityDetail.Children.Add(Text("选择一条记录查看参数和结果。", "SecondaryCopyStyle"));
+            _activityDetail.Children.Add(EmptyState("活动详情", "在左边选择一条记录，查看它的参数和结果。"));
             return;
         }
-        var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        header.Children.Add(Text(entry.Title, "SectionHeadingStyle"));
-        header.Children.Add(Pill(entry.StatusLabel, entry.Tone));
-        _activityDetail.Children.Add(header);
         var facts = $"{entry.KindLabel} · {Format.Local(entry.Time):yyyy-MM-dd HH:mm:ss}";
         if (entry.DurationMs is { } ms)
             facts += $" · 用时 {Format.Duration(ms)}";
-        _activityDetail.Children.Add(Text(facts, "SecondaryCopyStyle"));
+        _activityDetail.Spacing = PageInset;
+        _activityDetail.Children.Add(DetailHeader(entry.Title, facts, Pill(entry.StatusLabel, entry.Tone), null));
         if (entry.Summary.Length > 0)
-        {
-            _activityDetail.Children.Add(Text("结果", "BodyCopyStyle"));
-            var summary = Text(entry.Summary, "DataCopyStyle");
-            summary.TextWrapping = TextWrapping.Wrap;
-            _activityDetail.Children.Add(summary);
-        }
+            _activityDetail.Children.Add(Section("结果", "", CodeBlock(entry.Summary)));
         if (entry.Args is { } args)
-        {
-            _activityDetail.Children.Add(Text("参数（已截断，env/令牌已隐藏）", "BodyCopyStyle"));
-            var json = Text(Json.Pretty(args).Replace("\r\n", "\n"), "DataCopyStyle");
-            json.TextWrapping = TextWrapping.Wrap;
-            _activityDetail.Children.Add(new Border
-            {
-                Child = json,
-                Padding = new Thickness(12),
-                CornerRadius = new CornerRadius(6),
-                Background = Resource<Microsoft.UI.Xaml.Media.Brush>("ControlFillColorSecondaryBrush")
-            });
-        }
+            _activityDetail.Children.Add(Section("参数", "预览会截断长内容；env、令牌等已隐藏。", CodeBlock(Json.Pretty(args).Replace("\r\n", "\n"))));
     }
 }

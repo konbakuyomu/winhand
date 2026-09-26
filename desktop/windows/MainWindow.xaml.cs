@@ -44,6 +44,7 @@ public sealed partial class MainWindow : Window
         _backend.EventReceived += (_, e) => DispatcherQueue.TryEnqueue(() => OnBackendEvent(e));
         _backend.Disconnected += (_, message) => DispatcherQueue.TryEnqueue(() => OnBackendDisconnected(message));
 
+        InitializeFeedback();
         BuildPages();
         ShowPage("overview", fromNavigation: true); // the XAML already selects it; setting it again misplaces the indicator
         _ticker = DispatcherQueue.CreateTimer();
@@ -288,17 +289,6 @@ public sealed partial class MainWindow : Window
     }
 
     // ----------------------------------------------------------------- helpers
-
-    private void ShowNotice(string title, string message, InfoBarSeverity severity)
-    {
-        Notice.ActionButton = null;
-        Notice.Title = title;
-        Notice.Message = message;
-        Notice.Severity = severity;
-        Notice.IsOpen = true;
-    }
-
-    private void HideNotice() => Notice.IsOpen = false;
 
     private static T Resource<T>(string key) => (T)Application.Current.Resources[key];
 

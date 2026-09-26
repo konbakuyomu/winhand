@@ -41,6 +41,9 @@
         <Setter Property="FontFamily" Value="Consolas" />
         <Setter Property="IsTextSelectionEnabled" Value="True" />
       </Style>
+      <Style x:Key="LabelCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyCopyStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+      </Style>
       <Thickness x:Key="SurfaceCardPadding">16</Thickness>
       <Style x:Key="ErrorCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyCopyStyle}">
         <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCriticalBrush}" />
@@ -162,8 +165,8 @@
         <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCriticalBrush}" />
       </Style>
       <Style x:Key="StatusActiveStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusNeutralStyle}">
-        <Setter Property="Background" Value="{ThemeResource AccentFillColorTertiaryBrush}" />
-        <Setter Property="Foreground" Value="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+        <Setter Property="Background" Value="{ThemeResource ControlFillColorSecondaryBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource AccentTextFillColorPrimaryBrush}" />
       </Style>
     </ResourceDictionary>
   </Application.Resources>

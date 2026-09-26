@@ -13,6 +13,32 @@ internal static class Preferences
         set => Write("AutoCheckUpdates", value ? 1 : 0);
     }
 
+    public static string? ReadString(string name)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(Key);
+            return key?.GetValue(name) as string;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public static void WriteString(string name, string value)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(Key, writable: true);
+            key.SetValue(name, value, RegistryValueKind.String);
+        }
+        catch (Exception)
+        {
+            // a remembered pane width is a convenience
+        }
+    }
+
     private static int Read(string name, int fallback)
     {
         try

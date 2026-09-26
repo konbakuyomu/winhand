@@ -44,8 +44,8 @@ public sealed partial class MainWindow
         if (!_updater.Available || _updater.LatestVersion == _announcedVersion)
             return;
         _announcedVersion = _updater.LatestVersion;
-        ShowNotice($"发现新版本 {_updater.LatestVersion}", "可以在设置里查看更新内容，确认后再下载。", InfoBarSeverity.Informational);
-        Notice.ActionButton = NoticeButton("查看", () => ShowPage("settings"));
+        ShowNotice($"发现新版本 {_updater.LatestVersion}", "可以在设置里查看更新内容，确认后再下载。", InfoBarSeverity.Informational,
+            "查看", () => ShowPage("settings"));
     }
 
     /// <summary>The card's main button walks through the steps, like Smart Search.</summary>
@@ -84,8 +84,8 @@ public sealed partial class MainWindow
         if (_updater.Ready)
         {
             ShowNotice($"新版本 {_updater.LatestVersion} 已就绪",
-                "现在重启会断开 Claude 的连接几秒；也可以等下次退出时自动安装。", InfoBarSeverity.Success);
-            Notice.ActionButton = NoticeButton("重启并完成更新", () => _ = InstallUpdateAsync());
+                "现在重启会断开 Claude 的连接几秒；也可以等下次退出时自动安装。", InfoBarSeverity.Success,
+                "重启并完成更新", () => _ = InstallUpdateAsync());
         }
         else if (_updater.Error.Length > 0)
             ShowNotice("更新未下载", _updater.Error, InfoBarSeverity.Warning);
@@ -124,7 +124,7 @@ public sealed partial class MainWindow
 
     private UIElement BuildUpdateCard()
     {
-        _updateSummary = Text("", "SectionHeadingStyle");
+        _updateSummary = Text("", "LabelCopyStyle");
         _updateFacts = Text("", "SecondaryCopyStyle");
         _updateDetail = Text("", "SecondaryCopyStyle");
         _updateProgress = new ProgressBar { Minimum = 0, Maximum = 100, Visibility = Visibility.Collapsed };
@@ -141,34 +141,24 @@ public sealed partial class MainWindow
         _updateAction = ActionButton("检查更新", () => _ = UpdateActionAsync(), accent: true);
         _updateCancel = ActionButton("取消下载", () => _downloadCancellation?.Cancel());
         var history = new HyperlinkButton { Content = "所有版本与更新记录", NavigateUri = new Uri(AppUpdater.RepositoryUrl + "/releases") };
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _updateAction, _updateCancel, history } };
+        history.Padding = new Thickness(8, 0, 8, 0);
+        var buttons = ActionRow(_updateAction, _updateCancel, history);
 
-        _autoCheckSwitch = new ToggleSwitch { IsOn = Preferences.AutoCheckUpdates, OnContent = "开", OffContent = "关" };
+        _autoCheckSwitch = CompactSwitch("自动检查更新", Preferences.AutoCheckUpdates);
         _autoCheckSwitch.Toggled += (_, _) =>
         {
             Preferences.AutoCheckUpdates = _autoCheckSwitch.IsOn;
             if (_autoCheckSwitch.IsOn)
                 _ = CheckAutomaticallyAsync();
         };
-        var autoRow = new Grid { ColumnSpacing = 16 };
-        autoRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        autoRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        autoRow.Children.Add(new StackPanel
-        {
-            Children = { Text("自动检查更新"), Text("启动后和每 6 小时检查一次。发现新版本只会提醒你，确认后才下载。", "SecondaryCopyStyle") }
-        });
-        Grid.SetColumn(_autoCheckSwitch, 1);
-        autoRow.Children.Add(_autoCheckSwitch);
+        var autoRow = SettingRow("自动检查更新", "启动后和每 6 小时检查一次。发现新版本只会提醒你，确认后才下载。", _autoCheckSwitch);
 
         RenderUpdate();
+        var summary = new StackPanel { Spacing = 4, Children = { _updateSummary, _updateFacts } };
         return Card(new StackPanel
         {
-            Spacing = 10,
-            Children =
-            {
-                Text("更新", "SecondaryCopyStyle"), _updateSummary, _updateFacts, _updateNotesBox, _updateProgress,
-                buttons, _updateDetail, new Border { Style = Resource<Style>("SectionDividerStyle") }, autoRow
-            }
+            Spacing = 12,
+            Children = { summary, _updateNotesBox, _updateProgress, buttons, _updateDetail, Divider(), autoRow }
         });
     }
 
@@ -212,13 +202,6 @@ public sealed partial class MainWindow
             : _updater.Ready ? "重启只需几秒，Claude 的连接会自动恢复。不想现在重启，下次从托盘退出时会自动安装。"
             : "更新包来自 GitHub Releases，带 winhand 签名；配置、令牌和活动记录不受影响。";
         RefreshStatus();
-    }
-
-    private static Button NoticeButton(string text, Action onClick)
-    {
-        var button = new Button { Content = text };
-        button.Click += (_, _) => onClick();
-        return button;
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
