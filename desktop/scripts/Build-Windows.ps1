@@ -19,6 +19,16 @@ param(
     [switch] $Installer
 )
 $ErrorActionPreference = 'Stop'
+
+# Windows PowerShell 5.1 turns any stderr line of a native command into a terminating error
+# under 'Stop' (uv prints warnings there). Run tools with 'Continue' and check exit codes instead.
+function Invoke-Native([string] $What, [scriptblock] $Command) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Command 2>&1 | ForEach-Object { "$_" } }
+    finally { $ErrorActionPreference = $previous }
+    if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
+}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $agent = Join-Path $repo 'agent'
 $project = Join-Path $repo 'desktop\windows\Winhand.Desktop.csproj'
@@ -34,13 +44,12 @@ New-Item -ItemType Directory -Force -Path $app | Out-Null
 Push-Location $agent
 try {
     $env:UV_PROJECT_ENVIRONMENT = '.venv-build'
-    uv sync --locked --group build
-    if ($LASTEXITCODE -ne 0) { throw 'uv sync failed' }
+    Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue  # set when launched from an activated venv
+    Invoke-Native 'uv sync' { uv sync --locked --group build }
     $result = Join-Path $Output 'backend-build.json'
     $arguments = @('run', '--group', 'build', 'python', 'scripts/build_binary.py', '--result-file', $result)
     if (-not $SkipSmoke) { $arguments += '--smoke' }
-    uv @arguments
-    if ($LASTEXITCODE -ne 0) { throw 'backend build failed' }
+    Invoke-Native 'backend build' { uv @arguments } | Where-Object { $_ -notmatch '^\d+ (INFO|WARNING)' }
     $bundle = (Get-Content -Raw -LiteralPath $result | ConvertFrom-Json).bundle
 }
 finally {
@@ -50,8 +59,9 @@ finally {
 
 # 2. app
 $platform = if ($Architecture -eq 'arm64') { 'ARM64' } else { 'x64' }
-dotnet publish $project -c Release -r "win-$Architecture" --self-contained true -p:Platform=$platform -p:Version=$version -o $app
-if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
+Invoke-Native 'dotnet publish' {
+    dotnet publish $project -c Release -r "win-$Architecture" --self-contained true -p:Platform=$platform -p:Version=$version -o $app -nologo -v q
+}
 
 # 3. backend next to the app
 Copy-Item -LiteralPath $bundle -Destination (Join-Path $app 'backend') -Recurse
@@ -68,10 +78,11 @@ if ($Zip) {
     Write-Host "== portable zip: $archive"
 }
 if ($Installer) {
-    if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) { dotnet tool install -g vpk | Out-Host }
-    vpk pack --packId winhand --packVersion $version --packDir $app --mainExe WinhandDesktop.exe `
-        --packTitle winhand --icon (Join-Path $repo 'desktop\windows\Assets\winhand.ico') `
-        --runtime "win-$Architecture" --outputDir (Join-Path $Output 'releases')
-    if ($LASTEXITCODE -ne 0) { throw 'vpk pack failed' }
+    if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) { Invoke-Native 'vpk install' { dotnet tool install -g vpk } }
+    Invoke-Native 'vpk pack' {
+        vpk pack --packId winhand --packVersion $version --packDir $app --mainExe WinhandDesktop.exe `
+            --packTitle winhand --icon (Join-Path $repo 'desktop\windows\Assets\winhand.ico') `
+            --runtime "win-$Architecture" --outputDir (Join-Path $Output 'releases')
+    }
     Write-Host "== installer: $(Join-Path $Output 'releases')"
 }
