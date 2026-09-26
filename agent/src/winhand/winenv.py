@@ -68,7 +68,9 @@ def default_shell() -> list[str]:
         for candidate in ("pwsh", "powershell"):
             exe = shutil.which(candidate)
             if exe:
-                return [exe, "-NoLogo", "-NoExit", "-Command", _PWSH_UTF8]
+                # Runs after the user's profile: keep its environment, but replace fancy
+                # multi-line prompts (oh-my-posh, starship) with one a program can recognise.
+                return [exe, "-NoLogo", "-NoExit", "-Command", f"{_PWSH_UTF8}; {_PWSH_PLAIN_PROMPT}"]
         comspec = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
         return [comspec, "/K", "chcp 65001>nul"]
     shell = os.environ.get("SHELL") or shutil.which("bash") or "/bin/sh"
@@ -100,6 +102,9 @@ _PWSH_UTF8 = (
     "$OutputEncoding=[Text.Encoding]::UTF8;"
     "$ProgressPreference='SilentlyContinue'"
 )
+
+
+_PWSH_PLAIN_PROMPT = "function global:prompt { 'PS ' + $executionContext.SessionState.Path.CurrentLocation.ProviderPath + '> ' }"
 
 
 def command_line(argv: list[str]) -> str:
