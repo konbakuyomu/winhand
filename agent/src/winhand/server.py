@@ -47,8 +47,9 @@ Quick rules
   fs_send hands any file to you as-is; fs_write_bytes writes binary content here;
   fs_pick lets the person choose files in a dialog (their way to "upload" to you).
 - The desktop like a person: screenshot (desktop, monitor, region or a window) -> input
-  (click/type/keys/scroll/drag in the screenshot's pixels) or, more reliably, ui (UI Automation:
-  inspect a window's controls, then invoke/set_value/toggle by name). window lists/focuses windows;
+  (click/type/keys/scroll/drag in the screenshot's pixels) or, more reliably, ui (inspect a
+  window's controls, then invoke/set_value/toggle by name; also classic Win32/WinForms/Delphi
+  programs and installers, even in the background). window lists/focuses windows;
   clipboard reads/writes text, images and copied files.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);

@@ -1,6 +1,6 @@
 [project]
 name = "winhand"
-version = "0.2.2"
+version = "0.2.3"
 description = "Take over a Windows machine from an AI: generic interactive session engine, files, processes and a local MCP gateway"
 authors = [
     { name = "konbakuyomu" }
