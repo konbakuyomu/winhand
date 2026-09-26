@@ -106,6 +106,10 @@ async def wait_for(
     return result
 
 
+def _visible_since(session: Session, start: int) -> bool:
+    return bool(clean(session.buffer.read(start, 50000).text).strip())
+
+
 def _check(
     session: Session,
     regexes,
@@ -155,8 +159,9 @@ def _check(
         }
     # "Quiet" after we just started/typed means "it answered and settled", so a
     # slow starter that has printed nothing yet (common on Windows) keeps waiting.
-    produced = session.buffer.end > start
-    if quiet_ms and st["idle_ms"] >= quiet_ms and (produced or not quiet_after_output):
+    # ConPTY emits screen-setup escape codes before the program prints anything,
+    # so only visible text counts as "it answered".
+    if quiet_ms and st["idle_ms"] >= quiet_ms and (not quiet_after_output or _visible_since(session, start)):
         return {"session": sid, "condition": "quiet", "idle_ms": st["idle_ms"]}
     if screen_stable_ms and session.screen is not None:
         stable = int((time.monotonic() - session.screen.last_change) * 1000)
