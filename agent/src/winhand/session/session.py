@@ -114,6 +114,7 @@ class Session:
         self.events: list[dict] = []
         self._autoreply_from = 0
         self._ended = threading.Event()
+        self._stopping = threading.Event()
         self._write_lock = threading.Lock()
         self._reader = threading.Thread(target=self._pump, name=f"winhand-{sid}", daemon=True)
         self._reader.start()
@@ -167,7 +168,11 @@ class Session:
     def _drain(self, quiet_s: float = 2.0, cap_s: float = 30.0) -> None:
         deadline = time.monotonic() + cap_s
         last_data = time.monotonic()
-        while time.monotonic() < deadline and time.monotonic() - last_data < quiet_s:
+        while time.monotonic() < deadline:
+            # a deliberate stop only needs what is already buffered
+            limit = 0.2 if self._stopping.is_set() else quiet_s
+            if time.monotonic() - last_data >= limit:
+                break
             try:
                 chunk = self.transport.read()
             except Exception:
@@ -349,6 +354,7 @@ class Session:
     # ------------------------------------------------------------------ stop
 
     def stop(self, force: bool = False, grace_s: float = 3.0) -> dict:
+        self._stopping.set()
         if self.alive and not force and self.spec.exit_command:
             try:
                 self.send(self.spec.exit_command, submit=True)
@@ -357,10 +363,10 @@ class Session:
                 pass
         if self.alive:
             self.transport.close(force=force)
-            self._ended.wait(1.0)
+            self._ended.wait(2.0)
         if self.alive:
             self.transport.close(force=True)
-            self._ended.wait(1.0)
+            self._ended.wait(3.0)
         if not self.alive:
             self.transport.close(force=True)  # release fds/handles of ended sessions too
         self.buffer.close()
