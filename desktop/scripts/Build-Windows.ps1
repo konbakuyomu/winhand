@@ -135,7 +135,8 @@ if ($Installer) {
     $iscc = & (Join-Path $PSScriptRoot 'Get-InnoSetup.ps1')
     $inno = @("/DAppVersion=$version", "/DPayloadDir=$payload", "/DOutputDir=$releases", '/Q')
     if ($signed) {
-        $inno += @('/DSigned', ('/Swinhandsign="{0}" -NoProfile -File "{1}" -Path $f' -f
+        # $q is Inno's quote: literal quotes would be escaped on the way to ISCC's command line
+        $inno += @('/DSigned', ('/Swinhandsign=$q{0}$q -NoProfile -File $q{1}$q -Path $f' -f
             (Get-Process -Id $PID).Path, (Join-Path $PSScriptRoot 'Sign-WindowsFile.ps1')))
     }
     Invoke-Native 'Inno Setup' { & $iscc @inno (Join-Path $repo 'desktop\packaging\windows\winhand.iss') }
