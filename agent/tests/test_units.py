@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from winhand.session import state as st
@@ -150,3 +152,17 @@ def test_old_prompt_does_not_count_until_program_answers():
 def test_custom_prompt_and_disabled_heuristics():
     assert _infer(last_line="MYDEV# ", prompts=[r"^MYDEV# $"])["kind"] == "prompt"
     assert _infer(last_line="Loading:", heuristic_prompts=False)["state"] == "idle"
+
+
+def test_screen_batches_parsing_but_never_shows_stale_content():
+    from winhand.session.screen import VirtualScreen
+
+    screen = VirtualScreen(20, 5)
+    for ch in "hello":
+        screen.feed(ch)  # tiny pieces are batched, not parsed one by one
+    assert screen.cursor_line() == "hello"
+    before = screen.last_change
+    time.sleep(0.01)
+    screen.feed(" world")
+    assert screen.last_change > before  # reading stability flushes pending output first
+    assert screen.snapshot()["lines"] == ["hello world"]

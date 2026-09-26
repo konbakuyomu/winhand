@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import wait_until_exited
 
 from winhand import fs, proc
 from winhand.session import SessionSpec, wait_for
@@ -219,7 +220,7 @@ async def test_flood_of_output_is_complete(manager):
             argv=[sys.executable, "-u", "-c", "for i in range(20000): print(f'line {i} 中文')"],
         )
     )
-    r = await wait_for(manager, [s.id], states=["exited"], timeout_s=60, since={s.id: 0})
+    r = await wait_until_exited(manager, s)
     assert r["hit"]["condition"] == "exited"
     text = s.read(since=0, limit=10_000_000)["output"]
     assert "line 0 中文" in text and "line 19999 中文" in text

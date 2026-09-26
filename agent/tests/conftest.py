@@ -37,3 +37,17 @@ def fake_spec():
 
 def on_windows() -> bool:
     return os.name == "nt"
+
+
+async def wait_until_exited(manager, session, total_s: float = 150):
+    """Keep calling wait_for like a real client does: one call is capped (MAX_WAIT_S) and a
+    timeout only means "call again"."""
+    import time
+
+    from winhand.session import wait_for
+
+    deadline = time.monotonic() + total_s
+    while True:
+        r = await wait_for(manager, [session.id], states=["exited"], timeout_s=45, since={session.id: 0})
+        if r.get("hit") or time.monotonic() > deadline:
+            return r
