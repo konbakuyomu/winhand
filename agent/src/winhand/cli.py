@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     imp.add_argument("--path", help="path to a Codex config.toml")
     sub.add_parser("doctor", help="show environment diagnostics")
     sub.add_parser("profiles", help="list session profiles")
+    sub.add_parser("desktop-backend", help="engine for the tray app (JSON lines over stdio)")
     dialog = sub.add_parser("secret-dialog")  # internal: masked input dialog for session_prompt_user
     dialog.add_argument("payload", nargs="?")
     dialog.add_argument("--check", action="store_true", help="only verify the GUI toolkit is present")
@@ -105,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
             needs = f"  vars: {', '.join(p['vars'])}" if p["vars"] else ""
             print(f"{p['name']:<18} [{p['transport']}] {p['description']}{needs}")
         return 0
+    if cmd == "desktop-backend":
+        from .desktop_backend import main as desktop_main
+
+        return desktop_main()
     if cmd == "secret-dialog":
         if args.check:
             import tkinter  # noqa: F401

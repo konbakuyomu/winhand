@@ -13,6 +13,8 @@ two-tone pattern. Outputs:
     transparent, for the bottom-left of the navigation pane.
 - assets/branding/winhand.png, desktop/windows/Assets/winhand.png / winhand.ico
     the mascot on a filled rounded tile, for the taskbar, window, tray and installer.
+- desktop/windows/Assets/winhand-offline.ico
+    the same icon in grey, shown in the tray while the relay is not connected.
 
 Run: uv run desktop/scripts/build_icons.py
 """
@@ -131,7 +133,12 @@ def main() -> None:
         mascot.save(folder / "mascot.png", optimize=True)
         icon.save(folder / "winhand.png", optimize=True)
     (WINDOWS_ASSETS / "winhand.ico").write_bytes(windows_icon(icon))
-    print("Generated mascot.png, winhand.png and winhand.ico; source artwork is unchanged.")
+    # tray icon while the relay is not connected: same plate, drained of colour
+    offline = Image.merge("RGBA", (*icon.convert("LA").convert("RGB").split(), icon.getchannel("A")))
+    offline = Image.blend(offline, Image.new("RGBA", offline.size, (150, 150, 150, 255)), 0.25)
+    offline.putalpha(icon.getchannel("A"))
+    (WINDOWS_ASSETS / "winhand-offline.ico").write_bytes(windows_icon(offline))
+    print("Generated mascot.png, winhand.png, winhand.ico and winhand-offline.ico; source artwork is unchanged.")
 
 
 if __name__ == "__main__":

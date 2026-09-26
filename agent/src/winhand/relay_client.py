@@ -17,6 +17,7 @@ import os
 import platform
 import socket
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -145,6 +146,13 @@ class AlreadyRunning(RuntimeError):
     pass
 
 
+class Replaced(RuntimeError):
+    """Another agent took over this relay; reconnecting would only fight over it."""
+
+
+StatusCallback = Callable[..., None]
+
+
 @contextlib.contextmanager
 def single_instance(lock_path: Path):
     """Refuse to start a second `winhand connect` on this machine: two agents would
@@ -179,10 +187,29 @@ async def run_forever(url: str, token: str, *, mcp=None, stop: asyncio.Event | N
     from .config import home
 
     with single_instance(home() / "connect.lock"):
-        await _run(url, token, mcp=mcp, stop=stop)
+        try:
+            await run_tunnel(url, token, mcp=mcp, stop=stop)
+        except Replaced as exc:
+            log.error("%s", exc)
+            raise SystemExit(3) from None
 
 
-async def _run(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = None) -> None:
+async def run_tunnel(
+    url: str,
+    token: str,
+    *,
+    mcp=None,
+    stop: asyncio.Event | None = None,
+    on_status: StatusCallback | None = None,
+) -> None:
+    """The reconnect loop. `on_status(state, **detail)` hears every transition:
+    connecting, online, offline, refused, replaced, stopped."""
+
+    def status(state: str, **detail) -> None:
+        if on_status is not None:
+            with contextlib.suppress(Exception):
+                on_status(state, **detail)
+
     if mcp is None:
         from .server import build_server
 
@@ -190,10 +217,14 @@ async def _run(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = N
     port = _free_port()
     server = await serve_local(mcp.http_app(), port)
     backoff = 1.0
+    attempt = 0
     stop = stop or asyncio.Event()
     try:
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=None) as http:
             while not stop.is_set():
+                attempt += 1
+                status("connecting", attempt=attempt)
+                reason = None
                 try:
                     async with connect(
                         url,
@@ -207,6 +238,8 @@ async def _run(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = N
                     ) as ws:
                         log.info("connected to relay %s", url)
                         backoff = 1.0
+                        attempt = 0
+                        status("online", connected_at=time.time())
                         await ws.send(json.dumps(hello_frame()))
                         tunnel = asyncio.create_task(Tunnel(ws, http).run())
                         stopper = asyncio.create_task(stop.wait())
@@ -218,26 +251,41 @@ async def _run(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = N
                             break
                         if not tunnel.cancelled() and tunnel.exception() is not None:
                             log.warning("relay connection lost: %s", tunnel.exception())
+                            reason = f"connection lost: {tunnel.exception()}"
                         if ws.close_code == REPLACED_CODE:
-                            log.error(
-                                "another `winhand connect` (possibly on another machine) took over this relay; "
-                                "exiting instead of fighting over the connection"
+                            status("replaced")
+                            raise Replaced(
+                                "another winhand agent (possibly on another machine) took over this relay; "
+                                "stopped instead of fighting over the connection"
                             )
-                            raise SystemExit(3)
                         log.info("relay connection closed")
+                        reason = reason or f"relay closed the connection ({ws.close_code})"
                 except InvalidStatus as exc:
-                    status = exc.response.status_code
-                    hint = ": check the device token" if status == 401 else ""
-                    log.error("relay refused the connection (HTTP %s)%s", status, hint)
-                    if status == 401:
+                    code = exc.response.status_code
+                    hint = ": check the device token" if code == 401 else ""
+                    log.error("relay refused the connection (HTTP %s)%s", code, hint)
+                    reason = f"HTTP {code}{hint}"
+                    if code == 401:
                         backoff = max(backoff, 30.0)
                 except (OSError, ConnectionClosed, InvalidURI, TimeoutError) as exc:
                     log.warning("relay connection failed: %s", exc)
+                    reason = str(exc) or type(exc).__name__
+                except Replaced:
+                    raise
                 except Exception as exc:  # never let one bad connection end the agent
                     log.exception("unexpected relay error, reconnecting: %s", exc)
+                    reason = f"unexpected error: {exc}"
+                if stop.is_set():
+                    break
+                status(
+                    "refused" if reason and reason.startswith("HTTP 401") else "offline",
+                    reason=reason,
+                    retry_in_s=backoff,
+                )
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=backoff)
                 backoff = min(backoff * 2, 30.0)
     finally:
+        status("stopped")
         server.should_exit = True
         await asyncio.sleep(0.2)

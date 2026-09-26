@@ -38,6 +38,7 @@ build = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore:This process .* is multi-threaded, use of forkpty:DeprecationWarning"]
 

@@ -10,3 +10,6 @@ dist/
 relay/wrangler.deploy.jsonc
 agent/.build/
 agent/.venv-build/
+desktop/windows/bin/
+desktop/windows/obj/
+desktop/out/
