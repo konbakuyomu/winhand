@@ -6,9 +6,12 @@ namespace Winhand.Desktop;
 
 public static class Program
 {
-    private const string InstanceKey = "Winhand.Desktop";
+    /// <summary>Development previews set WINHAND_DESKTOP_INSTANCE to run next to the installed app
+    /// (own single-instance key and mutex, no installer bookkeeping).</summary>
+    private static readonly string Preview = Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE") is { Length: > 0 } name ? "." + name : "";
+    private static readonly string InstanceKey = "Winhand.Desktop" + Preview;
     /// <summary>Held while the app runs; the installer checks it to close the app before replacing files.</summary>
-    internal const string MutexName = @"Local\Winhand.Desktop";
+    internal static readonly string MutexName = @"Local\Winhand.Desktop" + Preview;
     private static Mutex? _running;
 
     /// <summary>Started by the logon Run entry: stay in the notification area, no window.</summary>
@@ -34,7 +37,8 @@ public static class Program
         }
 
         _running = new Mutex(initiallyOwned: false, MutexName);
-        InstallerRegistration.Sync();
+        if (Preview.Length == 0)
+            InstallerRegistration.Sync();
         main.Activated += (_, _) => App.ShowFromRedirect();
         Application.Start(_ =>
         {
