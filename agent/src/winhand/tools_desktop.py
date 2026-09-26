@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
+from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
@@ -28,6 +29,16 @@ SEND_LIMIT = 20 * 1024 * 1024
 
 def _facts(data: dict) -> TextContent:
     return TextContent(type="text", text=json.dumps(data, ensure_ascii=False))
+
+
+def media_result(facts: dict, *blocks) -> ToolResult:
+    """A result carrying pictures (or files): the facts as text and as structured content, then
+    the blocks. The structured copy matters: a client that cached an older definition of the
+    tool (with an output schema) rejects results without one."""
+    content = [_facts(facts)]
+    for block in blocks:
+        content.append(block.to_image_content() if isinstance(block, Image) else block)
+    return ToolResult(content=content, structured_content=facts)
 
 
 def _errors(fn, *args, **kwargs):
@@ -166,7 +177,7 @@ def register(mcp: FastMCP) -> None:
                 "mime": mime,
                 "sha256": hashlib.sha256(data).hexdigest(),
             }
-            return [_facts(facts), EmbeddedResource(type="resource", resource=resource)]
+            return media_result(facts, EmbeddedResource(type="resource", resource=resource))
 
         return await asyncio.to_thread(_errors, work)
 
@@ -224,7 +235,7 @@ def register(mcp: FastMCP) -> None:
 
         def work():
             data, fmt, facts = desktop.screenshot(window, monitor, region, max_side)
-            return [_facts(facts), Image(data=data, format=fmt)]
+            return media_result(facts, Image(data=data, format=fmt))
 
         return await asyncio.to_thread(_errors, work)
 
@@ -283,7 +294,7 @@ def register(mcp: FastMCP) -> None:
             if not screenshot_after:
                 return done
             data, fmt, facts = desktop.screenshot()
-            return [_facts({**done, "screenshot": facts}), Image(data=data, format=fmt)]
+            return media_result({**done, "screenshot": facts}, Image(data=data, format=fmt))
 
         return await asyncio.to_thread(_errors, work)
 
@@ -383,7 +394,7 @@ def register(mcp: FastMCP) -> None:
             got = desktop.clipboard_get()
             if got["kind"] == "image":
                 data, fmt = got.pop("image")
-                return [_facts(got), Image(data=data, format=fmt)]
+                return media_result(got, Image(data=data, format=fmt))
             return got
 
         return await asyncio.to_thread(_errors, work)

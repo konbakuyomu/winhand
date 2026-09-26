@@ -567,6 +567,9 @@ def screenshot(
     if image is None:
         image = ImageGrab.grab(bbox=(left, top, left + width, top + height), all_screens=True)
     data, fmt, facts = media.encode_image(image, max_side)
+    saved = _keep_original(image)
+    if saved:
+        facts["original_file"] = saved
     facts.update(target)
     facts.update({"screen_left": left, "screen_top": top})
     with _lock:
@@ -576,6 +579,26 @@ def screenshot(
         f"screen = ({left}, {top}) + pixel / {facts['scale']}"
     )
     return data, fmt, facts
+
+
+SHOTS_KEPT = 30
+
+
+def _keep_original(image) -> str | None:
+    """Save the full-resolution capture (the returned image may be scaled down) so details can
+    be read later with fs_read on a region or handed over with fs_send. Keeps the latest few."""
+    from .config import home
+
+    try:
+        folder = home() / "shots"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"shot-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.png"
+        image.save(path, "PNG", compress_level=1)
+        for old in sorted(folder.glob("shot-*.png"))[:-SHOTS_KEPT]:
+            old.unlink(missing_ok=True)
+        return str(path)
+    except OSError:
+        return None
 
 
 def to_screen(x: float, y: float, space: str = "screenshot") -> tuple[int, int]:

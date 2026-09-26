@@ -4,7 +4,6 @@ processes and the desktop."""
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
 from typing import Annotated, Any
@@ -22,6 +21,7 @@ from .secret_prompt import PromptUnavailable, ask_secret
 from .session import SessionManager, SessionSpec, TransportError, wait_for
 from .session.session import TRANSPORTS
 from .session.wait import MAX_WAIT_S
+from .tools_desktop import media_result
 
 GUIDE = """\
 winhand drives the Windows machine it runs on.
@@ -53,6 +53,8 @@ Quick rules
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
   follow it with job_status.
+- A tool named here but missing from your tool list (winhand was updated after the conversation
+  started): call(tool, arguments) reaches every current tool; help() lists them.
 - Local MCP servers (pyocd-debug, usb-camera ...) are not tools here: each one configured in the
   winhand app is its own MCP endpoint at <relay>/mcp/<name>, added as a separate connector.
 """
@@ -93,9 +95,31 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
     # ------------------------------------------------------------------ meta
 
     @mcp.tool
-    def help() -> str:
+    async def help() -> str:
         """How to use winhand well (read once at the start)."""
-        return GUIDE
+        names = sorted(t.name for t in await mcp.list_tools())
+        return (
+            GUIDE
+            + f"\nTools on this machine (winhand {__version__}): {', '.join(names)}\n"
+            + "If one of them is missing from your own tool list (your client loaded the list when the "
+            "conversation started, before winhand was updated), reach it with call(tool, arguments).\n"
+        )
+
+    @mcp.tool
+    async def call(
+        tool: Annotated[str, Field(description="Name of any winhand tool, e.g. screenshot")],
+        arguments: Annotated[dict | None, Field(description="Its arguments, as that tool takes them")] = None,
+    ):
+        """Call any winhand tool by name. For tools missing from your tool list: clients keep the
+        list they loaded when the conversation started, so tools added by a winhand update only
+        show up here (help() lists them all). Pictures come back as with the tool itself."""
+        if tool == "call":
+            return {"error": "call cannot call itself"}
+        try:
+            return await mcp.call_tool(tool, arguments or {})
+        except Exception as exc:  # unknown tool, bad arguments: tell the model, do not raise
+            names = sorted(t.name for t in await mcp.list_tools())
+            return {"error": f"{type(exc).__name__}: {exc}", "tools": names}
 
     @mcp.tool
     async def sys_info() -> dict:
@@ -462,6 +486,10 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         limit: Annotated[int, Field(description="Text: number of lines")] = 2000,
         pages: Annotated[str | None, Field(description="PDF/PowerPoint: pages such as '1-3,5'")] = None,
         render_pages: Annotated[bool, Field(description="PDF: also return the pages as images")] = False,
+        region: Annotated[
+            list[int] | None,
+            Field(description="Image: only [left, top, width, height] of it, in the file's pixels (zoom in)"),
+        ] = None,
     ):
         """Read any file. Text: numbered lines (UTF-8/GBK/BOM detected). Images: returned as a
         picture you can see. PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx): extracted text;
@@ -472,18 +500,18 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             return {"error": f"no such file: {path}"}
         try:
             if kind == "image":
-                data, fmt, facts = await asyncio.to_thread(media.read_image, full)
+                data, fmt, facts = await asyncio.to_thread(media.read_image, full, media.MAX_SIDE, region)
                 facts["path"] = path
-                return [_text(json.dumps(facts, ensure_ascii=False)), Image(data=data, format=fmt)]
+                return media_result(facts, Image(data=data, format=fmt))
             if kind == "document":
                 result = await asyncio.to_thread(media.read_document, full, pages, render_pages)
                 result["facts"]["path"] = path
                 # explicit content blocks: a list of plain strings would be merged into one JSON string
-                return [
-                    _text(json.dumps(result["facts"], ensure_ascii=False)),
+                return media_result(
+                    result["facts"],
                     _text(result["text"] or "(no text found)"),
                     *[Image(data=data, format=fmt) for data, fmt, _ in result["images"]],
-                ]
+                )
         except (media.MediaError, ImportError, OSError, ValueError) as exc:
             return {"error": str(exc)}
         if kind == "legacy_office":

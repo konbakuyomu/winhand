@@ -146,3 +146,50 @@ async def test_files_can_be_handed_over_and_written_as_bytes(client, tmp_path):
 async def test_desktop_tools_explain_they_need_windows(client):
     result = await client.call_tool("screenshot", {}, raise_on_error=False)
     assert "only available on Windows" in "\n".join(texts(result))
+
+
+async def test_image_results_carry_structured_content(client, tmp_path):
+    # A client that cached an older fs_read definition (with an output schema) rejects results
+    # without structured content, so pictures must bring their facts in both forms.
+    path = tmp_path / "small.png"
+    Image.new("RGB", (40, 30), "red").save(path)
+    result = await client.call_tool("fs_read", {"path": str(path)})
+    assert result.structured_content["width"] == 40 and images(result)
+
+
+def test_busy_images_stay_within_the_size_budget():
+    import random
+
+    from winhand import media
+
+    rng = random.Random(1)
+    noisy = Image.frombytes("RGB", (3000, 2000), bytes(rng.getrandbits(8) for _ in range(3000 * 2000 * 3)))
+    data, fmt, facts = media.encode_image(noisy)
+    assert len(data) <= media.IMAGE_BUDGET and facts["bytes"] == len(data) and fmt == "jpeg"
+    # coordinates stay right when the budget forced an extra scale-down
+    assert facts["scale"] == round(facts["width"] / 3000, 4)
+    flat = Image.new("RGB", (1200, 800), "white")
+    assert media.encode_image(flat)[1] == "png"  # screen-like content keeps sharp PNG
+
+
+async def test_zoom_into_part_of_an_image(client, tmp_path):
+    path = tmp_path / "big.png"
+    Image.new("RGB", (3000, 2000), "blue").save(path)
+    result = await client.call_tool("fs_read", {"path": str(path), "region": [100, 200, 800, 600]})
+    facts = result.structured_content
+    assert (facts["width"], facts["height"]) == (800, 600) and facts["region"] == [100, 200, 800, 600]
+    bad = await client.call_tool(
+        "fs_read", {"path": str(path), "region": [5000, 0, 10, 10]}, raise_on_error=False
+    )
+    assert "outside" in json.dumps(bad.structured_content)
+
+
+async def test_call_reaches_every_tool_and_help_lists_them(client, tmp_path):
+    path = tmp_path / "dot.png"
+    Image.new("RGB", (8, 8), "green").save(path)
+    via_call = await client.call_tool("call", {"tool": "fs_read", "arguments": {"path": str(path)}})
+    assert images(via_call) and via_call.structured_content["width"] == 8
+    unknown = await client.call_tool("call", {"tool": "nope"}, raise_on_error=False)
+    assert "screenshot" in unknown.structured_content["tools"]
+    guide = (await client.call_tool("help", {})).data
+    assert "screenshot" in guide and "call(tool, arguments)" in guide

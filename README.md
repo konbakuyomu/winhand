@@ -112,9 +112,11 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 一次性命令和进程 | `run` `proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_search` `fs_stat` |
 | 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
-| 文件交接 | `fs_send` `fs_write_bytes` `fs_pick`；`fs_read` 也能看图片、PDF、Word、PowerPoint、Excel |
+| 文件交接 | `fs_send` `fs_write_bytes` `fs_pick`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
-| 其他 | `help`：给 AI 的使用指南 |
+| 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用） |
+
+截图和图片按大小预算编码（PNG，过大时改用 JPEG 并逐步缩小），保证能通过客户端的结果大小限制；原始分辨率的截图同时保存在本机（结果里的 `original_file`），需要看清细节时用 `fs_read` 加 `region` 放大那一块。
 
 ## 本机的其他 MCP 服务
 

@@ -11,7 +11,11 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 MAX_SIDE = 1568  # longest edge vision models work with; larger images are only scaled down
-PNG_BUDGET = 900_000  # bytes: above this a screenshot is sent as JPEG instead
+# Encoded size budget for one image in a tool result. Claude Desktop rejects tool results over
+# 1 MB, and the image travels base64-encoded (x4/3) inside JSON, so stay well below: 600 KB
+# of image is about 800 KB on the wire. PNG keeps screen text sharp; when a busy screen does
+# not fit, JPEG quality steps down, then the image is scaled down.
+IMAGE_BUDGET = 600_000
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".ico"}
 DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".docm", ".pptx", ".pptm", ".xlsx", ".xlsm"}
@@ -36,9 +40,35 @@ def kind_of(path: str) -> str:
 # ------------------------------------------------------------------ images
 
 
-def encode_image(image, max_side: int = MAX_SIDE) -> tuple[bytes, str, dict]:
-    """(bytes, format, facts) for a PIL image, scaled to `max_side`. Screenshots and
-    diagrams stay PNG (sharp text) unless too large; photos become JPEG."""
+def _fit_budget(image, budget: int):
+    """Smallest acceptable encoding: PNG if it fits, else JPEG at falling quality, else smaller."""
+    from PIL import Image
+
+    alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
+    while True:
+        buffer = io.BytesIO()
+        if alpha:
+            image.convert("RGBA").save(buffer, "PNG", optimize=True)
+            if buffer.tell() <= budget or max(image.size) <= 256:
+                return image, buffer, "png"
+        else:
+            rgb = image.convert("RGB")
+            rgb.save(buffer, "PNG", optimize=True)
+            if buffer.tell() <= budget:
+                return image, buffer, "png"
+            for quality in (85, 75, 60):
+                buffer = io.BytesIO()
+                rgb.save(buffer, "JPEG", quality=quality, optimize=True)
+                if buffer.tell() <= budget or max(image.size) <= 256:
+                    return image, buffer, "jpeg"
+        image = image.resize(
+            (max(1, round(image.size[0] * 0.8)), max(1, round(image.size[1] * 0.8))), Image.Resampling.LANCZOS
+        )
+
+
+def encode_image(image, max_side: int = MAX_SIDE, budget: int = IMAGE_BUDGET) -> tuple[bytes, str, dict]:
+    """(bytes, format, facts) for a PIL image: at most `max_side` on the longest edge and at
+    most `budget` bytes encoded (see IMAGE_BUDGET)."""
     from PIL import Image, ImageOps
 
     if getattr(image, "n_frames", 1) > 1:
@@ -50,19 +80,7 @@ def encode_image(image, max_side: int = MAX_SIDE) -> tuple[bytes, str, dict]:
         image = image.resize(
             (max(1, round(original[0] * scale)), max(1, round(original[1] * scale))), Image.Resampling.LANCZOS
         )
-    alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
-    buffer = io.BytesIO()
-    if alpha:
-        image.convert("RGBA").save(buffer, "PNG", optimize=True)
-        fmt = "png"
-    else:
-        rgb = image.convert("RGB")
-        rgb.save(buffer, "PNG", optimize=True)
-        fmt = "png"
-        if buffer.tell() > PNG_BUDGET:
-            buffer = io.BytesIO()
-            rgb.save(buffer, "JPEG", quality=85, optimize=True)
-            fmt = "jpeg"
+    image, buffer, fmt = _fit_budget(image, budget)
     facts = {
         "width": image.size[0],
         "height": image.size[1],
@@ -75,16 +93,35 @@ def encode_image(image, max_side: int = MAX_SIDE) -> tuple[bytes, str, dict]:
     return buffer.getvalue(), fmt, facts
 
 
-def read_image(path: str, max_side: int = MAX_SIDE) -> tuple[bytes, str, dict]:
+def read_image(
+    path: str, max_side: int = MAX_SIDE, region: list[int] | None = None
+) -> tuple[bytes, str, dict]:
+    """An image file, optionally only `region` = [left, top, width, height] of it (in the file's
+    own pixels): a zoom into a full-resolution screenshot shows small text sharply."""
     from PIL import Image, UnidentifiedImageError
 
     try:
         with Image.open(path) as image:
+            if region is not None:
+                if len(region) != 4 or region[2] <= 0 or region[3] <= 0:
+                    raise MediaError("region is [left, top, width, height] in the image's pixels")
+                left, top, width, height = region
+                box = (
+                    max(0, left),
+                    max(0, top),
+                    min(image.width, left + width),
+                    min(image.height, top + height),
+                )
+                if box[0] >= box[2] or box[1] >= box[3]:
+                    raise MediaError(f"region is outside the {image.width}x{image.height} image")
+                image = image.crop(box)
             data, fmt, facts = encode_image(image, max_side)
     except (UnidentifiedImageError, OSError) as exc:
         raise MediaError(f"cannot open image {path}: {exc}") from exc
     facts["path"] = path
     facts["file_bytes"] = os.path.getsize(path)
+    if region is not None:
+        facts["region"] = region
     return data, fmt, facts
 
 
