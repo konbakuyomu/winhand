@@ -8,6 +8,7 @@ for a ConPTY console, a plain child process, a serial port or a TCP socket.
 from __future__ import annotations
 
 import codecs
+import ctypes
 import os
 import signal
 import socket
@@ -113,6 +114,10 @@ class _ConPty:
 
         from winpty import PTY, Backend  # type: ignore[import-not-found]
 
+        # A process started with CREATE_NEW_PROCESS_GROUP (as winhand may be, by a service
+        # manager or a pipe session of another winhand) ignores Ctrl+C, and so would every
+        # program it starts: Ctrl+C in the terminal would silently do nothing. Undo that.
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
         self._pty = PTY(cols, rows, backend=Backend.ConPTY)
         block = "\0".join(f"{k}={v}" for k, v in env.items()) + "\0"
         cmdline = (" " + sp.list2cmdline(argv[1:])) if len(argv) > 1 else None
