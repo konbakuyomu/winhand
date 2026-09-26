@@ -6,7 +6,7 @@ authors = [
     { name = "konbakuyomu" }
 ]
 license = { text = "MIT" }
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "fastmcp>=4.0.10",
     "psutil>=7.2.2",
@@ -33,10 +33,11 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = ["ignore:This process .* is multi-threaded, use of forkpty:DeprecationWarning"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
