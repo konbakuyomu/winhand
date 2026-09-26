@@ -255,7 +255,9 @@ class Session:
 
     @property
     def alive(self) -> bool:
-        return not self._ended.is_set() and self.transport.alive()
+        # Ended only once the reader has consumed everything: the process may be gone
+        # while the terminal still holds its last (often most important) output.
+        return not self._ended.is_set()
 
     def last_line(self) -> str:
         if self.screen is not None:

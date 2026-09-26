@@ -225,3 +225,12 @@ async def test_quiet_after_output_waits_for_slow_starters(manager):
     )
     assert r["hit"]["condition"] == "state", r["hit"]
     assert r["sessions"][s.id]["state"] == "awaiting_input"
+
+
+async def test_exited_only_after_all_output_is_read(manager):
+    code = "import sys\nfor i in range(20000): print(f'line {i} 中文')"
+    s = manager.create(SessionSpec(transport="pty", argv=[sys.executable, "-u", "-c", code]))
+    r = await wait_for(manager, [s.id], states=["exited"], timeout_s=60, since={s.id: 0})
+    assert r["hit"]["condition"] == "exited"
+    text = s.read(since=0, limit=10_000_000)["output"]
+    assert "line 19999 中文" in text, text[-200:]
