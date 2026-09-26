@@ -219,6 +219,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
                 [session.id],
                 states=["awaiting_input", "needs_user", "exited"],
                 quiet_ms=1500,
+                quiet_after_output=True,
                 timeout_s=startup_wait_s,
                 progress=progress,
                 since={session.id: 0},
@@ -276,6 +277,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             [id],
             states=["awaiting_input", "needs_user", "exited"],
             quiet_ms=1200,
+            quiet_after_output=True,
             timeout_s=wait_s,
             since={id: since},
             progress=await _progress(ctx),
@@ -419,7 +421,9 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             return {"id": id, "sent": False, "reason": "the user cancelled"}
         since = session.read_cursor
         await asyncio.to_thread(session.send, value, None, submit)
-        result = await wait_for(sessions, [id], quiet_ms=1500, timeout_s=10, since={id: since})
+        result = await wait_for(
+            sessions, [id], quiet_ms=1500, quiet_after_output=True, timeout_s=10, since={id: since}
+        )
         return {"id": id, "sent": True, **result["sessions"][id]}
 
     # ----------------------------------------------------------------- files

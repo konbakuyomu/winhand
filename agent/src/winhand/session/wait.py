@@ -39,6 +39,7 @@ async def wait_for(
     quiet_ms: int | None = None,
     screen_stable_ms: int | None = None,
     min_chars: int | None = None,
+    quiet_after_output: bool = False,
     timeout_s: float = 30.0,
     since: dict[str, int] | None = None,
     include_screen: bool = False,
@@ -72,6 +73,7 @@ async def wait_for(
                 min_chars,
                 starts[session.id],
                 scan_pos,
+                quiet_after_output,
             )
             if hit:
                 break
@@ -113,6 +115,7 @@ def _check(
     min_chars,
     start: int,
     scan_pos: dict[str, int],
+    quiet_after_output: bool = False,
 ) -> dict | None:
     sid = session.id
     if regexes:
@@ -150,7 +153,10 @@ def _check(
             "kind": st.get("kind"),
             "matched": st.get("matched"),
         }
-    if quiet_ms and st["idle_ms"] >= quiet_ms:
+    # "Quiet" after we just started/typed means "it answered and settled", so a
+    # slow starter that has printed nothing yet (common on Windows) keeps waiting.
+    produced = session.buffer.end > start
+    if quiet_ms and st["idle_ms"] >= quiet_ms and (produced or not quiet_after_output):
         return {"session": sid, "condition": "quiet", "idle_ms": st["idle_ms"]}
     if screen_stable_ms and session.screen is not None:
         stable = int((time.monotonic() - session.screen.last_change) * 1000)

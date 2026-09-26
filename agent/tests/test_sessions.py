@@ -152,8 +152,13 @@ async def test_pipe_transport_and_interrupt(manager, fake_spec):
     s.send("go", submit=True)
     s.send(keys=["Ctrl+C"])
     r = await wait_for(manager, [s.id], patterns=["interrupted"], timeout_s=10)
-    assert r["hit"]["condition"] in ("pattern", "exited")
-    assert "interrupted" in r["sessions"][s.id]["output"]
+    if sys.platform == "win32":
+        # console-less pipe children cannot get Ctrl+C on Windows: the tree is ended instead
+        assert r["hit"]["condition"] == "exited"
+        assert any(e["event"] == "interrupt" and "pty" in e["result"] for e in s.events)
+    else:
+        assert r["hit"]["condition"] in ("pattern", "exited")
+        assert "interrupted" in r["sessions"][s.id]["output"]
 
 
 async def test_serial_loopback(manager):
@@ -197,3 +202,21 @@ async def test_bad_command_and_missing_cwd_raise_clear_errors(manager):
         manager.create(SessionSpec(transport="pipe", argv=["definitely-not-a-program-xyz"]))
     with pytest.raises(TransportError, match="working directory"):
         manager.create(SessionSpec(transport="pty", argv=[sys.executable], cwd="/no/such/dir"))
+
+
+async def test_quiet_after_output_waits_for_slow_starters(manager):
+    code = "import time\ntime.sleep(2)\nprint('slow> ', end='', flush=True)\ninput()"
+    s = manager.create(
+        SessionSpec(transport="pty", argv=[sys.executable, "-u", "-c", code], prompts=[r"^slow> ?$"])
+    )
+    r = await wait_for(
+        manager,
+        [s.id],
+        states=["awaiting_input"],
+        quiet_ms=500,
+        quiet_after_output=True,
+        timeout_s=15,
+        since={s.id: 0},
+    )
+    assert r["hit"]["condition"] == "state", r["hit"]
+    assert r["sessions"][s.id]["state"] == "awaiting_input"

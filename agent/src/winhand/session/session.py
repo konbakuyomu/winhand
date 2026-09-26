@@ -217,7 +217,8 @@ class Session:
         for i, name in enumerate(keys or []):
             encoded = encode_key(name)
             if encoded == "\x03" and self.transport.kind == "pipe":
-                self.transport.interrupt()  # a pipe has no terminal to turn ^C into SIGINT
+                # a pipe has no terminal to turn ^C into SIGINT
+                self._event("interrupt", result=self.transport.interrupt())
                 self.last_input_cursor = self.buffer.end
             else:
                 self._write(encoded)

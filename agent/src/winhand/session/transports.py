@@ -47,8 +47,10 @@ class Transport(ABC):
     def resize(self, cols: int, rows: int) -> None:  # noqa: B027 - optional hook
         pass
 
-    def interrupt(self) -> None:
+    def interrupt(self) -> str:
+        """Deliver Ctrl+C; returns what actually happened."""
         self.write("\x03")
+        return "sent Ctrl+C"
 
     @abstractmethod
     def close(self, force: bool = False) -> None: ...
@@ -230,11 +232,21 @@ class PipeTransport(Transport):
     def exit_code(self) -> int | None:
         return self._proc.poll()
 
-    def interrupt(self) -> None:
+    def interrupt(self) -> str:
         if IS_WINDOWS:
-            self._proc.send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            os.killpg(self._proc.pid, signal.SIGINT)
+            # A console-less pipe child cannot receive console control events on
+            # Windows, so the only reliable "stop" is ending its process tree.
+            import psutil
+
+            try:
+                proc = psutil.Process(self._proc.pid)
+                for p in [*proc.children(recursive=True), proc]:
+                    p.kill()
+            except psutil.Error:
+                pass
+            return "terminated the process tree (Windows pipes cannot receive Ctrl+C; use a pty session to interrupt)"
+        os.killpg(self._proc.pid, signal.SIGINT)
+        return "sent SIGINT"
 
     def close(self, force: bool = False) -> None:
         if self.alive():
