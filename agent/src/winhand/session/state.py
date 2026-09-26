@@ -45,6 +45,10 @@ SECRET_PATTERNS = [
     r"(?i)\b(?:otp|one[- ]time (?:password|code)|verification code|2fa|two[- ]factor|authenticator|mfa)\b[^\n]{0,60}[:：]\s*$",
     r"(?i)\benter (?:the )?(?:pin|token|code)\b[^\n]{0,40}[:：]?\s*$",
     r"(?i)(?:密码|口令|验证码)[^\n]{0,20}[:：]\s*$",
+    # credentials for services: "xAI API key 必填:", "Enter your access token:", "Client secret:"
+    r"(?i)\b(?:api[ _-]?key|access[ _-]?(?:key|token)|secret(?:[ _-]?key)?|auth(?:entication)?[ _-]?token|"
+    r"bearer token|private[ _-]?key|client[ _-]?secret|app[ _-]?secret|token)\b[^\n]{0,40}[:：]\s*$",
+    r"(?:密钥|秘钥|私钥|令牌|访问凭证)[^\n]{0,20}[:：]\s*$",
 ]
 
 AUTH_PATTERNS = [
@@ -72,6 +76,39 @@ PAGER_PATTERNS = [
 ]
 
 _PROMPTISH = re.compile(r"[>$#%:?\]\)»❯]\s?$")
+# a selection list drawn by prompt libraries: "> [x] Option", "❯ Option", "› Option"
+_CHECK = r"(?:\[[ xX*✓✔]\]\s*|\([ xX*•]\)\s*|[◯◉○●]\s*)?"
+_MENU_CURSOR = re.compile(r"^(\s*(?:>|❯|›|➜|→|»)\s*)" + _CHECK + r"\S")
+_MENU_OPTION = re.compile(r"^(\s+)" + _CHECK + r"\S")
+
+
+def _menu_match(since_input: str) -> str | None:
+    """The cursor line of an arrow-key menu that ends the output, if there is one.
+
+    Menus draw the marker in front of the current option and indent the others so their
+    text lines up with it ("> [x] A" / "  [ ] B"); a quoted "> line" above a paragraph
+    does not line up that way."""
+    lines = [ln for ln in since_input.rstrip().split("\n")[-14:] if ln.strip()]
+    for index, line in enumerate(lines):
+        cursor = _MENU_CURSOR.match(line)
+        if not cursor:
+            continue
+        column = len(cursor.group(1))  # where the option text (or its checkbox) starts
+        block = [line]
+        for other in lines[index + 1 :]:  # options below the cursor, up to the end
+            option = _MENU_OPTION.match(other)
+            if not option or abs(len(option.group(1)) - column) > 1 or len(other.strip()) > 120:
+                break
+            block.append(other)
+        above = 0
+        for other in reversed(lines[:index]):  # options above the cursor
+            option = _MENU_OPTION.match(other)
+            if not option or abs(len(option.group(1)) - column) > 1 or len(other.strip()) > 120:
+                break
+            above += 1
+        if index + len(block) == len(lines) and len(block) + above >= 2:
+            return line.strip()
+    return None
 
 
 def compile_all(patterns: list[str]) -> list[re.Pattern[str]]:
@@ -244,6 +281,16 @@ def infer(
                 "kind": "prompt",
                 "matched": stripped_line,
                 "reason": "prompt is showing",
+            }
+        menu = _menu_match(since_input) if quiet and det.heuristic_prompts else None
+        if menu:
+            return {
+                **base,
+                "state": "awaiting_input",
+                "kind": "menu",
+                "matched": menu,
+                "reason": "a selection menu is showing: Up/Down move, Space toggles, Enter chooses "
+                "(session_screen shows the current selection)",
             }
         if quiet and det.heuristic_prompts and len(stripped_line) <= 160 and _PROMPTISH.search(line):
             return {

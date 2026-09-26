@@ -182,3 +182,38 @@ def test_build_env_fills_variables_a_thin_parent_left_out(monkeypatch):
     assert env["ProgramFiles(x86)"] == r"C:\Program Files (x86)"  # missing: filled in
     assert env["PATH"] == r"C:\mine" and "Path" not in env  # present (any case): never overridden
     assert env["HOME_ONLY"] == "x"
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["xAI API key 必填: ", "Enter your access token: ", "Context7 密钥:", "Client secret:", "Password: "],
+)
+def test_credential_prompts_need_the_user(line):
+    r = st.infer(alive=True, exit_code=None, last_line=line, since_input=line, idle_s=2.0, det=st.Detectors())
+    assert r["state"] == "needs_user" and r["kind"] == "secret"
+
+
+@pytest.mark.parametrize(
+    ("text", "is_menu"),
+    [
+        (
+            "选择 Tavily endpoint\n> 官方 Tavily (https://api.tavily.com)\n  Tavily Hikari / 号池\n  自定义 REST base",
+            True,
+        ),
+        ("选择 docs\n> [ ] Exa\n  [x] Context7", True),
+        ("pick\n  [ ] A\n> [x] B\n  [ ] C", True),
+        ("? Which?\n❯ Alpha\n  Beta\n  Gamma", True),
+        ("> quoted reply\nand then a normal paragraph\nfinal status: done", False),
+        ("PS C:\\> echo hi > out.txt\nhi", False),
+        ("> only one", False),
+    ],
+)
+def test_arrow_key_menus_are_awaiting_input(text, is_menu):
+    last = text.split("\n")[-1]
+    r = st.infer(alive=True, exit_code=None, last_line=last, since_input=text, idle_s=2.0, det=st.Detectors())
+    assert (r.get("kind") == "menu") == is_menu, r
+
+
+def test_urls_stop_at_cjk_punctuation():
+    text = "示例: https://api.openai.com/v1）以及 https://api.tavily.com；号池"
+    assert extract_urls(text) == ["https://api.openai.com/v1", "https://api.tavily.com"]

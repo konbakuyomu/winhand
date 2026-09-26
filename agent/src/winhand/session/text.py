@@ -18,7 +18,8 @@ _ANSI = re.compile(
     re.VERBOSE,
 )
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_URL = re.compile(r"https?://[^\s<>\"'`\x1b\])}]+")
+# stops at CJK text and full-width punctuation: "地址 https://x.com/v1）然后" -> https://x.com/v1
+_URL = re.compile(r"https?://[^\s<>\"'`\x1b\])}　-〿一-鿿＀-￯]+")
 
 
 def strip_ansi(text: str) -> str:
