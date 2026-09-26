@@ -224,12 +224,12 @@ def test_classic_controls_fill_in_what_ui_automation_misses():
 
     uia = [
         {"index": 0, "type": "Pane", "name": "Press me", "hwnd": 11, "patterns": []},
-        {"index": 1, "type": "Pane", "name": "", "hwnd": 12, "patterns": []},
+        {"index": 1, "type": "Pane", "name": "secret", "hwnd": 12, "patterns": []},
         {"index": 2, "type": "Button", "name": "OK", "hwnd": 0, "patterns": ["Invoke"]},
     ]
     native = [
         {"hwnd": 11, "type": "Button", "name": "Press me", "rect": [0, 0, 9, 9]},
-        {"hwnd": 12, "type": "Edit", "name": "", "value": "abc", "rect": [0, 0, 9, 9]},
+        {"hwnd": 12, "type": "Edit", "name": "", "value": "(hidden)", "rect": [0, 0, 9, 9]},
         {"hwnd": 13, "type": "CheckBox", "name": "Remember", "toggle": "Off", "rect": [0, 0, 9, 9]},
     ]
     merged = merge_controls(uia, native)
@@ -239,7 +239,12 @@ def test_classic_controls_fill_in_what_ui_automation_misses():
         ("Button", "OK", False),
         ("CheckBox", "Remember", True),
     ]
-    assert merged[1]["value"] == "abc" and merged[3]["index"] == 3 and "uia_index" not in merged[3]
+    assert (
+        merged[1]["value"] == "(hidden)"
+        and "secret" not in str(merged)
+        and merged[3]["index"] == 3
+        and "uia_index" not in merged[3]
+    )
     assert match_controls(merged, None, None, "edit") == [merged[1]]
     assert match_controls(merged, "press", None, None) == [merged[0]]
     assert match_controls(merged, "OK", None, None) == [merged[2]]

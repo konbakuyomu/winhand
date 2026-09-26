@@ -91,6 +91,10 @@ def merge_controls(uia: list[dict], native: list[dict]) -> list[dict]:
             item["native"] = True
             if item.get("type") in _VAGUE_TYPES or not item.get("patterns"):
                 item["type"] = classic["type"]
+            if classic["type"] in ("Edit", "ComboBox"):
+                # an edit box's window text is its content (a password, too), not its name
+                item["name"] = item["_expect"] = ""
+                item["value"] = classic.get("value", "")
             for key in ("name", "value", "toggle"):
                 if classic.get(key) and not item.get(key):
                     item[key] = classic[key]
