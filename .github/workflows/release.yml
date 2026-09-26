@@ -1,0 +1,59 @@
+name: release
+
+# Push a tag vX.Y.Z matching agent/pyproject.toml to publish a signed release. Installed apps
+# pick it up through Velopack (full package, plus a delta from the previous release).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Tag must match the project version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path agent/pyproject.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "tag $env:GITHUB_REF_NAME does not match version $version" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+      - name: Import the pinned signing identity
+        shell: pwsh
+        env:
+          WINHAND_WINDOWS_PFX_BASE64: ${{ secrets.WINHAND_WINDOWS_PFX_BASE64 }}
+          WINHAND_WINDOWS_PFX_PASSWORD: ${{ secrets.WINHAND_WINDOWS_PFX_PASSWORD }}
+        run: ./desktop/scripts/Import-WindowsSigningIdentity.ps1
+      - name: Previous release (for the delta package)
+        shell: pwsh
+        run: |
+          dotnet tool install -g vpk --version 1.2.0
+          vpk download github --repoUrl https://github.com/${{ github.repository }} --outputDir desktop/out/releases --token ${{ secrets.GITHUB_TOKEN }}
+          if ($LASTEXITCODE -ne 0) { Write-Host 'no previous release: full package only'; $global:LASTEXITCODE = 0 }
+      - name: Build, sign and verify
+        shell: pwsh
+        run: ./desktop/scripts/Build-Windows.ps1 -Installer -SigningMode Required
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem desktop/out/releases -File | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } |
+            Set-Content desktop/out/releases/SHA256SUMS.txt -Encoding utf8
+          Copy-Item desktop/out/signatures.json desktop/out/releases/signatures.json
+      - name: Publish to GitHub Releases
+        shell: pwsh
+        run: |
+          vpk upload github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }} `
+            --outputDir desktop/out/releases --publish --tag $env:GITHUB_REF_NAME --releaseName "winhand $env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'vpk upload failed' }
+          gh release upload $env:GITHUB_REF_NAME desktop/out/releases/SHA256SUMS.txt desktop/out/releases/signatures.json --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

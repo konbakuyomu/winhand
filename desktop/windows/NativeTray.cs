@@ -16,6 +16,7 @@ internal sealed class NativeTray : IDisposable
     private const uint TpmReturnCmd = 0x100, TpmRightButton = 0x2, TpmBottomAlign = 0x20;
     private const uint NotifyIconVersion4 = 4;
 
+    internal const string CallbackMessageName = "Winhand.TrayCallback";
     private readonly nint _windowHandle;
     private readonly uint _callbackMessage;
     private readonly uint _taskbarCreated;
@@ -32,7 +33,8 @@ internal sealed class NativeTray : IDisposable
         _windowHandle = windowHandle;
         _open = open;
         _menu = menu;
-        _callbackMessage = RegisterWindowMessage($"Winhand.Tray.{Guid.NewGuid():N}");
+        // A fixed name so desktop/scripts/Test-Tray.ps1 can simulate clicks; one app instance at a time.
+        _callbackMessage = RegisterWindowMessage(CallbackMessageName);
         _taskbarCreated = RegisterWindowMessage("TaskbarCreated");
         _windowProcedure = OnMessage;
         _previousWindowProcedure = SetWindowLongPtr(_windowHandle, GwlWndProc, Marshal.GetFunctionPointerForDelegate(_windowProcedure));

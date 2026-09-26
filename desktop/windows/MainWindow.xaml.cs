@@ -14,6 +14,7 @@ public sealed partial class MainWindow : Window
     private const int SwHide = 0, SwShow = 5, SwRestore = 9;
 
     private readonly BackendClient _backend = new();
+    private readonly AppUpdater _updater = new();
     private readonly NativeTray _tray;
     private readonly AppWindow _appWindow;
     private readonly nint _hwnd;
@@ -51,6 +52,7 @@ public sealed partial class MainWindow : Window
         _ticker.Start();
         RefreshStatus();
         DispatcherQueue.TryEnqueue(async () => await StartBackendAsync());
+        StartUpdateChecks();
     }
 
     // ------------------------------------------------------------------ backend
@@ -190,7 +192,8 @@ public sealed partial class MainWindow : Window
             _ => "ConnectionIdleStyle"
         });
         ConnectionToolTip.Content = $"{view.Label} · {view.Detail}";
-        _tray.Update(view.Online, $"winhand · {view.Label}\n{view.Detail}");
+        var update = _updater.ReadyToInstall ? $"\n新版本 {_updater.AvailableVersion} 已下载" : "";
+        _tray.Update(view.Online, $"winhand · {view.Label}\n{view.Detail}{update}");
         RenderOverviewStatus(view);
         RefreshRunningDurations();
     }
@@ -255,6 +258,9 @@ public sealed partial class MainWindow : Window
             new("重新连接", () => _ = ReconnectAsync()),
             new("断开连接", () => _ = DisconnectAsync(), Enabled: _backend.IsRunning && state is "online" or "connecting" or "offline"),
             null,
+            .. (_updater.ReadyToInstall
+                ? new NativeTray.MenuItem?[] { new($"安装新版本 {_updater.AvailableVersion} 并重启", () => _ = UpdateNowAsync()) }
+                : []),
             new("退出 winhand", () => _ = ExitAsync())
         ];
     }
@@ -268,6 +274,7 @@ public sealed partial class MainWindow : Window
         await _backend.StopAsync();
         _tray.Dispose();
         _allowClose = true;
+        _updater.ApplyOnExit(); // a downloaded update installs silently once we are gone
         Close();
         Application.Current.Exit();
     }
@@ -276,6 +283,7 @@ public sealed partial class MainWindow : Window
 
     private void ShowNotice(string title, string message, InfoBarSeverity severity)
     {
+        Notice.ActionButton = null;
         Notice.Title = title;
         Notice.Message = message;
         Notice.Severity = severity;

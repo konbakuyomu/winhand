@@ -76,6 +76,8 @@ public sealed partial class MainWindow
             }
         }));
 
+        page.Children.Add(BuildUpdateCard());
+
         _aboutText = Text("", "SecondaryCopyStyle");
         page.Children.Add(Card(new StackPanel { Spacing = 8, Children = { Text("关于", "SectionHeadingStyle"), _aboutText } }));
 
