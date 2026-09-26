@@ -216,8 +216,9 @@ async def _run(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = N
                             tunnel.cancel()
                             await ws.close()
                             break
-                        close = ws.close_rcvd
-                        if close is not None and close.code == REPLACED_CODE:
+                        if not tunnel.cancelled() and tunnel.exception() is not None:
+                            log.warning("relay connection lost: %s", tunnel.exception())
+                        if ws.close_code == REPLACED_CODE:
                             log.error(
                                 "another `winhand connect` (possibly on another machine) took over this relay; "
                                 "exiting instead of fighting over the connection"
@@ -232,6 +233,8 @@ async def _run(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = N
                         backoff = max(backoff, 30.0)
                 except (OSError, ConnectionClosed, InvalidURI, TimeoutError) as exc:
                     log.warning("relay connection failed: %s", exc)
+                except Exception as exc:  # never let one bad connection end the agent
+                    log.exception("unexpected relay error, reconnecting: %s", exc)
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=backoff)
                 backoff = min(backoff * 2, 30.0)

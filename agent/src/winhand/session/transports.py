@@ -119,6 +119,7 @@ class _ConPty:
         if not self._pty.spawn(argv[0], cmdline=cmdline, cwd=cwd or os.getcwd(), env=block):
             raise TransportError(f"ConPTY refused to start {argv[0]!r}")
         self.pid = self._pty.pid
+        self._idle_polls = 0
 
     def read(self) -> str | None:
         # A blocking read holds the GIL inside pywinpty, freezing every other thread
@@ -133,7 +134,11 @@ class _ConPty:
         if not data:
             if self._pty.iseof():
                 return None
-            time.sleep(0.01)
+            # back off gently: ~1 ms while output is flowing, up to 10 ms when idle
+            self._idle_polls = min(self._idle_polls + 1, 10)
+            time.sleep(0.001 * self._idle_polls)
+        else:
+            self._idle_polls = 0
         return data
 
     def write(self, data: str) -> None:
