@@ -22,7 +22,7 @@
 | `reconnect` | — | `{status}` |
 | `disconnect` | — | `{status}`，状态变为 `paused` |
 | `stop_session` | `id`，`force?` | 会话停止结果 |
-| `mcp_list` | — | 本机 MCP 服务状态 + `candidates[]`（其他客户端里配置、可导入的服务：`name`、`source`、`summary`、`already`） |
+| `mcp_list` | — | 本机 MCP 服务状态 + `candidates[]`（其他客户端里配置、可导入的服务：`name`、`source`、`summary`、`already`，`internal` 表示该客户端自带的内部组件，默认不导入） |
 | `mcp_save` | `entry{name,command,args[],env{},cwd,url,headers{},enabled,description,startup_timeout_s,idle_stop_minutes}`，`original_name?`（修改时） | 保存到 config.toml，返回本机 MCP 服务状态 |
 | `mcp_delete` | `name` | 同上 |
 | `mcp_set_enabled` | `name`，`enabled` | 同上；停用会停止正在运行的进程 |
