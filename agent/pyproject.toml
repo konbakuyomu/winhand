@@ -2,7 +2,6 @@
 name = "winhand"
 version = "0.1.0"
 description = "Take over a Windows machine from an AI: generic interactive session engine, files, processes and a local MCP gateway"
-readme = "README.md"
 authors = [
     { name = "konbakuyomu" }
 ]
