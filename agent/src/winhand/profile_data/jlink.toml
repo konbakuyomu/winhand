@@ -1,0 +1,6 @@
+description = "SEGGER J-Link Commander."
+transport = "pty"
+command = ["JLink"]
+prompts = ['^J-Link> ?$']
+exit_command = "exit"
+notes = "On Windows the executable is JLink.exe (found via PATH); on Linux/macOS pass command override ['JLinkExe']. Typical args: ['-device','STM32F407VG','-if','SWD','-speed','4000','-autoconnect','1']."

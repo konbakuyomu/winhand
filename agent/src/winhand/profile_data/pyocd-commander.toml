@@ -1,0 +1,7 @@
+description = "pyOCD commander REPL (halt, reg, read32, write32, reset ...)."
+transport = "pty"
+command = ["pyocd", "commander"]
+prompts = ['^pyocd> ?$']
+exit_command = "exit"
+blocked_after_s = 600
+notes = "Add args like ['-t','hc32f460petb']. Only one tool may own the probe at a time."

@@ -1,0 +1,5 @@
+description = "Python REPL."
+transport = "pty"
+command = ["python", "-q", "-i"]
+prompts = ['^>>> ?$', '^\.\.\. ?$']
+exit_command = "exit()"

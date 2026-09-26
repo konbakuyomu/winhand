@@ -1,0 +1,14 @@
+description = "Kconfig menuconfig (RT-Thread `scons --menuconfig`, Linux `make menuconfig`, ESP-IDF `idf.py menuconfig`)."
+transport = "pty"
+command = ["scons", "--menuconfig"]
+screen = true
+cols = 120
+rows = 40
+heuristic_prompts = false
+blocked_after_s = 86400
+notes = """
+Full-screen UI: read it with session_screen (look at `highlighted` for the selected row).
+Move with keys Up/Down/PageUp/PageDown, Enter to open a submenu, Space or Y/N to toggle,
+Esc Esc to go back; on exit answer the save dialog. After each key batch use
+session_wait(screen_stable_ms=300) before reading the screen. Override command for other build systems.
+"""

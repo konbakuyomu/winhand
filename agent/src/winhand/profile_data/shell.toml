@@ -1,0 +1,5 @@
+description = "The machine's interactive shell (pwsh > powershell > cmd on Windows, $SHELL elsewhere), UTF-8 enabled."
+transport = "pty"
+command = []
+exit_command = "exit"
+notes = "Prefer the one-shot `run` tool for simple commands; use this for anything interactive or long-running."

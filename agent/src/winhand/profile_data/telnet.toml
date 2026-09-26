@@ -1,0 +1,7 @@
+description = "Raw TCP/telnet console (OpenOCD 4444, pyOCD telnet/RTT ports, QEMU monitor, network devices)."
+transport = "tcp"
+host = "{host}"
+tcp_port = "{tcp_port}"
+blocked_after_s = 86400
+vars = { host = "localhost", tcp_port = "" }
+prompts = ['^> ?$', '^\(qemu\) ?$']

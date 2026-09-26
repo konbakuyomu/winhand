@@ -1,0 +1,17 @@
+description = "GDB for embedded targets (arm-none-eabi-gdb). Pass the ELF/AXF as args."
+transport = "pty"
+command = ["arm-none-eabi-gdb", "-q", "-nx"]
+prompts = ['^\((?:gdb|gdb-multiarch)\) ?$']
+init = ["set pagination off", "set confirm off", "set width 0"]
+exit_command = "quit"
+blocked_after_s = 600
+autoreply = [
+  { pattern = '--Type <RET> for more, q to quit, c to continue without paging--', send = "c" },
+  { pattern = 'Quit anyway\? \(y or n\) *$', send = "y" },
+]
+notes = """
+Connect with `target extended-remote localhost:3333` (pyocd/openocd gdbserver).
+After `continue` the target runs and gdb prints nothing until a breakpoint hits:
+the session shows `idle` - that is normal. Wait with session_wait(patterns=['^\\(gdb\\) ?$'], ...)
+or wait on several sessions at once (e.g. gdb + serial console). Interrupt with keys=['Ctrl+C'].
+"""

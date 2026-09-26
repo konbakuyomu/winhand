@@ -1,0 +1,6 @@
+description = "OpenOCD server (gdb on 3333, telnet commands on 4444)."
+transport = "pty"
+command = ["openocd"]
+ready = { patterns = ['Listening on port 3333', 'Listening on port \d+ for gdb connections'], timeout_s = 30 }
+blocked_after_s = 86400
+notes = "Pass config as args, e.g. ['-f','interface/cmsis-dap.cfg','-f','target/stm32f4x.cfg']. Send commands via the `telnet` profile (host=localhost, tcp_port=4444)."

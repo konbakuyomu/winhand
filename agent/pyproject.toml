@@ -1,0 +1,44 @@
+[project]
+name = "winhand"
+version = "0.1.0"
+description = "Take over a Windows machine from an AI: generic interactive session engine, files, processes and a local MCP gateway"
+readme = "README.md"
+authors = [
+    { name = "konbakuyomu" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=4.0.10",
+    "psutil>=7.2.2",
+    "ptyprocess>=0.7.0 ; sys_platform != 'win32'",
+    "pyserial>=3.5",
+    "pyte>=0.8.2",
+    "pywinpty>=3.0.5 ; sys_platform == 'win32'",
+]
+
+[project.scripts]
+winhand = "winhand.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]

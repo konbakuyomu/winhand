@@ -1,0 +1,7 @@
+description = "Generic serial console (any baud rate; pyserial URLs like socket:// and rfc2217:// also work)."
+transport = "serial"
+port = "{port}"
+baudrate = 115200
+blocked_after_s = 86400
+vars = { port = "" }
+notes = "vars={'port':'COM3'}; override baudrate/line_ending as needed. Add prompts=[...] so the session can tell when the device is ready."

@@ -1,0 +1,9 @@
+description = "RT-Thread msh console over a serial port."
+transport = "serial"
+port = "{port}"
+baudrate = 115200
+line_ending = "\r"
+prompts = ['^msh ?[^\n>]*> ?$']
+blocked_after_s = 86400
+vars = { port = "" }
+notes = "vars={'port':'COM5'}. Send `help`, `ps`, `free`, `list_thread` ... Output from the firmware (logs, asserts) streams in between commands."

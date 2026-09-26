@@ -1,0 +1,11 @@
+description = "pyOCD GDB server; stays up and serves gdb on port 3333 (semihosting/RTT output appears here)."
+transport = "pty"
+command = ["pyocd", "gdbserver", "--persist"]
+blocked_after_s = 86400
+ready = { patterns = ['GDB server listening on port (\d+)', 'GDB server started on port (\d+)'], timeout_s = 30 }
+exit_command = ""
+notes = """
+Add target/probe options as args, e.g. args=['-t','hc32f460petb','-u','<probe uid>','--elf','fw.axf'].
+Only one tool may own a probe at a time: close EIDE/Keil/other pyOCD sessions first.
+Pair it with the `gdb` profile, or with a `tcp` session on the telnet/RTT port if enabled.
+"""
