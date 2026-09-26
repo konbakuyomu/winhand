@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -203,3 +205,24 @@ async def test_mcp_tools_end_to_end(tmp_path):
             await c.call_tool("fs_edit", {"path": str(tmp_path / "missing.txt"), "old": "a", "new": "b"})
         ).structured_content
         assert "no such file" in edited["error"]
+
+
+def test_connect_is_single_instance(tmp_path):
+    from winhand.relay_client import AlreadyRunning, single_instance
+
+    lock = tmp_path / "connect.lock"
+    with single_instance(lock):
+        assert lock.read_text() == str(os.getpid())
+    assert not lock.exists()
+    # a lock left by a dead process is taken over
+    lock.write_text("999999")
+    with single_instance(lock):
+        pass
+    # a live winhand-looking process blocks a second instance
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "winhand"])
+    try:
+        lock.write_text(str(child.pid))
+        with pytest.raises(AlreadyRunning), single_instance(lock):
+            pass
+    finally:
+        child.kill()

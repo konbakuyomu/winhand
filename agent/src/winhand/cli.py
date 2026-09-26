@@ -68,7 +68,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.save:
             cfg.relay_url, cfg.device_token = url, token
             print(f"saved to {config.save(cfg)}")
-        asyncio.run(run_forever(url, token))
+        from .relay_client import AlreadyRunning
+
+        try:
+            asyncio.run(run_forever(url, token))
+        except AlreadyRunning as exc:
+            print(f"winhand: {exc}", file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            pass
         return 0
     if cmd == "import-codex":
         from pathlib import Path

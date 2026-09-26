@@ -13,9 +13,11 @@ import base64
 import contextlib
 import json
 import logging
+import os
 import platform
 import socket
 import time
+from pathlib import Path
 
 import httpx
 import uvicorn
@@ -27,6 +29,7 @@ from . import __version__
 log = logging.getLogger("winhand.relay")
 
 CHUNK_BYTES = 256 * 1024
+REPLACED_CODE = 4000  # relay closes the old socket with this when a newer agent connects
 PING_EVERY_S = 20
 DEAD_AFTER_S = 70
 _DROP_RESPONSE = {"connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding"}
@@ -138,9 +141,48 @@ def hello_frame() -> dict:
     }
 
 
+class AlreadyRunning(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def single_instance(lock_path: Path):
+    """Refuse to start a second `winhand connect` on this machine: two agents would
+    keep replacing each other at the relay and break every in-flight request."""
+    import psutil
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.exists():
+        try:
+            pid = int(lock_path.read_text().strip() or 0)
+        except ValueError:
+            pid = 0
+        if pid and pid != os.getpid() and psutil.pid_exists(pid):
+            try:
+                alive = "winhand" in " ".join(psutil.Process(pid).cmdline()).lower()
+            except psutil.Error:
+                alive = False
+            if alive:
+                raise AlreadyRunning(f"`winhand connect` is already running (pid {pid}); stop it first")
+    lock_path.write_text(str(os.getpid()))
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            if lock_path.read_text().strip() == str(os.getpid()):
+                lock_path.unlink()
+
+
 async def run_forever(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = None) -> None:
     """Keep a tunnel to the relay up until `stop` is set (or forever)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    from .config import home
+
+    with single_instance(home() / "connect.lock"):
+        await _run(url, token, mcp=mcp, stop=stop)
+
+
+async def _run(url: str, token: str, *, mcp=None, stop: asyncio.Event | None = None) -> None:
     if mcp is None:
         from .server import build_server
 
@@ -174,6 +216,13 @@ async def run_forever(url: str, token: str, *, mcp=None, stop: asyncio.Event | N
                             tunnel.cancel()
                             await ws.close()
                             break
+                        close = ws.close_rcvd
+                        if close is not None and close.code == REPLACED_CODE:
+                            log.error(
+                                "another `winhand connect` (possibly on another machine) took over this relay; "
+                                "exiting instead of fighting over the connection"
+                            )
+                            raise SystemExit(3)
                         log.info("relay connection closed")
                 except InvalidStatus as exc:
                     status = exc.response.status_code
