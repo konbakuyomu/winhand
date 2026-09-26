@@ -48,9 +48,9 @@ public sealed partial class MainWindow
         _activityPath = Text("", "DataCopyStyle");
         page.Children.Add(Section("本机数据", "配置、日志和活动记录都只保存在这台电脑上。本机 MCP 服务在“MCP 服务”页管理，也保存在配置文件里。",
             RowsPanel(
-                SettingRow("配置文件", _configPath, ActionButton("打开", () => OpenPath(Json.Str(_paths, "config")))),
-                SettingRow("日志", _logsPath, ActionButton("打开", () => OpenPath(Json.Str(_paths, "logs")))),
-                SettingRow("活动记录", _activityPath, ActionButton("打开", () => OpenPath(Json.Str(_paths, "activity")))))));
+                SettingRow("配置文件", _configPath, Named(ActionButton("打开", () => OpenPath(Json.Str(_paths, "config"))), "打开配置文件")),
+                SettingRow("日志", _logsPath, Named(ActionButton("打开", () => OpenPath(Json.Str(_paths, "logs"))), "打开日志目录")),
+                SettingRow("活动记录", _activityPath, Named(ActionButton("打开", () => OpenPath(Json.Str(_paths, "activity"))), "打开活动记录目录")))));
 
         _aboutText = Text("", "SecondaryCopyStyle");
         _aboutText.IsTextSelectionEnabled = true;

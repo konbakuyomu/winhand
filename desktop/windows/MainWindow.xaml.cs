@@ -312,7 +312,10 @@ public sealed partial class MainWindow : Window
     {
         var button = new Button { Content = text };
         if (accent)
+        {
             button.Style = Resource<Style>("AccentButtonStyle");
+            button.MinHeight = 36; // the keyed accent style skips the app-wide 36 px button height
+        }
         button.Click += (_, _) => onClick();
         return button;
     }
