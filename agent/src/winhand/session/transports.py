@@ -24,6 +24,13 @@ class TransportError(RuntimeError):
     pass
 
 
+def _default_sigint() -> None:
+    """Runs in the child before exec (POSIX). If winhand was started with SIGINT
+    ignored (background jobs of non-interactive shells, CI runners, some service
+    managers) children inherit that and Ctrl+C would silently do nothing."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
 class Transport(ABC):
     kind = "abstract"
     #: whether a virtual screen makes sense by default
@@ -105,7 +112,9 @@ class PtyTransport(Transport):
             else:
                 from ptyprocess import PtyProcess
 
-                self._proc = PtyProcess.spawn(argv, cwd=cwd, env=env, dimensions=(rows, cols))
+                self._proc = PtyProcess.spawn(
+                    argv, cwd=cwd, env=env, dimensions=(rows, cols), preexec_fn=_default_sigint
+                )
         except Exception as exc:  # FileNotFoundError, OSError, winpty errors
             raise TransportError(f"cannot start {argv[0]!r}: {exc}") from exc
 
@@ -186,6 +195,7 @@ class PipeTransport(Transport):
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
         else:
             kwargs["start_new_session"] = True
+            kwargs["preexec_fn"] = _default_sigint
         try:
             self._proc = subprocess.Popen(
                 [exe, *argv[1:]],

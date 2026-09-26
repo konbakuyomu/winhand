@@ -22,7 +22,6 @@ from winhand import fs, proc
 from winhand.session import SessionSpec, wait_for
 
 pytestmark = [
-    pytest.mark.asyncio,
     pytest.mark.skipif(sys.platform != "win32", reason="Windows-only scenarios"),
 ]
 
@@ -116,9 +115,23 @@ async def test_gbk_program_output_through_pipe(manager):
 
 
 def test_run_decodes_legacy_codepage_output():
-    code = "import sys; sys.stdout.buffer.write('旧代码页输出'.encode('gbk'))"
+    """Programs that ignore UTF-8 print in the machine's ANSI code page (cp936 on Chinese
+    Windows, cp1252 on English ones); `run` must still return readable text."""
+    import locale
+
+    enc = locale.getpreferredencoding(False)
+    text = next(t for t in ("旧代码页输出", "Ünïcödé façade", "legacy") if _encodable(t, enc))
+    code = f"import sys; sys.stdout.buffer.write({text!r}.encode({enc!r}))"
     res = proc.run(sys.executable, ["-c", code])
-    assert res["stdout"] == "旧代码页输出"
+    assert res["stdout"] == text, (enc, res)
+
+
+def _encodable(text: str, enc: str) -> bool:
+    try:
+        text.encode(enc)
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
 
 
 # --------------------------------------------------- quoting & wrappers

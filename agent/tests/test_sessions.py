@@ -8,8 +8,6 @@ import pytest
 
 from winhand.session import SessionSpec, TransportError, wait_for
 
-pytestmark = pytest.mark.asyncio
-
 
 async def ready(manager, session):
     result = await wait_for(manager, [session.id], timeout_s=15)
@@ -157,8 +155,15 @@ async def test_pipe_transport_and_interrupt(manager, fake_spec):
         assert r["hit"]["condition"] == "exited"
         assert any(e["event"] == "interrupt" and "pty" in e["result"] for e in s.events)
     else:
-        assert r["hit"]["condition"] in ("pattern", "exited")
-        assert "interrupted" in r["sessions"][s.id]["output"]
+        diag = {
+            "hit": r.get("hit"),
+            "snapshot": r["sessions"][s.id],
+            "events": s.events,
+            "alive": s.alive,
+            "exit": s.transport.exit_code(),
+        }
+        assert r.get("hit", {}).get("condition") in ("pattern", "exited"), diag
+        assert "interrupted" in r["sessions"][s.id]["output"], diag
 
 
 async def test_serial_loopback(manager):
