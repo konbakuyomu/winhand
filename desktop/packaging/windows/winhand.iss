@@ -6,7 +6,7 @@
 ; "Installed apps", uninstall; and it migrates a previous Velopack Setup install.
 ;
 ; Built by desktop/scripts/Build-Windows.ps1:
-;   ISCC /DAppVersion=0.3.1 /DPayloadDir=... /DOutputDir=... [/DSigned "/Swinhandsign=..."] winhand.iss
+;   ISCC /DAppVersion=0.3.2 /DPayloadDir=... /DOutputDir=... [/DSigned "/Swinhandsign=..."] winhand.iss
 
 #ifndef AppVersion
   #error AppVersion is required
