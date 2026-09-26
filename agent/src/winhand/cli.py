@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
+from pathlib import Path
 
 from . import __version__
 
@@ -24,6 +26,18 @@ def _force_utf8_stdio() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
         except (AttributeError, ValueError):
             pass
+
+
+def _start_in_home() -> None:
+    """Serve from the user's home, not wherever we were launched (e.g. the app's install folder).
+
+    Every command, session and job started without a cwd inherits this directory; left inside the
+    install folder, one long-running shell would keep the updater from replacing it.
+    """
+    try:
+        os.chdir(Path.home())
+    except OSError:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     dialog.add_argument("--check", action="store_true", help="only verify the GUI toolkit is present")
     args = parser.parse_args(argv)
     cmd = args.cmd or "stdio"
+    if cmd in ("stdio", "http", "connect", "desktop-backend"):
+        _start_in_home()
 
     if cmd == "stdio":
         from .server import build_server

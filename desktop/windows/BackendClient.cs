@@ -37,6 +37,9 @@ internal sealed class BackendClient : IAsyncDisposable
         var startInfo = new ProcessStartInfo
         {
             FileName = executable,
+            // not the install folder: whatever Claude starts inherits this, and a process
+            // sitting in the install folder would stop updates from replacing it
+            WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,

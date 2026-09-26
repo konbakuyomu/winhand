@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -248,3 +249,15 @@ def test_classic_controls_fill_in_what_ui_automation_misses():
     assert match_controls(merged, None, None, "edit") == [merged[1]]
     assert match_controls(merged, "press", None, None) == [merged[0]]
     assert match_controls(merged, "OK", None, None) == [merged[2]]
+
+
+def test_servers_start_in_home_not_the_install_folder(tmp_path, monkeypatch):
+    # a shell Claude leaves open inherits the server's cwd; in the install folder it blocks updates
+    from winhand import cli
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    monkeypatch.chdir(tmp_path)
+    cli._start_in_home()
+    assert os.getcwd() == str(home)
