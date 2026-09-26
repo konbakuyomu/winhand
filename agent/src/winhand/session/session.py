@@ -125,7 +125,7 @@ class Session:
         kind = spec.transport
         if kind in ("pty", "pipe"):
             if not spec.argv:
-                spec.argv = winenv.default_shell()
+                spec.argv = winenv.default_shell(spec.cwd)
             env = winenv.build_env(spec.env, terminal=kind == "pty")
             cwd = os.path.expanduser(spec.cwd) if spec.cwd else None
             if cwd and not os.path.isdir(cwd):
@@ -157,9 +157,28 @@ class Session:
             if chunk:
                 self._on_output(chunk)
             elif not self.transport.alive():
+                # ConPTY keeps buffered output after the process exits; stopping at the
+                # first empty read would drop the tail (often the error you need).
+                self._drain()
                 break
         self._ended.set()
         self._event("ended", exit_code=self.transport.exit_code())
+
+    def _drain(self, quiet_s: float = 0.5, cap_s: float = 10.0) -> None:
+        deadline = time.monotonic() + cap_s
+        last_data = time.monotonic()
+        while time.monotonic() < deadline and time.monotonic() - last_data < quiet_s:
+            try:
+                chunk = self.transport.read()
+            except Exception:
+                return
+            if chunk is None:
+                return
+            if chunk:
+                self._on_output(chunk)
+                last_data = time.monotonic()
+            else:
+                time.sleep(0.02)
 
     def _on_output(self, chunk: str) -> None:
         self.buffer.append(chunk)

@@ -62,19 +62,36 @@ def resolve_executable(name: str, env: dict[str, str] | None = None) -> str:
     return shutil.which(name, path=path) or name
 
 
-def default_shell() -> list[str]:
+def default_shell(cwd: str | None = None) -> list[str]:
     """argv for an interactive shell that prints UTF-8."""
     if IS_WINDOWS:
         for candidate in ("pwsh", "powershell"):
             exe = shutil.which(candidate)
             if exe:
-                # Runs after the user's profile: keep its environment, but replace fancy
-                # multi-line prompts (oh-my-posh, starship) with one a program can recognise.
-                return [exe, "-NoLogo", "-NoExit", "-Command", f"{_PWSH_UTF8}; {_PWSH_PLAIN_PROMPT}"]
+                return powershell_interactive(exe, cwd)
         comspec = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
         return [comspec, "/K", "chcp 65001>nul"]
     shell = os.environ.get("SHELL") or shutil.which("bash") or "/bin/sh"
     return [shell]
+
+
+def powershell_interactive(exe: str, cwd: str | None = None, *, load_profile: bool = True) -> list[str]:
+    """Interactive PowerShell tuned for being driven by a program.
+
+    Runs after the user's profile, so its environment (PATH, mise, conda ...) is kept, then:
+    - replaces fancy multi-line prompts (oh-my-posh, starship) with `PS <path>> `;
+    - unloads PSReadLine, whose per-keystroke redraws and predictive "ghost text"
+      turn every echoed command into noise;
+    - re-enters `cwd` literally: Windows PowerShell 5.1 treats `[` `]` in the start
+      directory as wildcards and silently starts in its own folder instead.
+    """
+    init = [_PWSH_UTF8, "Remove-Module PSReadLine -ErrorAction SilentlyContinue", _PWSH_PLAIN_PROMPT]
+    if cwd:
+        init.append("Set-Location -LiteralPath '" + os.path.abspath(cwd).replace("'", "''") + "'")
+    argv = [exe, "-NoLogo"]
+    if not load_profile:
+        argv.append("-NoProfile")
+    return [*argv, "-NoExit", "-Command", "; ".join(init)]
 
 
 def shell_command(command: str) -> list[str]:

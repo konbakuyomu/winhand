@@ -64,14 +64,7 @@ async def test_shell_prompt_unicode_and_cwd(manager, weird_dir, shell):
     if shell == "cmd":
         argv = [exe, "/K", "chcp 65001>nul"]
     else:
-        argv = [
-            exe,
-            "-NoLogo",
-            "-NoProfile",
-            "-NoExit",
-            "-Command",
-            f"{winenv._PWSH_UTF8}; {winenv._PWSH_PLAIN_PROMPT}",
-        ]
+        argv = winenv.powershell_interactive(exe, str(weird_dir), load_profile=False)
     s = manager.create(SessionSpec(transport="pty", argv=argv, cwd=str(weird_dir)))
     r = await settle(manager, s)
     assert r["sessions"][s.id]["state"] == "awaiting_input", r["sessions"][s.id]
