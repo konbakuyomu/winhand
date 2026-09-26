@@ -364,7 +364,8 @@ class Backend:
     async def m_mcp_set_enabled(self, params: dict) -> dict:
         entry = self._entry(str(params.get("name")))
         self.cfg.servers = [
-            dataclasses.replace(e, enabled=bool(params.get("enabled"))) if e is entry else e for e in self.cfg.servers
+            dataclasses.replace(e, enabled=bool(params.get("enabled"))) if e is entry else e
+            for e in self.cfg.servers
         ]
         await self._apply_servers()
         return self.mcp_state()
