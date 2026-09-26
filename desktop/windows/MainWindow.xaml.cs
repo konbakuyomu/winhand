@@ -192,7 +192,8 @@ public sealed partial class MainWindow : Window
             _ => "ConnectionIdleStyle"
         });
         ConnectionToolTip.Content = $"{view.Label} · {view.Detail}";
-        var update = _updater.ReadyToInstall ? $"\n新版本 {_updater.AvailableVersion} 已下载" : "";
+        var update = _updater.Ready ? $"\n新版本 {_updater.LatestVersion} 已就绪"
+            : _updater.Available ? $"\n发现新版本 {_updater.LatestVersion}" : "";
         _tray.Update(view.Online, $"winhand · {view.Label}\n{view.Detail}{update}");
         RenderOverviewStatus(view);
         RefreshRunningDurations();
@@ -258,9 +259,11 @@ public sealed partial class MainWindow : Window
             new("重新连接", () => _ = ReconnectAsync()),
             new("断开连接", () => _ = DisconnectAsync(), Enabled: _backend.IsRunning && state is "online" or "connecting" or "offline"),
             null,
-            .. (_updater.ReadyToInstall
-                ? new NativeTray.MenuItem?[] { new($"安装新版本 {_updater.AvailableVersion} 并重启", () => _ = UpdateNowAsync()) }
-                : []),
+            .. (_updater.Ready
+                ? new NativeTray.MenuItem?[] { new($"重启并更新到 {_updater.LatestVersion}", () => _ = InstallUpdateAsync()) }
+                : _updater.Available
+                    ? new NativeTray.MenuItem?[] { new($"查看新版本 {_updater.LatestVersion}…", () => { ShowMainWindow(); ShowPage("settings"); }) }
+                    : []),
             new("退出 winhand", () => _ = ExitAsync())
         ];
     }

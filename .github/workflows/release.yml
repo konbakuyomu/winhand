@@ -15,6 +15,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # release notes are the commits since the previous tag
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.13"
@@ -39,9 +41,18 @@ jobs:
           dotnet tool install -g vpk --version 1.2.0
           vpk download github --repoUrl https://github.com/${{ github.repository }} --outputDir desktop/out/releases --token ${{ secrets.GITHUB_TOKEN }}
           if ($LASTEXITCODE -ne 0) { Write-Host 'no previous release: full package only'; $global:LASTEXITCODE = 0 }
+      - name: Release notes
+        shell: pwsh
+        run: |
+          $previous = git describe --tags --abbrev=0 "$env:GITHUB_REF_NAME^" 2>$null
+          $range = if ($previous) { "$previous..$env:GITHUB_REF_NAME" } else { $env:GITHUB_REF_NAME }
+          $lines = git log $range --no-merges --pretty=format:'- %s' | Where-Object { $_ -notmatch '^- (chore|ci|docs|test)(\(|:)' }
+          if (-not $lines) { $lines = @('- 维护更新') }
+          @("## winhand $env:VERSION", '', $lines) | Set-Content desktop/release-notes.md -Encoding utf8
+          Get-Content desktop/release-notes.md
       - name: Build, sign and verify
         shell: pwsh
-        run: ./desktop/scripts/Build-Windows.ps1 -Installer -SigningMode Required
+        run: ./desktop/scripts/Build-Windows.ps1 -Installer -SigningMode Required -ReleaseNotes desktop/release-notes.md
       - name: Checksums
         shell: pwsh
         run: |
@@ -51,9 +62,18 @@ jobs:
       - name: Publish to GitHub Releases
         shell: pwsh
         run: |
-          vpk upload github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }} `
-            --outputDir desktop/out/releases --publish --tag $env:GITHUB_REF_NAME --releaseName "winhand $env:VERSION"
-          if ($LASTEXITCODE -ne 0) { throw 'vpk upload failed' }
-          gh release upload $env:GITHUB_REF_NAME desktop/out/releases/SHA256SUMS.txt desktop/out/releases/signatures.json --clobber
+          # the setup wizard for people, the Velopack feed and packages for installed apps
+          $dir = 'desktop/out/releases'
+          $assets = @("$dir/winhand-$env:VERSION-Setup.exe", "$dir/winhand-win-Portable.zip", "$dir/releases.win.json",
+            "$dir/RELEASES", "$dir/SHA256SUMS.txt", "$dir/signatures.json") +
+            @(Get-ChildItem $dir -Filter "winhand-$env:VERSION-*.nupkg" | ForEach-Object FullName)
+          foreach ($asset in $assets) { if (-not (Test-Path $asset)) { throw "missing release asset: $asset" } }
+          $notes = (Get-Content -Raw desktop/release-notes.md) + @"
+
+          ### 安装
+          下载 **winhand-$env:VERSION-Setup.exe** 运行安装向导（可自选安装位置）。已安装的 winhand 会在 App 内提示更新。
+          安装包使用自签名证书 ``CN=winhand``（SHA-256 ``711736B2…DBEC2``），见 [Windows 签名与信任](https://github.com/${{ github.repository }}/blob/main/docs/windows-signing.md)。
+          "@
+          gh release create $env:GITHUB_REF_NAME @assets --title "winhand $env:VERSION" --notes $notes --verify-tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -120,6 +120,37 @@ def windows_icon(image: Image.Image) -> bytes:
     return bytes(directory) + b"".join(frames)
 
 
+WIZARD = ROOT / "desktop/packaging/windows/wizard"
+WIZARD_SCALES = (100, 125, 150, 175, 200, 225, 250)
+
+
+def wizard_images(art: Image.Image, icon: Image.Image) -> list[str]:
+    """Inno Setup wizard art (BMP, no alpha): the tall side panel of the welcome/finish pages
+    and the small header image, at every scale Inno picks from for the screen's DPI."""
+    WIZARD.mkdir(parents=True, exist_ok=True)
+    written = []
+    for scale in WIZARD_SCALES:
+        w, h = round(164 * scale / 100), round(314 * scale / 100)
+        ramp = np.linspace(0, 1, h)[:, None, None]
+        top, bottom = np.array((150, 170, 240)), np.array(TILE_BOTTOM)
+        panel = Image.fromarray(np.broadcast_to(top * (1 - ramp) + bottom * ramp, (h, w, 3)).astype(np.uint8))
+        panel = panel.convert("RGBA")
+        width = round(w * 0.92)
+        figure = art.resize((width, round(art.height * width / art.width)), Image.Resampling.LANCZOS)
+        panel.alpha_composite(figure, ((w - figure.width) // 2, h - figure.height - round(h * 0.06)))
+        name = f"large-{scale}.bmp"
+        panel.convert("RGB").save(WIZARD / name)
+        written.append(name)
+
+        size = round(55 * scale / 100)
+        small = Image.new("RGBA", (size, size), (255, 255, 255, 255))  # the wizard header is white
+        small.alpha_composite(icon.resize((size, size), Image.Resampling.LANCZOS))
+        name = f"small-{scale}.bmp"
+        small.convert("RGB").save(WIZARD / name)
+        written.append(name)
+    return written
+
+
 def main() -> None:
     with Image.open(BRANDING / "source.webp") as source:
         rgb = np.asarray(source.convert("RGB")).astype(float)
@@ -138,7 +169,8 @@ def main() -> None:
     offline = Image.blend(offline, Image.new("RGBA", offline.size, (150, 150, 150, 255)), 0.25)
     offline.putalpha(icon.getchannel("A"))
     (WINDOWS_ASSETS / "winhand-offline.ico").write_bytes(windows_icon(offline))
-    print("Generated mascot.png, winhand.png, winhand.ico and winhand-offline.ico; source artwork is unchanged.")
+    wizard_images(art, icon)
+    print("Generated mascot.png, winhand.png, winhand.ico, winhand-offline.ico and installer art; source artwork is unchanged.")
 
 
 if __name__ == "__main__":

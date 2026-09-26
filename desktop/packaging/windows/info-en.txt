@@ -1,0 +1,10 @@
+﻿What winhand does
+
+winhand lets an AI (for example Claude on claude.ai) operate this computer over MCP: run commands, drive terminals and debugger sessions, read and write files and use serial ports, with the rights of the current Windows user.
+
+- This computer connects out to your own relay (a Cloudflare Worker); no inbound port is opened. Only connectors you authorised on your relay can reach it.
+- You always see what happens: the tray icon shows the connection, the Activity timeline records every tool call, and an audit log is kept in %USERPROFILE%\.winhand\activity.
+- Stop at any time with "Disconnect" or "Exit winhand" in the tray menu.
+- Passwords and one-time codes are never handed to the AI: a dialog on this computer asks you for them.
+
+The install folder must be writable by the current user so winhand can update itself.

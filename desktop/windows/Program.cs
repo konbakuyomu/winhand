@@ -7,6 +7,9 @@ namespace Winhand.Desktop;
 public static class Program
 {
     private const string InstanceKey = "Winhand.Desktop";
+    /// <summary>Held while the app runs; the installer checks it to close the app before replacing files.</summary>
+    internal const string MutexName = @"Local\Winhand.Desktop";
+    private static Mutex? _running;
 
     /// <summary>Started by the logon Run entry: stay in the notification area, no window.</summary>
     internal static bool StartInBackground { get; private set; }
@@ -28,6 +31,8 @@ public static class Program
             return;
         }
 
+        _running = new Mutex(initiallyOwned: false, MutexName);
+        InstallerRegistration.Sync();
         main.Activated += (_, _) => App.ShowFromRedirect();
         Application.Start(_ =>
         {

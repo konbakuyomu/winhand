@@ -1,77 +1,110 @@
+using System.Runtime.InteropServices;
 using Velopack;
 using Velopack.Sources;
 
 namespace Winhand.Desktop;
 
-/// <summary>Updates from the signed GitHub releases (Velopack full/delta packages).
-/// Updates download in the background but are never applied behind the user's back:
-/// restarting would cut Claude off mid-task. They install on "update now" or on exit.</summary>
+/// <summary>App updates from the signed GitHub releases, through Velopack (the same framework as
+/// Smart Search). Check, download and install are separate steps: nothing downloads until the
+/// user agrees, and installing restarts winhand, which drops Claude's connection for a moment.</summary>
 internal sealed class AppUpdater
 {
     public const string RepositoryUrl = "https://github.com/konbakuyomu/winhand";
-    private readonly UpdateManager _manager = new(new GithubSource(RepositoryUrl, null, false));
-    private UpdateInfo? _pending;
+    private readonly UpdateManager _manager;
+    private UpdateInfo? _update;
 
-    public bool IsInstalled => _manager.IsInstalled;
-    public string CurrentVersion => _manager.CurrentVersion?.ToString() ?? "开发版";
-    public string? AvailableVersion => _pending?.TargetFullRelease.Version.ToString();
-    public bool ReadyToInstall { get; private set; }
-    public bool Busy { get; private set; }
-    public DateTime? LastChecked { get; private set; }
-    public string? LastError { get; private set; }
+    public AppUpdater()
+    {
+        var channel = RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "win-arm64" : "win";
+        _manager = new UpdateManager(new GithubSource(RepositoryUrl, null, false),
+            new UpdateOptions { ExplicitChannel = channel, AllowVersionDowngrade = false });
+    }
+
+    public bool Installed => _manager.IsInstalled;
+    public string CurrentVersion => _manager.CurrentVersion?.ToString()
+        ?? System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "?";
+    public string? LatestVersion => _update?.TargetFullRelease.Version.ToString();
+    public string ReleaseNotes => _update?.TargetFullRelease.NotesMarkdown?.Trim() ?? "";
+    public bool Checking { get; private set; }
+    public bool Downloading { get; private set; }
+    public bool Ready { get; private set; }
+    public bool Available => _update is not null;
+    public bool CanCheck => Installed && !Checking && !Downloading;
+    public string Error { get; private set; } = "";
     public int Progress { get; private set; }
+    public DateTime? CheckedAt { get; private set; }
 
     public event EventHandler? Changed;
 
-    /// <summary>Check, and download what is found. Returns false when nothing new.</summary>
-    public async Task<bool> CheckAndDownloadAsync()
+    public async Task CheckAsync()
     {
-        if (!IsInstalled || Busy)
-            return false;
-        Busy = true;
-        LastError = null;
+        if (!CanCheck)
+            return;
+        Checking = true;
+        Error = "";
         Raise();
         try
         {
-            var info = await _manager.CheckForUpdatesAsync();
-            LastChecked = DateTime.Now;
-            if (info is null)
-                return false;
-            _pending = info;
-            ReadyToInstall = false;
-            Raise();
-            await _manager.DownloadUpdatesAsync(info, progress =>
-            {
-                Progress = progress;
-                Raise();
-            });
-            ReadyToInstall = true;
-            return true;
+            var found = await _manager.CheckForUpdatesAsync();
+            // keep a finished download if the same version is still the newest
+            if (found is null || found.TargetFullRelease.Version.ToString() != LatestVersion)
+                Ready = false;
+            _update = found;
+            CheckedAt = DateTime.Now;
         }
         catch (Exception error)
         {
-            LastError = error.Message;
-            return false;
+            Error = $"无法检查更新：{error.Message}";
         }
         finally
         {
-            Busy = false;
+            Checking = false;
             Raise();
         }
     }
 
-    /// <summary>Exit now, install, and start the new version (hidden again if we were hidden).</summary>
-    public void ApplyAndRestart(bool background)
+    public async Task DownloadAsync(CancellationToken cancellationToken)
     {
-        if (_pending is { } info && ReadyToInstall)
-            _manager.ApplyUpdatesAndRestart(info.TargetFullRelease, background ? [Autostart.BackgroundArgument] : null);
+        if (_update is not { } update || Downloading || Ready)
+            return;
+        Downloading = true;
+        Progress = 0;
+        Error = "";
+        Raise();
+        try
+        {
+            await _manager.DownloadUpdatesAsync(update, value => { Progress = value; Raise(); }, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            Ready = true;
+        }
+        catch (OperationCanceledException)
+        {
+            Error = "下载已取消。";
+        }
+        catch (Exception error)
+        {
+            Error = $"下载或校验失败，当前版本保持不变：{error.Message}";
+        }
+        finally
+        {
+            Downloading = false;
+            Raise();
+        }
     }
 
-    /// <summary>Called on exit: install the downloaded version after this process ends, silently.</summary>
+    /// <summary>Exit, install, and start the new version (hidden again if it was running hidden).</summary>
+    public void ApplyAndRestart(bool background)
+    {
+        if (!Ready || _update is null)
+            throw new InvalidOperationException("没有已下载的更新");
+        _manager.ApplyUpdatesAndRestart(_update.TargetFullRelease, background ? [Autostart.BackgroundArgument] : null);
+    }
+
+    /// <summary>On exit: install a finished download once this process is gone, silently.</summary>
     public void ApplyOnExit()
     {
-        if (_pending is { } info && ReadyToInstall)
-            _manager.WaitExitThenApplyUpdates(info.TargetFullRelease, silent: true, restart: false);
+        if (Ready && _update is not null)
+            _manager.WaitExitThenApplyUpdates(_update.TargetFullRelease, silent: true, restart: false);
     }
 
     private void Raise() => Changed?.Invoke(this, EventArgs.Empty);

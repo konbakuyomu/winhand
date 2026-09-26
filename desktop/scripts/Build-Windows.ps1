@@ -7,8 +7,10 @@
   3. backend copied next to the app: <out>\app\backend\winhand.exe
   4. -SigningMode Required: Authenticode-sign our own files with the pinned identity
      (desktop/packaging/windows/winhand.cer) and verify signature, digest and timestamp
-  5. optional: -Zip writes a portable archive, -Installer builds the Velopack Setup.exe and
-     update packages (a delta too when the previous release sits in <out>\releases)
+  5. optional: -Zip writes a portable archive; -Installer builds the Velopack update packages
+     (a delta too when the previous release sits in <out>\releases) and the setup wizard
+     winhand-<version>-Setup.exe (Inno Setup, desktop/packaging/windows/winhand.iss), which
+     installs Velopack's portable layout wherever the user chooses so updates keep working
 
 .EXAMPLE
   ./desktop/scripts/Build-Windows.ps1 -Zip
@@ -21,7 +23,8 @@ param(
     [ValidateSet('Skip', 'Required')] [string] $SigningMode = 'Skip',
     [switch] $SkipSmoke,
     [switch] $Zip,
-    [switch] $Installer
+    [switch] $Installer,
+    [string] $ReleaseNotes
 )
 $ErrorActionPreference = 'Stop'
 
@@ -111,6 +114,7 @@ if ($Installer) {
         '--mainExe', 'WinhandDesktop.exe', '--packTitle', 'winhand', '--packAuthors', 'konbakuyomu',
         '--icon', (Join-Path $repo 'desktop\windows\Assets\winhand.ico'),
         '--runtime', "win-$Architecture", '--outputDir', $releases)
+    if ($ReleaseNotes) { $pack += @('--releaseNotes', [IO.Path]::GetFullPath($ReleaseNotes)) }
     if ($signed) {
         # Our files are signed above. vpk adds Update.exe (as Squirrel.exe), an execution stub and
         # Setup.exe; sign exactly those, leave every other dependency untouched.
@@ -120,8 +124,25 @@ if ($Installer) {
             '--signExclude', '(?i)^(?!.*(?:^|[\\/])(?:Squirrel\.exe|WinhandDesktop_ExecutionStub\.exe)$).*')
     }
     Invoke-Native 'vpk pack' { vpk @pack }
+
+    # the setup wizard installs Velopack's portable layout, so updates work in any chosen folder
+    $payload = Join-Path $Output 'installer-payload'
+    if (Test-Path -LiteralPath $payload) { Remove-Item -LiteralPath $payload -Recurse -Force }
+    Expand-Archive -LiteralPath (Join-Path $releases 'winhand-win-Portable.zip') -DestinationPath $payload
+    foreach ($required in @('Update.exe', 'winhand.exe', '.portable', 'current\WinhandDesktop.exe', 'current\backend\winhand.exe')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $payload $required))) { throw "portable layout is missing $required" }
+    }
+    $iscc = & (Join-Path $PSScriptRoot 'Get-InnoSetup.ps1')
+    $inno = @("/DAppVersion=$version", "/DPayloadDir=$payload", "/DOutputDir=$releases", '/Q')
     if ($signed) {
-        $setup = Join-Path $releases 'winhand-win-Setup.exe'
+        $inno += @('/DSigned', ('/Swinhandsign="{0}" -NoProfile -File "{1}" -Path $f' -f
+            (Get-Process -Id $PID).Path, (Join-Path $PSScriptRoot 'Sign-WindowsFile.ps1')))
+    }
+    Invoke-Native 'Inno Setup' { & $iscc @inno (Join-Path $repo 'desktop\packaging\windows\winhand.iss') }
+    Remove-Item -LiteralPath (Join-Path $releases 'winhand-win-Setup.exe') -ErrorAction SilentlyContinue  # the wizard replaces it
+    $setup = Join-Path $releases "winhand-$version-Setup.exe"
+    if (-not (Test-Path -LiteralPath $setup)) { throw "setup wizard was not built: $setup" }
+    if ($signed) {
         $signatures += Test-WindowsSignature $setup $expected
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $full = Join-Path $releases "winhand-$version-full.nupkg"

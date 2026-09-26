@@ -62,6 +62,14 @@ internal sealed class NativeTray : IDisposable
             ShellNotifyIcon(NimSetVersion, ref _icon);
     }
 
+    public void Hide()
+    {
+        if (!_visible)
+            return;
+        ShellNotifyIcon(NimDelete, ref _icon);
+        _visible = false;
+    }
+
     /// <summary>Colour icon while connected, grey otherwise; the tooltip carries the detail.</summary>
     public void Update(bool online, string tooltip)
     {
