@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import socket
 import sys
 import threading
@@ -148,6 +149,9 @@ async def test_pipe_transport_and_interrupt(manager, fake_spec):
     r = await wait_for(manager, [s.id], timeout_s=10)
     assert r["sessions"][s.id]["state"] == "awaiting_input"
     s.send("go", submit=True)
+    # Interrupt the running command, not the instant input() returns: CPython drops a
+    # SIGINT that lands exactly as readline() hands back its line (~1 in 300 on CI).
+    await asyncio.sleep(0.5)
     s.send(keys=["Ctrl+C"])
     r = await wait_for(manager, [s.id], patterns=["interrupted"], timeout_s=10)
     if sys.platform == "win32":
