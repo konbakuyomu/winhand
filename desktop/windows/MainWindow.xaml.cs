@@ -33,7 +33,8 @@ public sealed partial class MainWindow : Window
         _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(_hwnd));
         _appWindow.Title = "winhand";
         _appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "winhand.ico"));
-        _appWindow.Resize(new Windows.Graphics.SizeInt32(1180, 760));
+        var scale = GetDpiForWindow(_hwnd) / 96.0; // AppWindow sizes are physical pixels
+        _appWindow.Resize(new Windows.Graphics.SizeInt32((int)(1180 * scale), (int)(760 * scale)));
         _appWindow.Closing += OnAppWindowClosing;
 
         _tray = new NativeTray(_hwnd, ShowMainWindow, TrayMenu);
@@ -43,7 +44,7 @@ public sealed partial class MainWindow : Window
         _backend.Disconnected += (_, message) => DispatcherQueue.TryEnqueue(() => OnBackendDisconnected(message));
 
         BuildPages();
-        ShowPage("overview");
+        ShowPage("overview", fromNavigation: true); // the XAML already selects it; setting it again misplaces the indicator
         _ticker = DispatcherQueue.CreateTimer();
         _ticker.Interval = TimeSpan.FromSeconds(1);
         _ticker.Tick += (_, _) => RefreshStatus();
@@ -332,6 +333,7 @@ public sealed partial class MainWindow : Window
     }
 
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint hWnd, int command);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint hWnd);
     [DllImport("user32.dll")] private static extern bool IsIconic(nint hWnd);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(nint hWnd);
 }

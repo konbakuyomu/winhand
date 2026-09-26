@@ -65,9 +65,9 @@ public sealed partial class MainWindow
             Grid.SetColumn(card, column);
             return card;
         }
-        stats.Children.Add(Stat(0, "本次运行完成的工具调用", out _statToolsOk));
-        stats.Children.Add(Stat(1, "失败的工具调用", out _statToolsError));
-        stats.Children.Add(Stat(2, "打开中的会话", out _statSessions));
+        stats.Children.Add(Stat(0, "今天成功的工具调用", out _statToolsOk));
+        stats.Children.Add(Stat(1, "今天失败的工具调用", out _statToolsError));
+        stats.Children.Add(Stat(2, "打开的会话", out _statSessions));
         page.Children.Add(stats);
 
         // recent activity
@@ -103,8 +103,9 @@ public sealed partial class MainWindow
     {
         if (_recentRows is null)
             return;
-        _statToolsOk!.Text = (Json.Num(_counts, "ok") ?? 0).ToString("0");
-        _statToolsError!.Text = (Json.Num(_counts, "error") ?? 0).ToString("0");
+        var today = _activity.Where(a => a.Kind == "tool" && Format.Local(a.Time).Date == DateTime.Today).ToList();
+        _statToolsOk!.Text = today.Count(a => a.Status == "ok").ToString();
+        _statToolsError!.Text = today.Count(a => a.Status == "error").ToString();
         _statSessions!.Text = _sessions.Count(s => Json.Str(s, "state") != "exited").ToString();
         _recentRows.Children.Clear();
         var recent = _activity.AsEnumerable().Reverse().Take(8).ToList();
