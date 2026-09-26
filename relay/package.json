@@ -1,14 +1,12 @@
 {
-  "name": "relay",
+  "name": "winhand-relay",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc",
+    "test": "vitest run"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.1.0"
   },
@@ -18,5 +16,7 @@
     "typescript": "^7.0.2",
     "vitest": "^5.0.2",
     "wrangler": "^4.141.0"
-  }
+  },
+  "private": true,
+  "type": "module"
 }

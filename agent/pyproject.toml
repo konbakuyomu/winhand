@@ -9,11 +9,14 @@ license = { text = "MIT" }
 requires-python = ">=3.13"
 dependencies = [
     "fastmcp>=4.0.10",
+    "httpx>=0.28.1",
     "psutil>=7.2.2",
     "ptyprocess>=0.7.0 ; sys_platform != 'win32'",
     "pyserial>=3.5",
     "pyte>=0.8.2",
     "pywinpty>=3.0.5 ; sys_platform == 'win32'",
+    "uvicorn>=0.54.0",
+    "websockets>=17.1",
 ]
 
 [project.scripts]

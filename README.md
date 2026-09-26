@@ -3,13 +3,14 @@
 让 AI 通过**一个 MCP** 接管一台 Windows 电脑。它能驱动真终端和各种交互式程序，包括调试器、仿真器、REPL、串口和网络控制台、menuconfig 这类全屏界面、需要登录或确认的安装程序；同时提供文件读写、进程管理，还能把本机已有的其他 MCP 统一转发出去。
 
 ```
-claude.ai / Claude Desktop / Codex ──MCP──▶ winhand（跑在你的电脑上）
-                                             ├─ 通用会话引擎：pty | pipe | serial | tcp
-                                             ├─ 文件 / 进程 / 系统信息
-                                             └─ 网关：pyocd-debug、usb-camera … 等本地 stdio MCP
+claude.ai 连接器 ──HTTPS + OAuth──▶ relay（Cloudflare Worker，你的域名）
+                                       │  Durable Object 维持会话，透明转发 HTTP（含 SSE）
+                                       ▼  WebSocket（电脑主动连出，不开任何入站端口）
+Claude Desktop / Codex ──stdio──▶ winhand agent（跑在你的电脑上）
+                                   ├─ 通用会话引擎：pty | pipe | serial | tcp
+                                   ├─ 文件 / 进程 / 系统信息
+                                   └─ 网关：pyocd-debug、usb-camera … 等本地 stdio MCP
 ```
-
-> 云端中转（Cloudflare Workers + OAuth，用于从 claude.ai 远程连接）在 `relay/` 中开发，尚未完成。
 
 ## 为什么要自己写
 
@@ -57,6 +58,45 @@ args = ["--directory", 'D:\path\to\winhand\agent', "run", "winhand", "stdio"]
 ```
 
 也可以用 `uv run winhand http --port 8765`，以 streamable HTTP 方式在本机提供服务。
+
+## 从 claude.ai 远程接入（relay）
+
+`relay/` 是一个 Cloudflare Worker，职责如下：
+
+- 对 claude.ai 提供标准的 MCP 远程端点，包括 OAuth 2.1（支持动态注册和 CIMD），授权页用“主人口令”校验；
+- 电脑上的 `winhand connect` 主动用 WebSocket 连上它，**电脑本身不开任何入站端口**；
+- 中转层不解析 MCP 协议，只透明转发 HTTP 请求（包括流式 SSE 响应），以后 MCP 协议升级也不用改它。
+
+部署步骤（需要 Cloudflare 账号，以及一个托管在 Cloudflare 上的域名。`*.workers.dev` 在国内经常连不上）：
+
+```powershell
+cd relay
+npm ci
+npx wrangler login                                   # 浏览器里授权
+npx wrangler kv namespace create OAUTH_KV            # 把输出的 id 填进 wrangler.jsonc
+#   在 wrangler.jsonc 中填写 PUBLIC_ORIGIN = "https://mcp.你的域名"，并取消 routes 那一行的注释
+npx wrangler secret put OWNER_PASSPHRASE             # 授权页口令（要足够长）
+npx wrangler secret put AGENT_TOKEN                  # 电脑连中转用的设备令牌（随机长串）
+npx wrangler deploy
+```
+
+在电脑上连接中转（加上 `--save` 会把地址和令牌写进 `~/.winhand/config.toml`，之后直接运行 `winhand connect` 即可）：
+
+```powershell
+cd agent
+uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> --save
+```
+
+最后在 claude.ai 的“设置 → 连接器 → 添加自定义连接器”里填入 `https://mcp.你的域名/mcp`，完成授权后，**新开一个会话**即可使用。打开 `https://mcp.你的域名/` 能看到电脑是否在线。
+
+安全设计：
+
+- 授权页口令用常量时间比较；同一 IP 连续输错 5 次锁定 15 分钟。
+- 设备令牌只保存在 Worker secret 里。
+- OAuth token 由中转校验，不会转发给电脑。
+- 授权页有防 CSRF 的一次性 handle 和绑定 cookie，并禁止被嵌入 iframe。
+
+端到端测试（CI 中自动运行）：`relay/test/e2e.py` 在 `wrangler dev` 上模拟 claude.ai，走完注册 → 授权 → 换 token → 经隧道调用 MCP 工具的整个流程。
 
 ## 工具一览
 

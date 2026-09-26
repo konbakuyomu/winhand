@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "winhand-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  "kv_namespaces": [
+    // `npx wrangler kv namespace create OAUTH_KV`, then paste the id here
+    { "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_ID" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "BRIDGE", "class_name": "Bridge" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Bridge"] }],
+  "vars": {
+    // Public origin claude.ai will use, e.g. "https://mcp.example.com"
+    "PUBLIC_ORIGIN": ""
+  }
+  // Serve on your own domain (workers.dev is often unreachable from mainland China):
+  // "routes": [{ "pattern": "mcp.example.com", "custom_domain": true }]
+  // Secrets (never in this file): `npx wrangler secret put OWNER_PASSPHRASE` and `... AGENT_TOKEN`
+}
