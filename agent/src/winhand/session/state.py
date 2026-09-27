@@ -234,6 +234,11 @@ def infer(
     line = last_line.rstrip("\n")
     stripped_line = line.strip()
 
+    # A prompt can arrive in several reads (or be followed immediately by the response to our input).
+    # Let it settle briefly before asking the person to answer it again.
+    if idle_ms < min(det.quiet_ms, 100):
+        return {**base, "state": "running", "reason": "output is still arriving; waiting for it to settle"}
+
     match = _first(det.secret, line)
     if match:
         return {

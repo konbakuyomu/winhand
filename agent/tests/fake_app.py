@@ -3,6 +3,7 @@
 Commands at the `fake> ` prompt:
   echo <text>     print text
   secret          ask for a password (no echo)
+  secret-echo     deliberately echo a password, with split ANSI-decorated output
   auth            print a browser sign-in request and wait for Enter
   confirm         ask "Continue? [y/N]"
   more            show a pager prompt and wait for a key
@@ -93,6 +94,12 @@ def main() -> None:
         elif cmd == "secret":
             value = getpass.getpass("Password: ")
             out(f"got {len(value)} chars")
+        elif cmd == "secret-echo":
+            value = input("Password: ")
+            for char in value:
+                out("\x1b[32m" + char + "\x1b[0m", end="")
+                time.sleep(0.01)
+            out("\naccepted")
         elif cmd == "auth":
             out("Authenticate your account at:")
             out("https://example.com/auth/cli/abc123")

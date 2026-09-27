@@ -9,7 +9,7 @@ from winhand.session import state as st
 from winhand.session.buffer import OutputBuffer
 from winhand.session.keys import encode_key
 from winhand.session.screen import VirtualScreen
-from winhand.session.text import clean, clip, extract_urls, strip_ansi
+from winhand.session.text import SecretFilter, clean, clip, extract_urls, strip_ansi
 
 # ------------------------------------------------------------------ text
 
@@ -32,6 +32,33 @@ def test_clip_keeps_head_and_tail():
     text, omitted = clip("a" * 50 + "b" * 50, 30, keep="both")
     assert omitted == 70
     assert text.startswith("a") and text.endswith("b") and "omitted" in text
+
+
+def test_secret_filter_masks_split_and_ansi_decorated_echoes():
+    secret = "key-秘密-123"
+    for style in ("\x1b[32m", "\x9b32m"):
+        raw = "before " + style.join(secret) + "\x1b[0m\nready> "
+        for cut in range(len(raw) + 1):
+            scrub = SecretFilter()
+            scrub.add(secret)
+            text = scrub.feed(raw[:cut]) + scrub.feed(raw[cut:]) + scrub.finish()
+            assert clean(text) == "before " + "*" * len(secret) + "\nready> "
+    scrub = SecretFilter()
+    scrub.add("abc")
+    scrub.add("abcdef")
+    assert scrub.feed("abc") == ""
+    assert scrub.feed("def abc\n") == "****** ***\n"
+    assert scrub.feed("ab") == "" and scrub.finish() == "[redacted]"
+    for opening, closing in [("\x1b]" + "x" * 10000, "\x1b\\"), ("\x1b[" + "1;" * 5000, "m")]:
+        scrub = SecretFilter()
+        scrub.add("swordfish")
+        assert scrub.feed("swo" + opening) == ""
+        assert len(scrub._pending) <= 4096
+        assert scrub.feed(closing + "rdfish\nready> ") == "*********\nready> "
+    scrub = SecretFilter()
+    scrub.add("swordfish")
+    assert scrub.feed("swo" + "\x1b[32m" * 1000) == ""
+    assert len(scrub._pending) <= 4096 and scrub.feed("rdfish\n") == "*********\n"
 
 
 # ------------------------------------------------------------------ keys
@@ -136,6 +163,12 @@ def test_browser_auth_only_while_it_is_the_latest_output():
     assert _infer(since=waiting)["state"] == "needs_user"
     moved_on = waiting + "Press ENTER to open in the browser...\n+ pkg@1.0.0\nlots\nmore\n"
     assert _infer(since=moved_on, last_line="")["state"] == "idle"
+
+
+def test_partial_prompt_output_does_not_ask_for_input_again():
+    for prompt in ("Password: ", "Press ENTER to open in the browser...", "Continue? [y/N] "):
+        assert _infer(last_line=prompt, since=prompt, idle=0.01)["state"] == "running"
+        assert _infer(last_line=prompt, since=prompt, idle=0.2)["state"] in ("needs_user", "awaiting_input")
 
 
 def test_infer_running_idle_blocked_exited():
@@ -261,3 +294,16 @@ def test_servers_start_in_home_not_the_install_folder(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cli._start_in_home()
     assert os.getcwd() == str(home)
+
+
+def test_unreadable_native_control_state_is_not_empty_or_unchecked(monkeypatch):
+    from types import SimpleNamespace
+
+    from winhand import desktop
+
+    monkeypatch.setattr(desktop, "_send_timeout", lambda *args: None)
+    monkeypatch.setattr(desktop, "user32", SimpleNamespace(GetWindowLongW=lambda *args: 0), raising=False)
+    assert desktop._control_text(1) is None and desktop._toggle_state(1) is None
+    monkeypatch.setattr(desktop.user32, "GetWindowLongW", lambda *args: 0x0B)
+    monkeypatch.setattr(desktop, "_msaa_role_state", lambda _: None)
+    assert desktop._toggle_state(1) is None

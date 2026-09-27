@@ -39,6 +39,8 @@ Quick rules
   or call session_prompt_user so they type a secret into a masked dialog on the machine.
 - session_wait ORs its conditions across several sessions at once (e.g. gdb prompt OR serial "PANIC").
   A timeout is not a failure: call it again to keep waiting; already-returned output is not repeated.
+- After a connection error, check session_list and session_read(since=the last cursor you received)
+  before resending anything. The original command may still be running; a lost reply is not failure.
 - Full-screen programs (menuconfig, htop, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
   then session_screen; `highlighted` shows the selected row.
 - Profiles (profile_list) know prompts, exit commands and quirks of common tools: gdb, pyocd-gdbserver,
@@ -52,6 +54,8 @@ Quick rules
   window's controls, then invoke/set_value/toggle by name; also classic Win32/WinForms/Delphi
   programs and installers, even in the background). window lists/focuses windows;
   clipboard reads/writes text, images and copied files.
+  ui reads back after an action: verified=true confirms the observed state; false/null requires
+  inspecting the result. A button being invoked does not prove its task finished; do not blindly retry.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
   follow it with job_status.
@@ -395,7 +399,9 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         ] = None,
         max_chars: int = 20000,
     ) -> dict:
-        """Page through a session's output (escape codes removed). Returns a cursor for the next call."""
+        """Page through a session's output (escape codes removed). Returns a cursor for the next call.
+        After a lost response, pass the last cursor you actually received to recover its output;
+        use since=0 if unknown (old output outside the memory window is available in log_file)."""
         try:
             session = sessions.get(id)
         except KeyError as exc:
@@ -456,8 +462,9 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         ],
         submit: bool = True,
     ) -> dict:
-        """Open a masked input dialog on the machine's desktop; what the person types goes straight into the
-        session and is never returned to you. Use for passwords/OTPs a session asks for."""
+        """Open a masked input dialog on the machine's desktop and send the answer directly to the session.
+        Literal echoes are masked in session output, virtual screens and logs, including split reads.
+        Use for passwords/OTPs; this cannot protect secrets a program encodes or transforms."""
         try:
             session = sessions.get(id)
         except KeyError as exc:
@@ -472,7 +479,15 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         if value is None:
             return {"id": id, "sent": False, "reason": "the user cancelled"}
         since = session.read_cursor
-        await asyncio.to_thread(session.send, value, None, submit)
+        try:
+            await asyncio.to_thread(session.send_secret, value, submit)
+        except TransportError as exc:
+            return {
+                "id": id,
+                "sent": None,
+                "error": str(exc),
+                "hint": "Input delivery is uncertain; inspect the session before sending it again.",
+            }
         result = await wait_for(
             sessions, [id], quiet_ms=1500, quiet_after_output=True, timeout_s=10, since={id: since}
         )

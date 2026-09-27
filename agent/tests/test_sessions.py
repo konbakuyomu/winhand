@@ -33,6 +33,23 @@ async def test_prompt_roundtrip(manager, fake_spec):
     assert snap["state"] == "awaiting_input" and snap["kind"] == "prompt"
 
 
+async def test_input_cursor_handles_fast_responses_and_failed_writes(manager, fake_spec, monkeypatch):
+    session = manager.create(fake_spec(transport="pipe"))
+    await ready(manager, session)
+    monkeypatch.setattr(session.transport, "write", lambda _: session._on_output("fresh response\nfake> "))
+    session.send("command")
+    assert not session.awaiting_response() and session.last_input_cursor < session.buffer.end
+    previous = session.last_input_at, session.last_input_cursor
+
+    def failed_write(_):
+        raise TransportError("write failed before accepting input")
+
+    monkeypatch.setattr(session.transport, "write", failed_write)
+    with pytest.raises(TransportError):
+        session.send("not delivered")
+    assert (session.last_input_at, session.last_input_cursor) == previous
+
+
 async def test_secret_prompt_needs_user_and_is_answerable(manager, fake_spec):
     s = manager.create(fake_spec())
     await ready(manager, s)
@@ -118,7 +135,6 @@ async def test_large_output_is_clipped_but_pageable(manager, fake_spec):
     assert page["more"] and page["output"].count("row") >= 10
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="raw-mode fake TUI uses termios; ConPTY covered manually")
 async def test_tui_screen_and_arrow_keys(manager, fake_spec):
     s = manager.create(fake_spec(cols=60, rows=15))
     await ready(manager, s)

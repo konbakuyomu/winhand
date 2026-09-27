@@ -8,6 +8,7 @@ param(
     [ValidateSet('inspect', 'act')][string] $Mode = 'inspect',
     [int] $Index = -1,
     [string] $ExpectName = '',
+    [string] $ExpectId = '',
     [string] $Do = 'invoke',
     [string] $Value = '',
     [int] $MaxElements = 600
@@ -35,6 +36,8 @@ function Describe($e, $i) {
         class = $c.ClassName
         hwnd = $c.NativeWindowHandle
         enabled = $c.IsEnabled
+        focused = $c.HasKeyboardFocus
+        _runtime_id = @($e.GetRuntimeId())
         rect = if ($r.IsEmpty) { $null } else { @([int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height) }
         patterns = @(Patterns $e)
     }
@@ -46,6 +49,8 @@ function Describe($e, $i) {
     if ($e.TryGetCurrentPattern([Windows.Automation.TogglePattern]::Pattern, [ref]$tp)) { $item.toggle = "$($tp.Current.ToggleState)" }
     $sp = $null
     if ($e.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern, [ref]$sp)) { $item.selected = $sp.Current.IsSelected }
+    $ep = $null
+    if ($e.TryGetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$ep)) { $item.expanded = "$($ep.Current.ExpandCollapseState)" }
     $item
 }
 
@@ -76,6 +81,7 @@ if ($Mode -eq 'inspect') {
 if ($Index -lt 0 -or $Index -ge $interesting.Count) { throw "the window changed; inspect it again (index $Index of $($interesting.Count))" }
 $target = $interesting[$Index]
 if ($ExpectName -and $target.Current.Name -ne $ExpectName) { throw "the window changed; inspect it again" }
+if ($ExpectId -and ($target.GetRuntimeId() -join ',') -ne $ExpectId) { throw "the control changed; inspect it again" }
 $done = $null
 $p = $null
 switch ($Do) {
@@ -93,4 +99,5 @@ switch ($Do) {
     'focus' { $target.SetFocus(); $done = 'focused' }
 }
 # `done` null: the control offers no pattern for this; the caller falls back to a real click
-[ordered]@{ done = $done; element = (Describe $target $Index) } | ConvertTo-Json -Depth 5 -Compress
+$after = try { Describe $target $Index } catch { $null } # invoking may close the window
+[ordered]@{ done = $done; element = $after } | ConvertTo-Json -Depth 5 -Compress

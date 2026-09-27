@@ -369,12 +369,15 @@ def _send_timeout(hwnd, message: int, wparam: int = 0, lparam=None) -> int | Non
     return result.value if ok else None  # SMTO_ABORTIFHUNG
 
 
-def _control_text(hwnd) -> str:
-    length = _send_timeout(hwnd, 0x000E) or 0  # WM_GETTEXTLENGTH
+def _control_text(hwnd) -> str | None:
+    length = _send_timeout(hwnd, 0x000E)  # WM_GETTEXTLENGTH
+    if length is None:
+        return None
     if not length:
         return ""
     buffer = ctypes.create_unicode_buffer(min(length, 65535) + 1)
-    _send_timeout(hwnd, 0x000D, len(buffer), buffer)  # WM_GETTEXT
+    if _send_timeout(hwnd, 0x000D, len(buffer), buffer) is None:  # WM_GETTEXT
+        return None
     return buffer.value
 
 
@@ -405,10 +408,10 @@ def _msaa_role_state(hwnd) -> tuple[int, int] | None:
         values = []
         for slot in (13, 14):  # IAccessible::get_accRole, get_accState
             out = VARIANT()
-            getter(table[slot])(pointer, VARIANT(vt=3), ctypes.byref(out))  # CHILDID_SELF
-            values.append(out.value & 0xFFFFFFFF if out.vt == 3 else 0)
+            status = getter(table[slot])(pointer, VARIANT(vt=3), ctypes.byref(out))  # CHILDID_SELF
+            values.append(out.value & 0xFFFFFFFF if status == 0 and out.vt == 3 else None)
         ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(table[2])(pointer)  # Release
-        return values[0], values[1]
+        return (values[0], values[1]) if all(value is not None for value in values) else None
     except OSError:
         return None
     finally:
@@ -431,11 +434,14 @@ def _control_type(hwnd) -> str | None:
     return _REAL_TYPES.get(real)
 
 
-def _toggle_state(hwnd) -> str:
+def _toggle_state(hwnd) -> str | None:
     if user32.GetWindowLongW(hwnd, -16) & 0x0F == 0x0B:
-        state = (_msaa_role_state(hwnd) or (0, 0))[1]
+        role_state = _msaa_role_state(hwnd)
+        if role_state is None:
+            return None
+        state = role_state[1]
         return "On" if state & 0x10 else "Indeterminate" if state & 0x20 else "Off"
-    return {1: "On", 2: "Indeterminate"}.get(_send_timeout(hwnd, 0x00F0) or 0, "Off")  # BM_GETCHECK
+    return {0: "Off", 1: "On", 2: "Indeterminate"}.get(_send_timeout(hwnd, 0x00F0))  # BM_GETCHECK
 
 
 def native_controls(top: int) -> list[dict]:
@@ -464,7 +470,8 @@ def native_controls(top: int) -> list[dict]:
         }
         if kind in ("Edit", "ComboBox"):
             secret = kind == "Edit" and user32.GetWindowLongW(hwnd, -16) & 0x20  # ES_PASSWORD
-            control["value"] = "(hidden)" if secret else _control_text(hwnd)[:2000]
+            text = "(hidden)" if secret else _control_text(hwnd)
+            control["value"] = text[:2000] if text is not None else None
         if kind in ("CheckBox", "RadioButton"):
             control["toggle"] = _toggle_state(hwnd)
         out.append(control)

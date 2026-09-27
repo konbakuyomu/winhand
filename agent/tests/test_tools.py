@@ -291,6 +291,91 @@ async def test_mcp_tools_end_to_end(tmp_path):
         assert "no such file" in edited["error"]
 
 
+@pytest.mark.parametrize("transport", ["pty", "pipe"])
+async def test_secret_dialog_masks_echo_in_results_screen_and_log(manager, fake_spec, monkeypatch, transport):
+    import json
+
+    from winhand.session.text import clean
+
+    secret = "test-秘密-8374"
+    monkeypatch.setattr("winhand.server.ask_secret", lambda *args: secret)
+    session = manager.create(fake_spec(transport=transport, screen=True))
+    async with Client(build_server(Config(), manager)) as client:
+        await client.call_tool("session_wait", {"ids": session.id})
+        await client.call_tool("session_send", {"id": session.id, "text": "secret-echo", "submit": True})
+        result = (
+            await client.call_tool("session_prompt_user", {"id": session.id, "message": "Test password"})
+        ).structured_content
+        assert result["sent"] and "accepted" in result["output"], result
+        screen = (await client.call_tool("session_screen", {"id": session.id})).structured_content
+        output = (await client.call_tool("session_read", {"id": session.id, "since": 0})).structured_content
+    assert secret not in json.dumps([result, screen, output], ensure_ascii=False)
+    assert secret not in clean(session.buffer.read(0).text)
+    assert secret not in clean(session.buffer.log_path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "outcome,verified",
+    [("changed", True), ("unchanged", False), ("replaced", None), ("closed", None), ("unreadable", None)],
+)
+async def test_ui_reads_back_without_replaying_an_action(monkeypatch, outcome, verified):
+    from winhand import tools_desktop as td
+
+    target = {
+        "index": 0,
+        "hwnd": 44,
+        "type": "Edit",
+        "name": "",
+        "value": "old",
+        "native": True,
+        "enabled": True,
+        "patterns": [],
+    }
+    calls, reads = [], []
+
+    def inspect(hwnd, **kwargs):
+        reads.append(hwnd)
+        current = dict(target)
+        if calls:
+            assert 0 < kwargs.get("timeout_s", 60) <= 3  # read-back cannot use the old 60-second UIA timeout
+            if outcome == "closed":
+                raise td.desktop.DesktopError("window closed")
+            if outcome == "changed" and len(reads) >= 3:
+                current["value"] = "new"
+            elif outcome == "replaced":
+                current.update(hwnd=55, value="new")
+            elif outcome == "unreadable":
+                current["value"] = None
+        return {"window": "test", "elements": [current]}
+
+    def act(control, action, value):
+        calls.append((control["hwnd"], action, value))
+        return "value set"
+
+    monkeypatch.setattr(td.desktop, "find_window", lambda _: {"hwnd": 11, "title": "test"})
+    monkeypatch.setattr(td, "_inspect_controls", inspect)
+    monkeypatch.setattr(td.desktop, "native_act", act)
+    async with Client(build_server(Config())) as client:
+        result = (
+            await client.call_tool(
+                "ui",
+                {
+                    "window": "test",
+                    "action": "set_value",
+                    "control_type": "Edit",
+                    "value": "new",
+                    "verify_wait_s": 1 if outcome == "changed" else 0,
+                },
+            )
+        ).structured_content
+    assert result["verified"] is verified, result
+    assert calls == [(44, "set_value", "new")]
+    if outcome == "changed":
+        assert result["element"]["value"] == "new" and len(reads) == 3
+    elif outcome in ("replaced", "closed"):
+        assert result["element"] is None and "before repeating" in result["verification"]
+
+
 def test_connect_is_single_instance(tmp_path):
     from winhand.relay_client import AlreadyRunning, single_instance
 

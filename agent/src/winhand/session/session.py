@@ -15,7 +15,7 @@ from . import state as _state
 from .buffer import OutputBuffer
 from .keys import encode_key
 from .screen import VirtualScreen
-from .text import clean, clip, extract_urls
+from .text import SecretFilter, clean, clip, extract_urls
 from .transports import (
     PipeTransport,
     PtyTransport,
@@ -116,6 +116,8 @@ class Session:
         self._ended = threading.Event()
         self._stopping = threading.Event()
         self._write_lock = threading.Lock()
+        self._output_lock = threading.RLock()
+        self._secret_filter = SecretFilter()
         self._reader = threading.Thread(target=self._pump, name=f"winhand-{sid}", daemon=True)
         self._reader.start()
 
@@ -162,6 +164,8 @@ class Session:
                 # first empty read would drop the tail (often the error you need).
                 self._drain()
                 break
+        with self._output_lock:
+            self._append_output(self._secret_filter.finish())
         self._ended.set()
         self._event("ended", exit_code=self.transport.exit_code())
 
@@ -186,10 +190,16 @@ class Session:
                 time.sleep(0.02)
 
     def _on_output(self, chunk: str) -> None:
+        with self._output_lock:
+            self.last_output_at = time.monotonic()
+            self._append_output(self._secret_filter.feed(chunk))
+
+    def _append_output(self, chunk: str) -> None:
+        if not chunk:
+            return
         self.buffer.append(chunk)
         if self.screen is not None:
             self.screen.feed(chunk)
-        self.last_output_at = time.monotonic()
         if self.autoreplies:
             self._run_autoreplies()
 
@@ -223,9 +233,15 @@ class Session:
 
     def _write(self, data: str) -> None:
         with self._write_lock:
-            self.transport.write(data)
-        self.last_input_at = time.monotonic()
-        self.last_input_cursor = self.buffer.end
+            # Record before writing: a fast child may answer while transport.write is still returning.
+            previous = self.last_input_at, self.last_input_cursor
+            self.last_input_at = time.monotonic()
+            self.last_input_cursor = self.buffer.end
+            try:
+                self.transport.write(data)
+            except Exception:
+                self.last_input_at, self.last_input_cursor = previous
+                raise
 
     def send(
         self,
@@ -250,6 +266,12 @@ class Session:
                 time.sleep(key_delay_ms / 1000)
         if submit:
             self._write(self.line_ending)
+
+    def send_secret(self, text: str, submit: bool = True) -> None:
+        """Register the secret before writing, including echoes arriving on the reader thread."""
+        with self._output_lock:
+            self._secret_filter.add(text)
+        self.send(text, submit=submit)
 
     def resize(self, cols: int, rows: int) -> None:
         self.transport.resize(cols, rows)
@@ -279,7 +301,10 @@ class Session:
     def awaiting_response(self) -> bool:
         if self.last_input_at is None:
             return False
-        return self.last_output_at is None or self.last_output_at < self.last_input_at
+        if self.last_output_at is None or self.last_output_at < self.last_input_at:
+            return True
+        # ANSI-only output or a withheld secret prefix does not make the old prompt new again.
+        return not clean(self.buffer.read(max(self.last_input_cursor, self.buffer.end - 8000)).text).strip()
 
     def state(self) -> dict:
         since = self.buffer.read(max(self.last_input_cursor, self.buffer.end - 8000))

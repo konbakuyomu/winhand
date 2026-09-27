@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -48,7 +49,7 @@ def _errors(fn, *args, **kwargs):
         return {"error": str(exc)}
 
 
-def _run_uia(hwnd: int, **params: Any) -> dict:
+def _run_uia(hwnd: int, *, timeout_s: float = 60, **params: Any) -> dict:
     shell = jobs._powershell()
     argv = [
         shell,
@@ -66,7 +67,7 @@ def _run_uia(hwnd: int, **params: Any) -> dict:
             continue
         argv += [f"-{key}", str(value)]
     done = subprocess.run(
-        argv, capture_output=True, timeout=60, env=winenv.build_env(), creationflags=0x08000000
+        argv, capture_output=True, timeout=timeout_s, env=winenv.build_env(), creationflags=0x08000000
     )
     out = done.stdout.decode("utf-8-sig", errors="replace").strip()
     if done.returncode != 0 or not out.startswith("{"):
@@ -105,7 +106,8 @@ def merge_controls(uia: list[dict], native: list[dict]) -> list[dict]:
             if classic["type"] in ("Edit", "ComboBox"):
                 # an edit box's window text is its content (a password, too), not its name
                 item["name"] = item["_expect"] = ""
-                item["value"] = classic.get("value", "")
+                if classic.get("value") is not None:
+                    item["value"] = classic["value"]
             for key in ("name", "value", "toggle"):
                 if classic.get(key) and not item.get(key):
                     item[key] = classic[key]
@@ -138,6 +140,12 @@ def match_controls(
 
 def _public(element: dict) -> dict:
     return {k: v for k, v in element.items() if not k.startswith("_")}
+
+
+def _inspect_controls(hwnd: int, *, timeout_s: float = 60) -> dict:
+    snapshot = _run_uia(hwnd, Mode="inspect", timeout_s=timeout_s)
+    snapshot["elements"] = merge_controls(snapshot["elements"], desktop.native_controls(hwnd))
+    return snapshot
 
 
 def register(mcp: FastMCP) -> None:
@@ -310,23 +318,30 @@ def register(mcp: FastMCP) -> None:
         name: Annotated[str | None, Field(description="Control name (exact, wildcard or part)")] = None,
         automation_id: str | None = None,
         control_type: Annotated[str | None, Field(description="Button, Edit, CheckBox, ListItem ...")] = None,
-        index: Annotated[int, Field(description="Which match, when several controls match")] = 0,
+        index: Annotated[int, Field(ge=0, description="Which match, when several controls match")] = 0,
         value: Annotated[str | None, Field(description="For set_value")] = None,
         filter: Annotated[
             str | None, Field(description="For inspect: only controls containing this text")
         ] = None,
+        verify_wait_s: Annotated[
+            float,
+            Field(
+                ge=0, le=10, description="Poll read-back state for this long after an action; 0 reads once"
+            ),
+        ] = 3,
     ) -> dict:
         """Read and operate a window's controls (buttons, fields, checkboxes, lists, menus) by
         name instead of pixels, also in classic Win32/WinForms/Delphi programs and installers.
         inspect lists them; invoke/toggle/select/set_value/... find one by name/automation_id/
-        type and use it without moving the mouse; click is a real mouse click on it."""
+        type and use it without moving the mouse; click is a real mouse click on it.
+        Actions run once, then read back the control. verified=true means its observable state
+        matches; false means a mismatch; null means the outcome cannot be confirmed. For invoke/
+        click on a button, inspect the resulting window before deciding whether to repeat it."""
 
         def work():
             w = desktop.find_window(window)
             hwnd = w["hwnd"]
-            elements = merge_controls(
-                _run_uia(hwnd, Mode="inspect")["elements"], desktop.native_controls(hwnd)
-            )
+            elements = _inspect_controls(hwnd)["elements"]
             if action == "inspect":
                 shown = [
                     _public(e)
@@ -359,6 +374,7 @@ def register(mcp: FastMCP) -> None:
                 if target.get("uia_index") is not None and can:
                     done = _run_uia(
                         hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
+                        ExpectId=",".join(map(str, target.get("_runtime_id", []))),
                         Do=action, Value=value,
                     )["done"]  # fmt: skip
                 if not done and target.get("native"):
@@ -374,7 +390,70 @@ def register(mcp: FastMCP) -> None:
                 done = f"clicked at ({cx}, {cy})"
             if not done:
                 raise desktop.DesktopError(f"the control does not support {action}: {_public(target)}")
-            return {"done": done, "matches": len(found), "element": _public(target)}
+
+            expected = {}
+            if action == "set_value" and target.get("value") != "(hidden)":
+                expected = {"value": value or ""}
+            elif (action == "toggle" or done == "toggled") and target.get("toggle") in ("On", "Off"):
+                expected = {"toggle": "Off" if target["toggle"] == "On" else "On"}
+            elif action == "select" or done == "selected":
+                expected = {"selected": True} if "selected" in target else {"toggle": "On"}
+            elif action in ("expand", "collapse") or done == "expanded":
+                expected = {"expanded": "Collapsed" if action == "collapse" else "Expanded"}
+            elif action == "focus":
+                expected = {"focused": True}
+
+            deadline = time.monotonic() + verify_wait_s
+            after = None
+            verified = None
+            title = w["title"]
+            reason = "Action sent; inspect its outcome before repeating it."
+            while True:
+                try:
+                    snapshot = _inspect_controls(hwnd, timeout_s=max(1, min(3, deadline - time.monotonic())))
+                    title = snapshot["window"]
+                    candidates = snapshot["elements"]
+                    if target.get("_runtime_id"):
+                        candidates = [e for e in candidates if e.get("_runtime_id") == target["_runtime_id"]]
+                    elif target.get("hwnd"):
+                        candidates = [e for e in candidates if e.get("hwnd") == target["hwnd"]]
+                    elif target.get("automation_id"):
+                        candidates = [
+                            e
+                            for e in candidates
+                            if e.get("automation_id") == target["automation_id"]
+                            and e.get("type") == target.get("type")
+                        ]
+                    else:
+                        candidates = []  # an old list index cannot identify a control after redraw
+                    after = candidates[0] if len(candidates) == 1 else None
+                    if after is not None and expected and all(after.get(key) is not None for key in expected):
+                        verified = all(after[key] == val for key, val in expected.items())
+                        reason = (
+                            "Read-back matches the requested state."
+                            if verified
+                            else "Read-back does not match yet."
+                        )
+                    else:
+                        verified = None
+                        reason = (
+                            "Cannot confirm the control state; inspect the resulting window before repeating."
+                        )
+                except (desktop.DesktopError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                    reason = f"Action sent, but read-back failed: {exc}. Inspect before repeating."
+                    after, verified = None, None
+                    break
+                if verified is True or not expected or time.monotonic() >= deadline:
+                    break
+                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+            return {
+                "done": done,
+                "matches": len(found),
+                "window": title,
+                "element": _public(after) if after is not None else None,
+                "verified": verified,
+                "verification": reason,
+            }
 
         return await asyncio.to_thread(_errors, work)
 

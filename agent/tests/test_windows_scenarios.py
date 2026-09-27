@@ -391,16 +391,19 @@ def test_form(tmp_path):
     proc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)])
     from winhand import desktop
 
-    for _ in range(60):
-        try:
-            yield desktop.find_window("winhand-ui-test")
-            break
-        except desktop.DesktopError:
-            time.sleep(0.25)
-    else:
+    try:
+        for _ in range(60):
+            try:
+                window = desktop.find_window("winhand-ui-test")
+                break
+            except desktop.DesktopError:
+                time.sleep(0.25)
+        else:
+            pytest.fail("test form did not appear")
+        yield window
+    finally:
         proc.kill()
-        pytest.fail("test form did not appear")
-    proc.kill()
+        proc.wait(timeout=10)
 
 
 async def test_ui_automation_fills_and_presses_controls(test_form):
@@ -413,11 +416,29 @@ async def test_ui_automation_fills_and_presses_controls(test_form):
             await client.call_tool("ui", {"window": "winhand-ui-test", "filter": "Press"})
         ).structured_content
         assert any(e["name"] == "Press me" and e["type"] == "Button" for e in found["elements"])
-        await client.call_tool(
-            "ui",
-            {"window": "winhand-ui-test", "action": "set_value", "control_type": "Edit", "value": "你好 UIA"},
-        )
-        await client.call_tool("ui", {"window": "winhand-ui-test", "action": "toggle", "name": "Remember me"})
+        changed = (
+            await client.call_tool(
+                "ui",
+                {
+                    "window": "winhand-ui-test",
+                    "action": "set_value",
+                    "control_type": "Edit",
+                    "value": "你好 UIA",
+                },
+            )
+        ).structured_content
+        assert changed["verified"] is True and changed["element"]["value"] == "你好 UIA", changed
+        toggled = (
+            await client.call_tool(
+                "ui",
+                {
+                    "window": "winhand-ui-test",
+                    "action": "toggle",
+                    "name": "Remember me",
+                },
+            )
+        ).structured_content
+        assert toggled["verified"] is True and toggled["element"]["toggle"] == "On", toggled
         await client.call_tool("ui", {"window": "winhand-ui-test", "action": "invoke", "name": "Press me"})
         time.sleep(0.5)
         assert desktop.find_window(test_form["hwnd"])["title"] == "winhand-ui-test pressed: 你好 UIA / True"
