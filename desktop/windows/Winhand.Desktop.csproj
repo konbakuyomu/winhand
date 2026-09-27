@@ -8,7 +8,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\winhand.ico</ApplicationIcon>
     <Product>winhand</Product>
-    <Version>0.3.3</Version>
+    <Version>0.3.4</Version>
     <Platforms>x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <UseWinUI>true</UseWinUI>
