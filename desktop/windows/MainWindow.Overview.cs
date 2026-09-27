@@ -12,6 +12,7 @@ public sealed partial class MainWindow
     private Button? _reconnectButton, _disconnectButton;
     private StackPanel? _recentRows;
     private ContentControl? _setupHint;
+    private string? _recentKey;
 
     private UIElement BuildOverview()
     {
@@ -91,9 +92,16 @@ public sealed partial class MainWindow
         var today = _activity.Where(a => a.Kind == "tool" && Format.Local(a.Time).Date == DateTime.Today).ToList();
         var failed = today.Count(a => a.Status == "error");
         var open = _sessions.Count(s => Json.Str(s, "state") != "exited");
-        _todayFacts!.Text = $"今天 {today.Count} 次工具调用" + (failed > 0 ? $"，{failed} 次失败" : "") + $" · {open} 个会话进行中";
-        _recentRows.Children.Clear();
+        var facts = $"今天 {today.Count} 次工具调用" + (failed > 0 ? $"，{failed} 次失败" : "") + $" · {open} 个会话进行中";
+        if (_todayFacts!.Text != facts)
+            _todayFacts.Text = facts;
         var recent = _activity.AsEnumerable().Reverse().Take(8).ToList();
+        // sessions report every second; rebuild the rows only when the activity itself changed
+        var key = string.Join("|", recent.Select(a => $"{a.Id}:{a.Status}"));
+        if (key == _recentKey && _recentRows.Children.Count > 0)
+            return;
+        _recentKey = key;
+        _recentRows.Children.Clear();
         if (recent.Count == 0)
             _recentRows.Children.Add(Text("还没有活动。Claude 调用工具后会实时出现在这里。", "SecondaryCopyStyle"));
         for (var i = 0; i < recent.Count; i++)

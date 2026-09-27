@@ -234,18 +234,20 @@ public sealed partial class MainWindow
         return pane;
     }
 
+    private static Style DotStyle(Tone tone) => Resource<Style>(tone switch
+    {
+        Tone.Success => "ConnectionReadyStyle",
+        Tone.Warning or Tone.Active => "ConnectionPendingStyle",
+        Tone.Error => "ConnectionFailedStyle",
+        _ => "ConnectionIdleStyle"
+    });
+
     /// <summary>One list row: a status dot, a title and a secondary line.</summary>
     private static ListViewItem ListRow(string tag, string title, string subtitle, Tone tone)
     {
         var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
         {
-            Style = Resource<Style>(tone switch
-            {
-                Tone.Success => "ConnectionReadyStyle",
-                Tone.Warning or Tone.Active => "ConnectionPendingStyle",
-                Tone.Error => "ConnectionFailedStyle",
-                _ => "ConnectionIdleStyle"
-            }),
+            Style = DotStyle(tone),
             Margin = new Thickness(0, 7, 0, 0),
             VerticalAlignment = VerticalAlignment.Top
         };
@@ -261,6 +263,39 @@ public sealed partial class MainWindow
         var item = new ListViewItem { Content = grid, Tag = tag, Padding = new Thickness(12, 8, 12, 8), HorizontalContentAlignment = HorizontalAlignment.Stretch };
         AutomationProperties.SetName(item, $"{title}，{subtitle}");
         return item;
+    }
+
+    /// <summary>Change a row made by <see cref="ListRow"/> in place (a rebuild would flicker and lose focus).</summary>
+    private static void UpdateListRow(ListViewItem item, string title, string subtitle, Tone tone)
+    {
+        if (item.Content is not Grid { Children: [Microsoft.UI.Xaml.Shapes.Ellipse dot, StackPanel { Children: [TextBlock head, TextBlock sub] }] })
+            return;
+        var style = DotStyle(tone);
+        if (dot.Style != style)
+            dot.Style = style;
+        if (head.Text != title)
+            head.Text = title;
+        if (sub.Text != subtitle)
+            sub.Text = subtitle;
+        AutomationProperties.SetName(item, $"{title}，{subtitle}");
+    }
+
+    /// <summary>The value text of each row in a <see cref="Facts"/> grid, by label.</summary>
+    private static Dictionary<string, TextBlock> FactValues(Grid facts)
+    {
+        var labels = new Dictionary<int, string>();
+        var values = new Dictionary<string, TextBlock>();
+        foreach (var child in facts.Children.OfType<TextBlock>())
+        {
+            if (Grid.GetColumn(child) == 0)
+                labels[Grid.GetRow(child)] = child.Text;
+        }
+        foreach (var child in facts.Children.OfType<TextBlock>())
+        {
+            if (Grid.GetColumn(child) == 1 && labels.TryGetValue(Grid.GetRow(child), out var label))
+                values[label] = child;
+        }
+        return values;
     }
 
     /// <summary>The detail side of a split: a scrolling page with the standard edge.</summary>

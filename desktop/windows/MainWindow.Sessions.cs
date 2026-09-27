@@ -12,6 +12,10 @@ public sealed partial class MainWindow
     private ContentControl? _sessionDetail;
     private string? _sessionSelection;
     private bool _renderingSessions;
+    // what the detail pane was built for, and the texts that change without a rebuild
+    private string? _sessionDetailShape;
+    private ContentControl? _sessionPill;
+    private Dictionary<string, TextBlock> _sessionFacts = new();
 
     private UIElement BuildSessions()
     {
@@ -52,20 +56,34 @@ public sealed partial class MainWindow
         if (_sessionList is null)
             return;
         _renderingSessions = true;
-        _sessionList.Items.Clear();
         // live sessions first, newest first within each group
         var ordered = _sessions.AsEnumerable().Reverse().OrderBy(s => Json.Str(s, "state") == "exited").ToList();
         if (_sessionSelection is null || ordered.All(s => Json.Str(s, "id") != _sessionSelection))
             _sessionSelection = ordered.Select(s => Json.Str(s, "id")).FirstOrDefault();
-        foreach (var session in ordered)
+        var ids = ordered.Select(s => Json.Str(s, "id") ?? "").ToList();
+        var shown = _sessionList.Items.OfType<ListViewItem>().Select(i => i.Tag as string ?? "").ToList();
+        if (ids.SequenceEqual(shown))
         {
-            var id = Json.Str(session, "id") ?? "";
-            var (label, tone) = SessionState(Json.Str(session, "state") ?? "");
-            var item = ListRow(id, id, $"{label} · {Json.Str(session, "transport")}", tone);
-            _sessionList.Items.Add(item);
-            if (id == _sessionSelection)
-                _sessionList.SelectedItem = item;
+            // the backend reports live sessions every second: update the rows, do not rebuild them
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                var (label, tone) = SessionState(Json.Str(ordered[i], "state") ?? "");
+                UpdateListRow((ListViewItem)_sessionList.Items[i], ids[i], $"{label} · {Json.Str(ordered[i], "transport")}", tone);
+            }
         }
+        else
+        {
+            _sessionList.Items.Clear();
+            foreach (var session in ordered)
+            {
+                var id = Json.Str(session, "id") ?? "";
+                var (label, tone) = SessionState(Json.Str(session, "state") ?? "");
+                _sessionList.Items.Add(ListRow(id, id, $"{label} · {Json.Str(session, "transport")}", tone));
+            }
+        }
+        var selected = _sessionList.Items.OfType<ListViewItem>().FirstOrDefault(i => i.Tag as string == _sessionSelection);
+        if (!ReferenceEquals(_sessionList.SelectedItem, selected))
+            _sessionList.SelectedItem = selected;
         _renderingSessions = false;
         RenderSessionDetail();
     }
@@ -81,6 +99,8 @@ public sealed partial class MainWindow
             page.Children.Add(EmptyState("没有会话",
                 "Claude 用 session_start 打开终端、调试器、串口或网络控制台时，会话会出现在这里。每个会话的完整输出都记录在日志文件里。"));
             _sessionDetail.Content = DetailPane(page);
+            _sessionDetailShape = null;
+            _sessionPill = null;
             return;
         }
 
@@ -88,17 +108,37 @@ public sealed partial class MainWindow
         var state = Json.Str(session, "state") ?? "";
         var (label, tone) = SessionState(state);
         var profile = Json.Str(session, "profile");
-        page.Children.Add(DetailHeader(id, profile is null ? "" : $"profile：{profile}", Pill(label, tone), null));
-
         var unread = Json.Num(session, "unread_chars") ?? 0;
-        var facts = Facts(
+        (string Label, string Value, bool Mono)[] rows =
+        [
             ("状态", Json.Str(session, "reason") ?? label, false),
             ("方式", Json.Str(session, "transport") ?? "", false),
             ("目标", SessionTarget(session), true),
             ("目录", Json.Str(session, "cwd") ?? "", true),
             ("进程", Json.Num(session, "pid") is { } pid ? $"{pid:0}" : "", true),
             ("未读输出", unread > 0 ? $"{unread:0} 个字符尚未被 Claude 读取" : "", false),
-            ("日志", Json.Str(session, "log_file") ?? "", true));
+            ("日志", Json.Str(session, "log_file") ?? "", true)
+        ];
+
+        // Same session, same state, same rows: only texts changed (the "stuck for Ns" count
+        // ticks every second). Update them in place so the page neither jumps nor loses its scroll.
+        var shape = $"{id}|{state == "exited"}|{profile}|" + string.Join(",", rows.Where(r => r.Value.Length > 0).Select(r => r.Label));
+        if (shape == _sessionDetailShape && _sessionPill is not null)
+        {
+            _sessionPill.Content = label;
+            _sessionPill.Style = PillStyle(tone);
+            foreach (var (name, value, _) in rows)
+            {
+                if (_sessionFacts.TryGetValue(name, out var text) && text.Text != value)
+                    text.Text = value;
+            }
+            return;
+        }
+        _sessionDetailShape = shape;
+        _sessionPill = Pill(label, tone);
+        page.Children.Add(DetailHeader(id, profile is null ? "" : $"profile：{profile}", _sessionPill, null));
+        var facts = Facts(rows);
+        _sessionFacts = FactValues(facts);
         var actions = ActionRow();
         if (Json.Str(session, "log_file") is { } log)
             actions.Children.Add(Named(ActionButton("打开日志", () => OpenPath(log, select: true)), $"打开 {id} 的日志"));
