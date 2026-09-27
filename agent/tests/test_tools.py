@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,51 @@ def test_run_timeout_kills_process():
         sys.executable, ["-c", "import time; print('start', flush=True); time.sleep(30)"], timeout_s=1
     )
     assert res["timed_out"] and "start" in res["stdout"] and res["duration_ms"] < 10000
+
+
+def test_run_answers_in_time_and_the_rest_follows_by_id():
+    code = (
+        "import sys, time\n"
+        "print('first', flush=True)\n"
+        "time.sleep(1.5)\n"
+        "print('second', flush=True)\n"
+        "sys.exit(3)\n"
+    )
+    res = proc.run(sys.executable, ["-c", code], timeout_s=30, reply_within_s=0.5)
+    assert res["still_running"] and res["id"].startswith("run-") and "first" in res["stdout"]
+    assert "job_status" in res["next"] and res["duration_ms"] < 5000
+    status = proc.run_status(res["id"], since=res["cursor"])
+    assert status["state"] == "running"
+    deadline = time.monotonic() + 10
+    while status["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        status = proc.run_status(res["id"], since=res["cursor"])
+    assert status["state"] == "finished" and status["exit_code"] == 3
+    assert "second" in status["output"] and "first" not in status["output"]
+
+
+async def test_job_tools_follow_and_stop_a_run_that_is_still_going():
+    res = proc.run(sys.executable, ["-c", "import time; time.sleep(60)"], timeout_s=120, reply_within_s=0.3)
+    async with Client(build_server(Config())) as client:
+        status = (await client.call_tool("job_status", {"id": res["id"]})).structured_content
+        assert status["state"] == "running"
+        stopped = (await client.call_tool("job_stop", {"id": res["id"]})).structured_content
+        assert stopped["state"] == "finished" and stopped["stopped"]
+        missing = (await client.call_tool("job_status", {"id": "run-999999"})).structured_content
+        assert "no running command" in missing["error"]
+
+
+def test_run_still_kills_at_its_timeout_after_answering():
+    res = proc.run(sys.executable, ["-c", "import time; time.sleep(60)"], timeout_s=1.5, reply_within_s=0.3)
+    assert res["still_running"]
+    time.sleep(3)
+    status = proc.run_status(res["id"])
+    assert status["state"] == "finished" and status["timed_out"]
+
+
+def test_run_passes_stdin():
+    res = proc.run(sys.executable, ["-c", "import sys; print(sys.stdin.read().upper())"], stdin="hello")
+    assert res["stdout"].strip() == "HELLO" and res["exit_code"] == 0
 
 
 def test_split_command_keeps_windows_paths(monkeypatch):

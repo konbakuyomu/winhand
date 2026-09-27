@@ -12,6 +12,7 @@ from fastmcp import Client
 from mcp.shared.exceptions import MCPError
 from mcp.types import ImageContent
 
+from winhand import mcp_bridge
 from winhand.activity import ActivityHub
 from winhand.config import Config, ServerEntry
 from winhand.mcp_bridge import Services, compose_app, probe
@@ -57,6 +58,7 @@ async def test_a_local_server_is_its_own_endpoint(site):
             "roots",
             "ask",
             "crash",
+            "freeze",
             "pid",
         }  # not renamed, nothing else mixed in
         result = await client.call_tool("echo", {"text": "你好"})
@@ -117,6 +119,58 @@ async def test_a_crashed_server_is_restarted_on_the_next_call(site):
         second = (await client.call_tool("pid", {})).data  # same client session, new process
         assert second != first
     assert services.services["fake"].status()["state"] == "running"
+
+
+async def test_a_busy_server_that_still_answers_pings_is_left_alone(site, monkeypatch):
+    base, services, _ = site
+    monkeypatch.setattr(mcp_bridge, "CHECK_AFTER_S", 0.3)
+    async with Client(f"{base}/mcp/fake") as client:
+        first = (await client.call_tool("pid", {})).data
+        long_call = asyncio.create_task(client.call_tool("slow", {"steps": 30}))  # ~1.5 s, loop stays free
+        await asyncio.sleep(0.6)
+        assert (await client.call_tool("echo", {"text": "hi"})).content[0].text == "echo: hi"
+        assert (await long_call).data == "done 30"
+        assert (await client.call_tool("pid", {})).data == first
+    assert services.services["fake"].status()["state"] == "running"
+
+
+async def test_a_stuck_server_is_reported_then_restarted(site, monkeypatch):
+    base, services, _ = site
+    monkeypatch.setattr(mcp_bridge, "CHECK_AFTER_S", 0.3)
+    monkeypatch.setattr(mcp_bridge, "PING_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(mcp_bridge, "RESTART_AFTER_S", 2.5)
+    service = services.services["fake"]
+    async with Client(f"{base}/mcp/fake", timeout=15) as client:
+        first = (await client.call_tool("pid", {})).data
+        with pytest.raises(MCPError):  # the client gives up; the server stays frozen
+            await client.call_tool("freeze", {"seconds": 30}, timeout=1)
+        await asyncio.sleep(0.2)
+        with pytest.raises(MCPError) as refused:  # answered at once instead of hanging
+            await client.call_tool("echo", {"text": "x"})
+        assert "fake is not responding" in str(refused.value)
+        assert service.status()["state"] == "unresponsive"
+        while service.stuck_for() < 2.6:
+            await asyncio.sleep(0.2)
+    async with Client(f"{base}/mcp/fake", timeout=15) as client:
+        assert (await client.call_tool("pid", {})).data != first  # restarted on its own
+        assert (await client.call_tool("echo", {"text": "ok"})).content[0].text == "echo: ok"
+    assert service.status()["state"] == "running"
+
+
+async def test_a_request_that_finds_the_server_gone_is_sent_to_a_new_one(site):
+    base, services, _ = site
+    service = services.services["fake"]
+    async with Client(f"{base}/mcp/fake") as client:
+        first = (await client.call_tool("pid", {})).data
+        dead = service.process
+
+        def broken(message):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        dead.send = broken  # the process died and nobody noticed yet
+        assert (await client.call_tool("echo", {"text": "again"})).content[0].text == "echo: again"
+        assert service.process is not dead
+        assert (await client.call_tool("pid", {})).data != first
 
 
 async def test_unknown_and_disabled_servers_are_explained(site):

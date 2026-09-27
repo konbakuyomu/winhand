@@ -158,9 +158,39 @@ function getProvider(origin: string): OAuthProvider<Env> {
   return provider;
 }
 
+/**
+ * Some clients (the Python MCP SDK among them) send a confidential client's credentials both in
+ * the Authorization header and in the form body. RFC 6749 says to use one method, and the OAuth
+ * library rejects the request outright; when both copies agree, keep only the header.
+ */
+async function singleClientAuth(request: Request): Promise<Request> {
+  const auth = request.headers.get("authorization") ?? "";
+  const type = request.headers.get("content-type") ?? "";
+  if (!auth.startsWith("Basic ") || !type.includes("application/x-www-form-urlencoded")) return request;
+  const form = new URLSearchParams(await request.clone().text());
+  if (!form.has("client_secret")) return request;
+  let id = "";
+  let secret = "";
+  try {
+    const decoded = atob(auth.slice(6).trim());
+    const colon = decoded.indexOf(":");
+    id = decodeURIComponent(decoded.slice(0, colon));
+    secret = decodeURIComponent(decoded.slice(colon + 1));
+  } catch {
+    return request;
+  }
+  if (form.get("client_secret") !== secret || (form.has("client_id") && form.get("client_id") !== id)) return request;
+  form.delete("client_secret");
+  form.delete("client_id");
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  return new Request(request.url, { method: "POST", headers, body: form.toString() });
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/oauth/token" && request.method === "POST") request = await singleClientAuth(request);
     if (url.pathname === "/agent") {
       const auth = request.headers.get("authorization") ?? "";
       const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";

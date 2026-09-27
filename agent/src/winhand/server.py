@@ -28,6 +28,8 @@ winhand drives the Windows machine it runs on.
 
 Quick rules
 - One-shot command that finishes by itself -> `run` (no shell quoting issues when you pass `args`).
+  `run` answers within ~45 s; a command still going then comes back with `still_running` and an id:
+  it keeps running, and job_status(id) returns the rest and its exit code.
 - Anything interactive, long-running or stateful (shells, REPLs, debuggers, gdbserver, installers,
   serial/telnet consoles, full-screen TUIs) -> a session:
     session_start -> session_send / session_wait -> session_read / session_screen -> session_stop
@@ -143,11 +145,16 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             list[str] | None, Field(description="Arguments passed verbatim, no shell involved")
         ] = None,
         cwd: str | None = None,
-        timeout_s: Annotated[float, Field(description="Kill the process tree after this many seconds")] = 120,
+        timeout_s: Annotated[
+            float,
+            Field(description="Kill the process tree after this many seconds (it may outlive this answer)"),
+        ] = 120,
         env: dict[str, str] | None = None,
         stdin: Annotated[str | None, Field(description="Text piped to stdin")] = None,
     ) -> dict:
-        """Run a command to completion and return exit code, stdout and stderr.
+        """Run a command to completion and return exit code, stdout and stderr. Answers within about
+        45 s: if the command is still going then, the answer has `still_running` and an id, the
+        command keeps running, and job_status(id) returns the rest.
         Use a session instead for anything interactive or that must keep running."""
         return await asyncio.to_thread(proc.run, command, args, cwd, timeout_s, env, stdin)
 

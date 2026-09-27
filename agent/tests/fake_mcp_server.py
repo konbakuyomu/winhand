@@ -4,6 +4,7 @@ import asyncio
 import base64
 import os
 import sys
+import time
 
 from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
@@ -57,6 +58,13 @@ def crash() -> str:
     """Exit abruptly."""
     print("about to crash", file=sys.stderr, flush=True)
     os._exit(3)
+
+
+@mcp.tool
+async def freeze(seconds: float) -> str:
+    """Block the event loop (a server that calls blocking code from an async tool)."""
+    time.sleep(seconds)
+    return "thawed"
 
 
 @mcp.tool

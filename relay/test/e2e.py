@@ -40,13 +40,14 @@ def check(cond: bool, what: str) -> None:
         raise SystemExit(1)
 
 
-async def oauth_token(http: httpx.AsyncClient) -> str:
+async def oauth_token(http: httpx.AsyncClient, auth_method: str = "none") -> str:
     reg = await http.post(f"{BASE}/oauth/register", json={
-        "redirect_uris": [REDIRECT], "client_name": "e2e connector", "token_endpoint_auth_method": "none",
+        "redirect_uris": [REDIRECT], "client_name": "e2e connector", "token_endpoint_auth_method": auth_method,
         "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
     })
-    check(reg.status_code in (200, 201), f"dynamic client registration ({reg.status_code})")
+    check(reg.status_code in (200, 201), f"dynamic client registration, {auth_method} ({reg.status_code})")
     client_id = reg.json()["client_id"]
+    client_secret = reg.json().get("client_secret")
 
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -71,11 +72,18 @@ async def oauth_token(http: httpx.AsyncClient) -> str:
     query = parse_qs(urlparse(ok.headers["location"]).query)
     check(query.get("state") == ["s123"] and "code" in query, "redirect carries code and state")
 
-    token = await http.post(f"{BASE}/oauth/token", data={
+    data = {
         "grant_type": "authorization_code", "code": query["code"][0], "redirect_uri": REDIRECT,
         "client_id": client_id, "code_verifier": verifier, "resource": f"{BASE}/mcp",
-    })
-    check(token.status_code == 200, f"token exchange ({token.status_code})")
+    }
+    headers = {}
+    if client_secret:
+        # like the Python MCP SDK: credentials in the header and again in the body
+        data["client_secret"] = client_secret
+        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        headers["Authorization"] = f"Basic {basic}"
+    token = await http.post(f"{BASE}/oauth/token", data=data, headers=headers)
+    check(token.status_code == 200, f"token exchange, {auth_method} ({token.status_code} {token.text[:120]})")
     return token.json()["access_token"]
 
 
@@ -84,6 +92,8 @@ async def main() -> None:
         bad = await http.get(f"{BASE}/agent", headers={"Authorization": "Bearer wrong", "Upgrade": "websocket"})
         check(bad.status_code == 401, "agent with wrong token refused")
         token = await oauth_token(http)
+        confidential = await oauth_token(http, "client_secret_basic")
+        check(confidential != token, "a confidential client gets its own token")
 
         offline = await http.post(f"{BASE}/mcp", headers={"Authorization": f"Bearer {token}",
                                   "Accept": "application/json, text/event-stream", "Content-Type": "application/json"},

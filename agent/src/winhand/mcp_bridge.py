@@ -46,6 +46,12 @@ IS_WINDOWS = sys.platform == "win32"
 KEEPALIVE_S = 15.0
 SESSION_TTL_S = 24 * 3600
 CRASH_WINDOW_S = 60.0
+# A server that leaves a request unanswered this long is asked for a ping before the next call;
+# one that cannot answer a ping is stuck (its event loop is blocked), not just busy.
+CHECK_AFTER_S = 30.0
+PING_TIMEOUT_S = 10.0
+# Stuck this long, every client has long given up on the calls it holds: restart it.
+RESTART_AFTER_S = 120.0
 DEFAULT_INIT = {
     "protocolVersion": "2025-06-18",
     "capabilities": {},
@@ -209,7 +215,7 @@ class Service:
         self.entry = entry
         self.hub = hub
         self.process: StdioProcess | None = None
-        self.state = "stopped"  # stopped | starting | running | error
+        self.state = "stopped"  # stopped | starting | running | unresponsive | error
         self.error: str | None = None
         self.started_at: float | None = None
         self.last_used: float | None = None
@@ -217,6 +223,9 @@ class Service:
         self.init_result: dict | None = None
         self.sessions: dict[str, _Session] = {}
         self.pending: dict[int, _Pending] = {}
+        # requests the server has not answered yet (also those whose client gave up), by send time
+        self.unanswered: dict[int, float] = {}
+        self._health_lock = asyncio.Lock()
         self.server_requests: dict[str, Any] = {}  # id sent to the client -> upstream id
         self.exits: collections.deque[float] = collections.deque(maxlen=3)
         self.calls = 0
@@ -324,6 +333,7 @@ class Service:
     async def stop(self, reason: str = "stopped") -> None:
         process, self.process = self.process, None
         self.init_result = None
+        self.unanswered.clear()
         if process is not None:
             await asyncio.to_thread(process.stop)
         self._fail_pending(f"{self.entry.name} was {reason}")
@@ -335,14 +345,28 @@ class Service:
         tail = " | ".join(line for line in list(self.process.stderr)[-5:] if line)
         self.process = None
         self.init_result = None
+        self.unanswered.clear()
         self.exits.append(time.time())
         message = f"{self.entry.name} exited (code {code})" + (f": {tail}" if tail else "")
         log.warning("%s", message)
         self._fail_pending(message)
         self._set_state("error" if code else "stopped", message[:600] if code else None)
 
-    def _fail_pending(self, message: str) -> None:
+    def _drop_dead(self, process: StdioProcess, keep: int) -> None:
+        """Forget a process whose pipe broke; its other requests fail, `keep` is being resent."""
+        tail = " | ".join(line for line in list(process.stderr)[-5:] if line)
+        self.process = None
+        self.init_result = None
+        self.unanswered.clear()
+        self.exits.append(time.time())
+        message = f"{self.entry.name} exited" + (f": {tail}" if tail else "")
+        log.warning("%s (resending the request that found it gone)", message)
+        self._fail_pending(message, keep=keep)
+
+    def _fail_pending(self, message: str, keep: int | None = None) -> None:
         for uid, p in list(self.pending.items()):
+            if uid == keep:
+                continue
             self.pending.pop(uid, None)
             if p.future is not None:
                 if not p.future.done():
@@ -355,6 +379,8 @@ class Service:
 
     def _on_message(self, message: dict) -> None:
         if _is_response(message):
+            if isinstance(message["id"], int):
+                self.unanswered.pop(message["id"], None)
             p = self.pending.pop(message["id"], None) if isinstance(message["id"], int) else None
             if p is None:
                 return
@@ -450,6 +476,53 @@ class Service:
             }
         )
 
+    # ------------------------------------------------------------ health
+
+    def stuck_for(self) -> float:
+        """Seconds the oldest unanswered request has waited (0 when there is none)."""
+        return time.time() - min(self.unanswered.values()) if self.unanswered else 0.0
+
+    async def responds(self) -> bool:
+        """Can the server answer a ping right now? A busy server still can; a stuck one cannot."""
+        if not self.process or not self.process.alive():
+            return False
+        try:
+            await self._internal("ping", {}, PING_TIMEOUT_S)
+        except (TimeoutError, ServiceError, OSError, ValueError):
+            return False
+        return True
+
+    async def check_health(self, before_call: bool = False) -> str | None:
+        """Ping a server that has left requests unanswered for a while. Returns why a new call
+        cannot be served, or None. A server stuck longer than RESTART_AFTER_S is restarted."""
+        if self.entry.kind != "stdio" or self.stuck_for() < CHECK_AFTER_S:
+            return None
+        async with self._health_lock:
+            waited = self.stuck_for()
+            if waited < CHECK_AFTER_S:
+                return None
+            if await self.responds():
+                self.unanswered.clear()  # alive: those were long calls or ones the client cancelled
+                if self.state == "unresponsive":
+                    self._set_state("running")
+                return None
+            if waited >= RESTART_AFTER_S:
+                message = (
+                    f"{self.entry.name} stopped responding (no answer for {waited:.0f}s, not even to a ping), "
+                    "so winhand restarted it"
+                )
+                log.warning("%s", message)
+                await self.stop("restarted because it stopped responding")
+                self.error = message
+                return None  # the caller starts it again
+            message = (
+                f"{self.entry.name} is not responding: a request has gone unanswered for {waited:.0f}s "
+                f"and it does not answer a ping. winhand restarts it automatically once it has been stuck "
+                f"for {RESTART_AFTER_S:.0f}s; restart it in the winhand app to do it now."
+            )
+            self._set_state("unresponsive", message)
+            return message if before_call else None
+
     # ------------------------------------------------------------ HTTP (client side)
 
     async def handle(self, request: Request) -> Response:
@@ -505,13 +578,17 @@ class Service:
         if not requests:
             return Response(status_code=202)
 
-        try:
-            await self.ensure_started()
-        except ServiceError as exc:
+        refused = await self.check_health(before_call=True)
+        if refused is None:
+            try:
+                await self.ensure_started()
+            except ServiceError as exc:
+                refused = str(exc)
+        if refused is not None:
             return JSONResponse(
-                [_error(m["id"], str(exc)) for m in requests]
+                [_error(m["id"], refused) for m in requests]
                 if len(requests) > 1
-                else _error(requests[0]["id"], str(exc))
+                else _error(requests[0]["id"], refused)
             )
         stream = _Stream()
         session.streams.append(stream)
@@ -524,10 +601,10 @@ class Service:
             if m.get("method") == "tools/call":
                 self.calls += 1
             try:
-                assert self.process is not None
-                await asyncio.to_thread(self.process.send, {**m, "id": uid})
-            except (OSError, ValueError, AssertionError) as exc:
+                await self._send_request({**m, "id": uid})
+            except (OSError, ValueError, ServiceError) as exc:
                 self.pending.pop(uid, None)
+                self.unanswered.pop(uid, None)
                 stream.queue.put_nowait(
                     ("answer", uid, _error(m["id"], f"{self.entry.name} is not running: {exc}"))
                 )
@@ -536,6 +613,25 @@ class Service:
             media_type="text/event-stream",
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
         )
+
+    async def _send_request(self, message: dict) -> None:
+        """Send a client request. A pipe that is already broken means the server died before it
+        could read anything, so starting it again and resending once is safe."""
+        for attempt in (1, 2):
+            process = self.process
+            try:
+                if process is None:
+                    raise OSError("not running")
+                await asyncio.to_thread(process.send, message)
+                self.unanswered[message["id"]] = time.time()
+                return
+            except (OSError, ValueError):
+                if attempt == 2:
+                    raise
+                if process is not None and process is self.process:
+                    self._drop_dead(process, keep=message["id"])
+                    await asyncio.to_thread(process.stop)
+                await self.ensure_started()
 
     async def _forward_other(self, session: _Session, m: dict) -> None:
         if not self.process or not self.process.alive():
@@ -695,9 +791,11 @@ class Services:
 
     async def _idle_loop(self) -> None:
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
             now = time.time()
             for service in list(self.services.values()):
+                with contextlib.suppress(Exception):
+                    await service.check_health()
                 minutes = service.entry.idle_stop_minutes
                 busy = service.pending or any(s.streams for s in service.sessions.values())
                 if (

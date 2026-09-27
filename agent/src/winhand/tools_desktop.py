@@ -20,7 +20,7 @@ from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import desktop, jobs, media, winenv
+from . import desktop, jobs, media, proc, winenv
 from .secret_prompt import PromptUnavailable, ask_pick
 
 UIA_SCRIPT = Path(__file__).parent / "scripts" / "uia.ps1"
@@ -423,9 +423,13 @@ def register(mcp: FastMCP) -> None:
         """State (running/finished/vanished), exit code and output of a background job."""
         if id is None:
             return await asyncio.to_thread(_errors, lambda: {"jobs": jobs.list_jobs()})
+        if id.startswith("run-"):  # a `run` command that was still going when run answered
+            return await asyncio.to_thread(_errors, proc.run_status, id, since)
         return await asyncio.to_thread(_errors, jobs.status, id, since)
 
     @mcp.tool
     async def job_stop(id: str) -> dict:
         """Stop a running background job (and its child processes)."""
+        if id.startswith("run-"):
+            return await asyncio.to_thread(_errors, proc.run_stop, id)
         return await asyncio.to_thread(_errors, jobs.stop, id)

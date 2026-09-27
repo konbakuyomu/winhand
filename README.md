@@ -109,7 +109,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 分组 | 工具 |
 |---|---|
 | 会话 | `session_start` `session_send` `session_wait` `session_read` `session_screen` `session_list` `session_stop` `session_resize` `session_prompt_user` `profile_list` |
-| 一次性命令和进程 | `run` `proc_list` `proc_kill` `sys_info` |
+| 一次性命令和进程 | `run`（约 45 秒内一定回复；没跑完的命令继续运行，用 `job_status` 取后续输出）`proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_search` `fs_stat` |
 | 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
@@ -126,7 +126,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 https://<你的中转域名>/mcp/<名称>
 ```
 
-在 claude.ai 里把每个地址分别添加为自定义连接器即可（授权一次口令；同一个中转下的地址共用授权）。winhand 原样转发，不改工具名，进度通知、图片、服务端发起的请求都能往返；服务在第一次被调用时启动，崩溃后下一次调用自动重启。
+在 claude.ai 里把每个地址分别添加为自定义连接器即可（授权一次口令；同一个中转下的地址共用授权）。winhand 原样转发，不改工具名，进度通知、图片、服务端发起的请求都能往返；服务在第一次被调用时启动，崩溃后下一次调用自动重启。服务卡住（请求迟迟没有回应，连心跳 ping 也不回）时，新的调用会立刻得到说明而不是一直等待；卡住超过 2 分钟会自动重启，托盘里显示为“无响应”。
 
 在托盘应用的“MCP 服务”页添加、编辑、测试、启停，或从 Codex / Claude Desktop / Claude Code 的配置导入；配置保存在 `~/.winhand/config.toml`：
 

@@ -69,6 +69,7 @@ public sealed partial class MainWindow
             "running" => ("运行中", identity.Length > 0 ? identity : "已启动", Tone.Success),
             "starting" => ("启动中", "正在启动并握手", Tone.Active),
             "error" => ("出错", FirstLine(Json.Str(status, "error") ?? "启动失败"), Tone.Error),
+            "unresponsive" => ("无响应", "有请求迟迟没有回应，也不回应心跳；卡住超过 2 分钟会自动重启", Tone.Warning),
             _ => ("待命", "第一次被调用时启动", Tone.Neutral)
         };
     }
@@ -195,7 +196,7 @@ public sealed partial class MainWindow
             var test = Named(ActionButton(busy ? "处理中…" : "测试", () => _ = TestMcpAsync(name)), $"测试 {name}");
             test.IsEnabled = !busy;
             var actions = ActionRow(test);
-            if (!http && Json.Str(status, "state") is "running" or "error")
+            if (!http && Json.Str(status, "state") is "running" or "error" or "unresponsive")
             {
                 var restart = Named(ActionButton("重启", () => _ = RestartMcpAsync(name)), $"重启 {name}");
                 restart.IsEnabled = !busy;
@@ -204,7 +205,7 @@ public sealed partial class MainWindow
             if (Json.Str(status, "log_file") is { } log)
                 actions.Children.Add(Named(ActionButton("打开日志", () => OpenPath(log, select: true)), $"打开 {name} 的日志"));
             runtime.Children.Add(actions);
-            page.Children.Add(Section("运行", http ? "请求直接转发到这个本机地址。" : "第一次被调用时启动，崩溃后下一次调用会自动重启。", Card(runtime)));
+            page.Children.Add(Section("运行", http ? "请求直接转发到这个本机地址。" : "第一次被调用时启动；崩溃或卡住不响应时会自动重启。", Card(runtime)));
         }
 
         // ---- how it is started
