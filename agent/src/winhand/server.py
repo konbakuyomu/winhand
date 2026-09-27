@@ -362,7 +362,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         ] = None,
         min_chars: Annotated[int | None, Field(description="Stop once this much new output arrived")] = None,
         timeout_s: Annotated[
-            float, Field(description="Max wait for this call (capped at 50s; call again to keep waiting)")
+            float, Field(description="Max wait for this call (capped at 45s; call again to keep waiting)")
         ] = 30,
         include_screen: bool = False,
     ) -> dict:
