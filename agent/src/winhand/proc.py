@@ -750,3 +750,93 @@ def sys_info() -> dict:
     except Exception:
         pass
     return info
+
+
+def doctor() -> list[dict]:
+    """Checks for the Windows setups that tripped AI sessions before, each with a fix."""
+    checks: list[dict] = []
+
+    def add(check: str, ok: bool, detail: str, fix: str = "") -> None:
+        item = {"check": check, "ok": ok, "detail": detail}
+        if fix and not ok:
+            item["fix"] = fix
+        checks.append(item)
+
+    path = os.environ.get("PATH", "")
+    if winenv.IS_WINDOWS:
+        import ctypes
+        import winreg
+
+        pwsh = shutil.which("pwsh")
+        add(
+            "pwsh",
+            bool(pwsh),
+            pwsh or "only Windows PowerShell 5.1",
+            "winget install Microsoft.PowerShell — PowerShell 7 handles UTF-8 and native arguments better",
+        )
+        acp, oem = ctypes.windll.kernel32.GetACP(), ctypes.windll.kernel32.GetOEMCP()
+        add(
+            "code_page",
+            acp == 65001,
+            f"ANSI cp{acp}, OEM cp{oem}",
+            "winhand decodes legacy output, but programs that print raw bytes may still garble text; "
+            "Region settings > 'Use Unicode UTF-8 for worldwide language support' makes it UTF-8",
+        )
+        add(
+            "redirection_guard",
+            not winenv.redirection_guard_enforced(),
+            "enforced" if winenv.redirection_guard_enforced() else "not enforced",
+            "restart winhand from the Start menu (an installer started it with RedirectionGuard, which "
+            "breaks scoop/mise shims)",
+        )
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem"
+            ) as k:
+                long_paths = winreg.QueryValueEx(k, "LongPathsEnabled")[0] == 1
+        except OSError:
+            long_paths = False
+        add(
+            "long_paths",
+            long_paths,
+            "enabled" if long_paths else "disabled",
+            "winhand's own file tools cope, but other programs fail past 260 characters; enable "
+            "LongPathsEnabled (an admin job: job_start elevated=true)",
+        )
+        bash = _git_bash(path)
+        add("git_bash", bool(bash), bash or "not found", "install Git for Windows for run(shell='bash')")
+        wsl = shutil.which("wsl")
+        add("wsl", bool(wsl), wsl or "not installed", "wsl --install, if Linux tooling is needed")
+        shims = [d for d in path.split(os.pathsep) if re.search(r"(?i)[\\/](shims|mise)[\\/]?", d)]
+        add(
+            "shims",
+            True,
+            ("; ".join(shims) + " — .cmd shims cannot take multi-line arguments; use run(script=...)")
+            if shims
+            else "no scoop/mise shim folders on PATH",
+        )
+    ssh = shutil.which("ssh")
+    ssh_config = os.path.join(os.path.expanduser("~"), ".ssh", "config")
+    add(
+        "ssh",
+        bool(ssh),
+        f"{ssh or 'not found'}; config {'present' if os.path.isfile(ssh_config) else 'absent'}",
+        "install the OpenSSH client (Settings > Optional features) for remote_run",
+    )
+    rg = shutil.which("rg")
+    add(
+        "ripgrep",
+        bool(rg),
+        rg or "not found",
+        "winget install BurntSushi.ripgrep.MSVC (fs_search is slower without it)",
+    )
+    home = os.path.expanduser("~")
+    uv = shutil.which("uv")
+    add(
+        "non_ascii_home",
+        home.isascii() or not uv,
+        home,
+        "uv-created virtual environments can fail with 'trampoline failed to canonicalize script path' "
+        "under non-ASCII folders; keep projects and UV_PROJECT_ENVIRONMENT under an ASCII path",
+    )
+    return checks

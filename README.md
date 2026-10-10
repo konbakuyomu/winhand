@@ -135,6 +135,10 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 截图和图片按大小预算编码（PNG，过大时改用 JPEG 并逐步缩小），保证能通过客户端的结果大小限制；原始分辨率的截图同时保存在本机（结果里的 `original_file`），需要看清细节时用 `fs_read` 加 `region` 放大那一块。
 
+需要看界面或确认某个程序、对话框、安装程序的状态时，模型应自己调用 `screenshot`，不要让人截图；要点击时优先用 `ui`。`ui(action="wait")` 可以一直等到某个控件出现、消失、变为可用或显示某个值（比如安装程序的"下一步"按钮变为可点），`window(action="wait")` 等某个窗口出现或关闭，最多等 40 秒。按进程名选窗口时，优先选该程序的主窗口，不会选中它的提示框或弹出菜单。
+
+`sys_info(checks=true)` 会做一次环境体检，逐项列出 PowerShell 7、代码页、RedirectionGuard、长路径、Git Bash、WSL、scoop/mise shim、ssh、ripgrep 和非 ASCII 用户目录的状态，每项附修复建议。
+
 `ui` 的操作只执行一次，之后回读控件状态；`verified=true` 表示可观察状态符合预期，`false` 表示未达到，`null` 表示无法确认。填写内容、切换勾选、选择、展开和聚焦可以按控件支持的状态核验；普通按钮被点击不代表它触发的工作已经完成，还应检查结果窗口。`verify_wait_s` 默认 3 秒，最多 10 秒，用于等待回读状态改变。
 
 `remote_run(host, script)` 用这台电脑的 ssh 配置和密钥（包括别名和 ProxyJump）在另一台机器上执行脚本：
@@ -185,6 +189,8 @@ url = "http://127.0.0.1:8000/mcp"
 ```
 
 命令行：`winhand mcp list`、`winhand mcp import [名称…]`、`winhand mcp test [名称…]`。
+
+本机 MCP 服务可以在 `config.toml` 里设置 `call_timeout_s`。单次工具调用超过这个时间，winhand 会取消这次调用并给客户端回一个错误，避免整个服务被一个卡住的调用拖住。
 
 ## Profile
 
