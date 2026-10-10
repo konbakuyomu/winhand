@@ -1044,3 +1044,37 @@ async def test_queued_input_is_judged_by_the_rules_in_force_when_its_turn_comes(
         assert (await queued).is_error, "the rule added while it waited applies"
     finally:
         await client.call_tool("session_stop", {"id": sid, "force": True})
+
+
+async def test_a_call_arriving_while_the_lock_is_handed_on_rereads_the_rules(winhand_home, monkeypatch):
+    """The moment one call releases the lock and the next one has not resumed yet, lock.locked()
+    is False although a newcomer still has to wait: it must not keep the rules it read before."""
+    rules = winhand_home / "guards.toml"
+    write_rules(rules, '[[guard]]\non = "input"\nmatch = "ASKME"\ndecision = "ask"\n')
+    mcp = build_server(Config())
+    mw = next(m for m in mcp.middleware if isinstance(m, guard.GuardActions))
+    fake = [sys.executable, "-u", FAKE_APP]
+    async with Client(mcp) as client:
+        sid = (
+            await client.call_tool(
+                "session_start",
+                {"profile": "shell", "command": fake, "prompts": [r"^fake> ?$"], "startup_wait_s": 10},
+            )
+        ).structured_content["session"]["id"]
+        try:
+            real = mw._input_rules_apply
+
+            def then_rules_change(session_id, cache=None):
+                applies = real(session_id, cache)
+                write_rules(rules, '[[guard]]\non = "input"\nmatch = "DANGER"\ndecision = "deny"\n')
+                return applies
+
+            monkeypatch.setattr(mw, "_input_rules_apply", then_rules_change)
+            mw._queued[sid] = 1  # the lock is free right now, but a woken waiter still goes first
+            late = await client.call_tool(
+                "session_send", {"id": sid, "text": "echo DANGER-C", "submit": True}, raise_on_error=False
+            )
+            assert late.is_error, "judged by the rules in force when its turn came"
+        finally:
+            mw._queued[sid] = 0
+            await client.call_tool("session_stop", {"id": sid, "force": True})

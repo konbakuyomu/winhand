@@ -504,6 +504,7 @@ class GuardActions(Middleware):
         # per shell session: what was typed there and not run yet (judged with the next Enter)
         self._typed: dict[str, LineState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._queued: dict[str, int] = {}  # calls holding or waiting for each session's lock
         self._inflight: dict[str, int] = {}
         self._overlap: set[str] = set()
 
@@ -526,15 +527,20 @@ class GuardActions(Middleware):
             # judged and sent in order, so a line typed by one call and ended by another is
             # always judged whole
             lock = self._locks.setdefault(sid, asyncio.Lock())
-            if lock.locked():
-                cache = {}  # its turn comes later: judge it by the rules in force then
-            async with lock:
-                actions = self._describe(message.name, args)
-                result = await self._sent(
-                    message.name, args, self._judged(context, call_next, actions, cache)
-                )
-                self._remember(message.name, args, result)
-                return result
+            if self._queued.get(sid, 0):
+                # another call holds the lock or waits for it (lock.locked() is briefly False
+                # while it is handed on): this one's turn comes later, judge it by the rules then
+                cache = {}
+            self._queued[sid] = self._queued.get(sid, 0) + 1
+            try:
+                async with lock:
+                    actions = self._describe(message.name, args)
+                    call = self._judged(context, call_next, actions, cache)
+                    result = await self._sent(message.name, args, call)
+                    self._remember(message.name, args, result)
+                    return result
+            finally:
+                self._queued[sid] -= 1
         # no input rules: nothing waits, but input that overlaps other input to the same session
         # leaves the typed line unknown, so rules added later never judge a stale line
         self._inflight[sid] = self._inflight.get(sid, 0) + 1
