@@ -367,3 +367,34 @@ def test_global_relative_patterns_match_anywhere_and_ignore_case_on_windows(tmp_
     if os.name == "nt":
         upper = actions.Action("read", "fs_read", (str(tmp_path / "keys" / "ID.PEM"),))
         assert guard.matches(rule, upper)
+
+
+def test_the_confirm_dialog_defaults_to_no(monkeypatch, capsys):
+    """The dialog pops up over whatever the person is typing into: a stray Enter must mean No."""
+    import json
+    import types
+
+    seen = {}
+
+    class Root:
+        def withdraw(self):
+            pass
+
+        def attributes(self, *a):
+            pass
+
+    def askyesno(title, message, **kw):
+        seen.update(title=title, message=message, **kw)
+        return False
+
+    tk = types.ModuleType("tkinter")
+    tk.Tk = Root
+    tk.messagebox = types.SimpleNamespace(askyesno=askyesno)
+    tk.simpledialog = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "tkinter", tk)
+    monkeypatch.setitem(sys.modules, "tkinter.messagebox", tk.messagebox)
+    monkeypatch.setitem(sys.modules, "tkinter.simpledialog", tk.simpledialog)
+    payload = json.dumps({"kind": "confirm", "title": "t", "message": "删除？"}, ensure_ascii=False)
+    assert secret_prompt.dialog_main(payload) == 0
+    assert seen["default"] == "no" and seen["message"] == "删除？"
+    assert json.loads(capsys.readouterr().out) == {"value": False}

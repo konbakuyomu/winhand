@@ -44,8 +44,14 @@ def dialog_main(payload: str) -> int:
     if isinstance(request, dict) and request.get("kind") == "confirm":
         from tkinter import messagebox
 
+        # "No" has the focus: the dialog pops up over whatever the person is typing into, and a
+        # stray Enter or Space must not approve the action
         value = messagebox.askyesno(
-            request.get("title") or "winhand", request.get("message") or "", icon="warning", parent=root
+            request.get("title") or "winhand",
+            request.get("message") or "",
+            icon="warning",
+            default="no",
+            parent=root,
         )
         sys.stdout.write(json.dumps({"value": bool(value)}))
         return 0
