@@ -224,8 +224,9 @@ def _start_dir(path: str) -> str:
     return str(p)
 
 
-def files_for(anchors: list[str]) -> list[RuleFile]:
-    """The global file, then every .winhand/guards.toml in the folders above each anchor."""
+def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
+    """The global file, then every .winhand/guards.toml in the folders above each anchor.
+    `cache` (one per batch of lookups) remembers what each folder holds."""
     out: list[RuleFile] = []
     seen: set[str] = set()
     glob_file = str(global_path())
@@ -240,7 +241,12 @@ def files_for(anchors: list[str]) -> list[RuleFile]:
             key = _norm(candidate)
             if key not in seen:
                 seen.add(key)
-                found = load(candidate, base=str(d))
+                if cache is not None and key in cache:
+                    found = cache[key]
+                else:
+                    found = load(candidate, base=str(d))
+                    if cache is not None:
+                        cache[key] = found
                 if found is not None:
                     out.append(found)
             if d == d.parent:
@@ -291,10 +297,10 @@ class Verdict:
     broken: list[RuleFile] = field(default_factory=list)
 
 
-def judge(actions: list[Action]) -> Verdict:
+def judge(actions: list[Action], cache: dict | None = None) -> Verdict:
     verdict = Verdict()
     for action in actions:
-        for rule_file in files_for(_anchors(action)):
+        for rule_file in files_for(_anchors(action), cache):
             if rule_file.error:
                 if rule_file not in verdict.broken:
                     verdict.broken.append(rule_file)
@@ -421,12 +427,24 @@ def _filter_search(result, args: dict):
     root = data["root"]
     if not os.path.isdir(root):
         return result  # one file: judged as a read before the search ran
-    kept, hidden, verdicts = [], set(), {}
+    kept, hidden, verdicts, cache, folders = [], set(), {}, {}, {}
+
+    def read_rules_apply(folder: str) -> bool:
+        # once per folder: a folder no read rule can reach lets its files through unjudged
+        if folder not in folders:
+            found = files_for(variants(folder), cache)
+            folders[folder] = any(f.error or any("read" in r.on for r in f.rules) for f in found)
+        return folders[folder]
+
     for line in data["matches"]:
         files = _search_files(root, str(line), bool(args.get("files_only")))
         for full in files:
             if full not in verdicts:
-                verdicts[full] = judge([Action("read", "fs_search", (full,))]).decision
+                verdicts[full] = (
+                    judge([Action("read", "fs_search", (full,))], cache).decision
+                    if read_rules_apply(os.path.dirname(full))
+                    else None
+                )
         refused = [f for f in files if verdicts[f] in ("deny", "ask")]
         if refused:
             hidden.update(os.path.relpath(f, root) for f in refused)
@@ -489,14 +507,15 @@ class GuardActions(Middleware):
         sid = str(args.get("id"))
         if (message.name == "session_stop" and args.get("force")) or _interrupt_only(args):
             # these can run nothing typed: never queue them behind a call that is still waiting
-            result = await call_next(context)
+            result = await self._sent(message.name, args, call_next(context))
             self._remember(message.name, args, result)
             return result
         if await asyncio.to_thread(self._input_rules_apply, args.get("id")):
             # judged and sent in order, so a line typed by one call and ended by another is
             # always judged whole
             async with self._locks.setdefault(sid, asyncio.Lock()):
-                result = await self._judged(context, call_next, self._describe(message.name, args))
+                actions = self._describe(message.name, args)
+                result = await self._sent(message.name, args, self._judged(context, call_next, actions))
                 self._remember(message.name, args, result)
                 return result
         # no input rules: nothing waits, but input that overlaps other input to the same session
@@ -505,7 +524,8 @@ class GuardActions(Middleware):
         if self._inflight[sid] > 1:
             self._overlap.add(sid)
         try:
-            result = await self._judged(context, call_next, self._describe(message.name, args))
+            actions = self._describe(message.name, args)
+            result = await self._sent(message.name, args, self._judged(context, call_next, actions))
         finally:
             self._inflight[sid] -= 1
         self._remember(message.name, args, result)
@@ -514,6 +534,16 @@ class GuardActions(Middleware):
         if not self._inflight[sid]:
             self._overlap.discard(sid)
         return result
+
+    async def _sent(self, tool: str, args: dict, call):
+        """Await a call that types into a session; if it ends in an exception (a cancelled call
+        included) the input may have gone out in part, so what is typed there becomes unknown."""
+        try:
+            return await call
+        except BaseException:
+            if tool != "session_stop" or not args.get("force"):
+                self._typed[args.get("id")] = UNKNOWN_STATE
+            raise
 
     def _input_rules_apply(self, sid) -> bool:
         try:

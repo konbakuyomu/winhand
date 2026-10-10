@@ -898,3 +898,63 @@ async def test_copying_odd_spellings_and_whole_folders_is_judged(client, winhand
         raise_on_error=False,
     )
     assert whole.is_error and not (tmp_path / "out").exists()
+
+
+async def test_input_that_ends_in_an_exception_leaves_the_line_unknown():
+    """A call cancelled (or failing) after its text went out: the typed line can no longer be known."""
+    import asyncio
+    import types
+
+    spec = SessionSpec(transport="pty", argv=["bash"], profile="shell")
+    sessions = types.SimpleNamespace(get=lambda sid: types.SimpleNamespace(spec=spec, alive=True))
+    mw = guard.GuardActions(sessions)
+    context = types.SimpleNamespace(
+        message=types.SimpleNamespace(name="session_send", arguments={"id": "s1", "text": "echo hi"})
+    )
+
+    async def cancelled(_context):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await mw.on_call_tool(context, cancelled)
+    assert mw._typed["s1"] == actions.UNKNOWN_STATE
+
+    async def fine(_context):
+        from fastmcp.tools.base import ToolResult
+
+        return ToolResult(structured_content={"output": ""})
+
+    stop = types.SimpleNamespace(
+        message=types.SimpleNamespace(name="session_stop", arguments={"id": "s1", "force": True})
+    )
+    await mw.on_call_tool(stop, fine)
+    assert "s1" not in mw._typed
+
+
+def test_search_filtering_costs_little_without_rules_and_finds_nested_ones(tmp_path):
+    import types
+
+    lines = []
+    for d in range(10):
+        sub = tmp_path / "pkg" / f"m{d}"
+        sub.mkdir(parents=True)
+        for f in range(20):
+            (sub / f"f{f}.py").write_text("TOKEN\n")
+            lines.append(f"pkg/m{d}/f{f}.py:1:TOKEN")
+    result = types.SimpleNamespace(
+        structured_content={"root": str(tmp_path), "matches": lines, "count": len(lines)}
+    )
+    assert guard._filter_search(result, {}) is result, "no rule file: the result is left exactly as it was"
+    write_rules(
+        tmp_path / "pkg" / "m3" / ".winhand" / "guards.toml",
+        """\
+        [[guard]]
+        on = "read"
+        path = ["f1.py"]
+        decision = "deny"
+        """,
+    )
+    filtered = guard._filter_search(result, {}).structured_content
+    assert filtered["count"] == len(lines) - 1 and "pkg/m3/f1.py" in filtered["guard_hidden"].replace(
+        "\\", "/"
+    )
