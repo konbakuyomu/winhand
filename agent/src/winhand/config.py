@@ -58,6 +58,7 @@ class ServerEntry:
     startup_timeout_s: float = 60.0
     idle_stop_minutes: float = 0.0  # 0 = keep it running once started
     description: str = ""
+    call_timeout_s: float = 0.0  # 0 = no limit; otherwise a tool call is cancelled after this long
 
     @property
     def kind(self) -> str:
@@ -90,6 +91,7 @@ def entry_from_dict(name: str, entry: dict) -> ServerEntry:
         startup_timeout_s=float(entry.get("startup_timeout_s") or entry.get("startup_timeout_sec") or 60),
         idle_stop_minutes=float(entry.get("idle_stop_minutes") or 0),
         description=str(entry.get("description") or ""),
+        call_timeout_s=float(entry.get("call_timeout_s") or 0),
     )
 
 
@@ -188,6 +190,8 @@ def save(cfg: Config, path: Path | None = None) -> Path:
             lines.append(f"startup_timeout_s = {_toml_value(s.startup_timeout_s)}")
         if s.idle_stop_minutes:
             lines.append(f"idle_stop_minutes = {_toml_value(s.idle_stop_minutes)}")
+        if s.call_timeout_s:
+            lines.append(f"call_timeout_s = {_toml_value(s.call_timeout_s)}")
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
     return path

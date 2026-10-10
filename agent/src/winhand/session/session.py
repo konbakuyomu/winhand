@@ -27,6 +27,7 @@ from .transports import (
 )
 
 TRANSPORTS = ("pty", "pipe", "serial", "tcp")
+_CURSOR_MOVES = re.compile(r"\x1b\[\d+;\d+[Hf]")
 
 
 @dataclass
@@ -391,6 +392,14 @@ class Session:
             out["recent_events"] = self.events[-5:]
         out["next"] = _next_hint(out)
         return out
+
+    def redraws_screen(self, since: int) -> bool:
+        """Did the output since `since` move the cursor around like a full-screen program does?
+        Then the text is redraw fragments and only the screen makes sense of it."""
+        if self.screen is None:
+            return False
+        raw = self.buffer.read(since).text
+        return len(_CURSOR_MOVES.findall(raw)) >= 3 or "\x1b[?1049h" in raw
 
     def summary(self) -> dict:
         st = self.state()

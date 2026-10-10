@@ -74,6 +74,8 @@ if IS_WINDOWS:
         wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(RECT), wintypes.LPARAM
     )
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
@@ -215,6 +217,7 @@ def windows() -> list[dict]:
             process = psutil.Process(pid.value).name()
         except psutil.Error:
             process = ""
+        rect = _rect(hwnd)
         out.append(
             {
                 "hwnd": int(hwnd),
@@ -222,7 +225,9 @@ def windows() -> list[dict]:
                 "process": process,
                 "pid": pid.value,
                 "class": _class(hwnd),
-                **_rect(hwnd),
+                # an owned window is a dialog, tooltip or popup of another one
+                "owned": bool(user32.GetWindow(hwnd, 4)),  # GW_OWNER
+                **rect,
                 "minimized": bool(user32.IsIconic(hwnd)),
                 "maximized": bool(user32.IsZoomed(hwnd)),
                 "foreground": hwnd == foreground,
@@ -234,21 +239,54 @@ def windows() -> list[dict]:
     return out
 
 
+# Popups that belong to a program but are not where its controls live.
+_POPUP_CLASSES = {"tooltips_class32", "#32768", "SysShadow", "Xaml_WindowedPopupClass", "Chrome_WidgetWin_2"}
+
+
+def _main_like(w: dict) -> bool:
+    big = w.get("width", 0) * w.get("height", 0) >= 40_000  # 200 x 200
+    return not w.get("owned") and w.get("class") not in _POPUP_CLASSES and big
+
+
+def rank_windows(candidates: list[dict], selector: str) -> dict | None:
+    """The window a selector means, from windows listed front to back.
+
+    A process name prefers that program's main window (not owned, not a tooltip or menu, not
+    tiny) over its popups; a title prefers an exact match, then a prefix, then any part, and
+    within that main windows. Ties go to the frontmost."""
+    needle = selector.lower()
+    best: tuple | None = None
+    chosen = None
+    for order, w in enumerate(candidates):
+        process = w.get("process", "").lower()
+        title = w.get("title", "").lower()
+        if needle in (process, process.removesuffix(".exe")):
+            tier = 4
+        elif title == needle:
+            tier = 3
+        elif title.startswith(needle):
+            tier = 2
+        elif needle in title:
+            tier = 1
+        else:
+            continue
+        key = (tier, _main_like(w), -order)
+        if best is None or key > best:
+            best, chosen = key, w
+    return chosen
+
+
 def find_window(selector: str | int) -> dict:
-    """A window by handle, title substring or process name ("notepad.exe"); the frontmost wins."""
+    """A window by handle, title or process name ("notepad.exe"); see rank_windows."""
     candidates = windows()
     if isinstance(selector, int) or (isinstance(selector, str) and selector.isdigit()):
         for w in candidates:
             if w["hwnd"] == int(selector):
                 return w
         raise DesktopError(f"no visible window with handle {selector}")
-    needle = str(selector).lower()
-    for w in candidates:
-        if needle == w["process"].lower() or needle == w["process"].lower().removesuffix(".exe"):
-            return w
-    for w in candidates:
-        if needle in w["title"].lower():
-            return w
+    found = rank_windows(candidates, str(selector))
+    if found is not None:
+        return found
     titles = ", ".join(f"{w['title'][:40]!r}" for w in candidates[:15])
     raise DesktopError(f"no window matches {selector!r}; visible: {titles}")
 

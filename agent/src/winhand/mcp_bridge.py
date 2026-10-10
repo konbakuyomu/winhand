@@ -421,6 +421,29 @@ class Service:
             if session.streams:
                 session.streams[-1].queue.put_nowait(("message", None, message))
 
+    def _time_out(self, uid: int) -> None:
+        """A tool call ran past call_timeout_s: answer the client and tell the server to stop."""
+        p = self.pending.pop(uid, None)
+        if p is None:
+            return  # answered in time
+        self.unanswered.pop(uid, None)
+        message = (
+            f"{self.entry.name} did not finish this call within {self.entry.call_timeout_s:g} s "
+            "(call_timeout_s in its configuration); it was cancelled"
+        )
+        if p.stream is not None:
+            p.stream.queue.put_nowait(("answer", uid, _error(p.client_id, message)))
+        self._finish_activity(p, error=message)
+        if self.process and self.process.alive():
+            with contextlib.suppress(OSError, ValueError):
+                self.process.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/cancelled",
+                        "params": {"requestId": uid, "reason": "call_timeout_s exceeded"},
+                    }
+                )
+
     def _any_stream(self) -> _Stream | None:
         sessions = sorted(self.sessions.values(), key=lambda s: s.last_seen, reverse=True)
         for session in sessions:
@@ -604,6 +627,8 @@ class Service:
             stream.due.add(uid)
             if m.get("method") == "tools/call":
                 self.calls += 1
+                if self.entry.call_timeout_s > 0:
+                    asyncio.get_running_loop().call_later(self.entry.call_timeout_s, self._time_out, uid)
             try:
                 await self._send_request({**m, "id": uid})
             except (OSError, ValueError, ServiceError) as exc:

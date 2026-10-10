@@ -92,11 +92,17 @@ Quick rules
   window's controls, then invoke/set_value/toggle by name; also classic Win32/WinForms/Delphi
   programs and installers, even in the background). window lists/focuses windows;
   clipboard reads/writes text, images and copied files.
+  Need to see what the person sees, or whether a program/dialog/installer is in the right state?
+  Take a screenshot yourself instead of asking them for one, and operate it with ui instead of
+  telling them where to click (anything sensitive: ask first). ui(action='wait') and
+  window(action='wait') wait for a control or window instead of sleeping.
   ui reads back after an action: verified=true confirms the observed state; false/null requires
   inspecting the result. A button being invoked does not prove its task finished; do not blindly retry.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
   follow it with job_status(id, wait_s=40).
+- Something odd about this machine (garbled text, a shim that fails, missing tools)?
+  sys_info(checks=true) lists the usual suspects with fixes.
 - A tool named here but missing from your tool list (winhand was updated after the conversation
   started): call(tool, arguments) reaches every current tool; help() lists them.
 - Local MCP servers (pyocd-debug, usb-camera ...) are not tools here: each one configured in the
@@ -175,9 +181,17 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             return {"error": f"{type(exc).__name__}: {exc}", "tools": names}
 
     @mcp.tool
-    async def sys_info() -> dict:
-        """Machine facts: OS, shell, code page, available dev tools, serial ports, local MCP servers."""
+    async def sys_info(
+        checks: Annotated[
+            bool,
+            Field(description="Also check for setups that break tools (PowerShell, code page, shims ...)"),
+        ] = False,
+    ) -> dict:
+        """Machine facts: OS, shell, code page, available dev tools, serial ports, local MCP servers.
+        With checks=true, a health check of the things that commonly trip work here, with fixes."""
         info = await asyncio.to_thread(proc.sys_info)
+        if checks:
+            info["checks"] = await asyncio.to_thread(proc.doctor)
         info["winhand"] = __version__
         info["local_mcp_servers"] = {
             "names": local_servers,
@@ -424,8 +438,14 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
                 description="Then wait up to this long for a prompt/quiet before returning (0 = return immediately)"
             ),
         ] = 5,
+        include_screen: Annotated[
+            bool | None,
+            Field(description="Add the virtual screen; default: when the program redraws a full-screen UI"),
+        ] = None,
     ) -> dict:
-        """Type into a session and return what it printed in response, with the resulting state."""
+        """Type into a session and return what it printed in response, with the resulting state.
+        Full-screen programs (menuconfig, installers, TUIs) also get their screen, since their output
+        is only redraw fragments."""
         try:
             session = sessions.get(id)
             since = session.read_cursor
@@ -433,7 +453,8 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         except (KeyError, TransportError, ValueError) as exc:
             return {"error": str(exc)}
         if wait_s <= 0:
-            return session.snapshot(since=since)
+            screen = include_screen if include_screen is not None else session.redraws_screen(since)
+            return session.snapshot(since=since, with_screen=screen)
         result = await wait_for(
             sessions,
             [id],
@@ -443,9 +464,11 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             timeout_s=wait_s,
             since={id: since},
             progress=await _progress(ctx),
-            include_screen=False,
+            include_screen=bool(include_screen),
         )
         snap = result["sessions"][id]
+        if include_screen is None and session.screen is not None and session.redraws_screen(since):
+            snap["screen"] = session.screen.snapshot()
         if result.get("timed_out"):
             snap["note"] = "still busy; use session_wait to keep waiting"
         return snap

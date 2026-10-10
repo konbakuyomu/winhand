@@ -179,6 +179,94 @@ def _inspect_controls(hwnd: int, *, timeout_s: float = 60) -> dict:
     return snapshot
 
 
+WAIT_POLL_S = 0.7
+
+
+def _control_state(element: dict | None, state: str) -> bool:
+    if state == "gone":
+        return element is None
+    if element is None:
+        return False
+    if state == "exists":
+        return True
+    if state == "enabled":
+        return element.get("enabled") is not False
+    kind, _, wanted = state.partition(":")
+    if kind == "value":
+        return wanted in str(element.get("value") or element.get("name") or "")
+    return str(element.get("toggle")) == wanted
+
+
+def wait_control(
+    window, name, automation_id, control_type, state: str, timeout_s: float, inspect=None
+) -> dict:
+    """Poll a window's controls until one matching name/automation_id/type reaches `state`."""
+    if not (name or automation_id or control_type):
+        raise ValueError("wait needs name, automation_id or control_type")
+    if not (state in ("exists", "gone", "enabled") or state.startswith(("value:", "toggle:"))):
+        raise ValueError("state is exists, gone, enabled, value:<text>, toggle:On or toggle:Off")
+    inspect = inspect or (lambda hwnd: _inspect_controls(hwnd, timeout_s=10)["elements"])
+    began = time.monotonic()
+    deadline = began + min(timeout_s, 40)
+    element = None
+    title = None
+    while True:
+        try:
+            w = desktop.find_window(window)
+            title = w["title"]
+            found = match_controls(inspect(w["hwnd"]), name, automation_id, control_type)
+            element = found[0] if found else None
+        except desktop.DesktopError:
+            element = None  # the window itself is not there (yet, or any more)
+        if _control_state(element, state):
+            return {
+                "matched": True,
+                "state": state,
+                "window": title,
+                "element": _public(element) if element else None,
+                "waited_s": round(time.monotonic() - began, 1),
+            }
+        if time.monotonic() >= deadline:
+            return {
+                "matched": False,
+                "state": state,
+                "window": title,
+                "element": _public(element) if element else None,
+                "waited_s": round(time.monotonic() - began, 1),
+                "note": "not reached yet; call again to keep waiting, or look with screenshot",
+            }
+        time.sleep(WAIT_POLL_S)
+
+
+def wait_window(target, state: str, timeout_s: float, find=None) -> dict:
+    if state not in ("exists", "gone"):
+        raise ValueError("state is exists or gone")
+    find = find or desktop.find_window
+    began = time.monotonic()
+    deadline = began + min(timeout_s, 40)
+    while True:
+        try:
+            w = find(target)
+        except desktop.DesktopError:
+            w = None
+        if (w is not None) == (state == "exists"):
+            return {
+                "matched": True,
+                "state": state,
+                "window": w,
+                "waited_s": round(time.monotonic() - began, 1),
+            }
+        if time.monotonic() >= deadline:
+            return {
+                "matched": False,
+                "state": state,
+                "window": w,
+                "waited_s": round(time.monotonic() - began, 1),
+                "note": "not reached yet; call again to keep waiting",
+            }
+        time.sleep(WAIT_POLL_S)
+
+
 def register(mcp: FastMCP) -> None:
     # ------------------------------------------------------------ hand-over
 
@@ -314,7 +402,9 @@ def register(mcp: FastMCP) -> None:
         max_side: Annotated[int, Field(description="Longest edge of the returned image")] = media.MAX_SIDE,
     ):
         """Look at the screen: the whole desktop (default), one monitor, a region or one window
-        (also when it is covered). After this, input() coordinates are pixels of this image."""
+        (also when it is covered). Use it whenever you need to see what the person sees or check
+        a program's state, instead of asking them for a screenshot. After this, input()
+        coordinates are pixels of this image."""
 
         def work():
             data, fmt, facts = desktop.screenshot(window, monitor, region, max_side)
@@ -325,21 +415,26 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool
     async def window(
         action: Annotated[
-            str, Field(description="list | focus | minimize | maximize | restore | close | move")
+            str, Field(description="list | focus | minimize | maximize | restore | close | move | wait")
         ] = "list",
         target: Annotated[str | int | None, Field(description="Title part, process name or handle")] = None,
         left: int | None = None,
         top: int | None = None,
         width: int | None = None,
         height: int | None = None,
+        state: Annotated[str, Field(description="For wait: exists (default) | gone")] = "exists",
+        timeout_s: Annotated[float, Field(ge=0, le=40, description="For wait: how long at most")] = 20,
     ) -> dict:
-        """List the visible windows and monitors, or act on one window."""
+        """List the visible windows and monitors, act on one window, or wait (up to 40 s) for a
+        window to appear or go away (an installer step, a dialog, a program starting)."""
 
         def work():
             if action == "list":
                 return {"monitors": desktop.monitors(), "windows": desktop.windows()}
             if target is None:
                 raise ValueError("give target (title part, process name or handle)")
+            if action == "wait":
+                return wait_window(target, state, timeout_s)
             return desktop.window_action(target, action, left, top, width, height)
 
         return await asyncio.to_thread(_errors, work)
@@ -387,7 +482,7 @@ def register(mcp: FastMCP) -> None:
         action: Annotated[
             str,
             Field(
-                description="inspect | invoke | click | toggle | select | expand | collapse | set_value | focus"
+                description="inspect | invoke | click | toggle | select | expand | collapse | set_value | focus | wait"
             ),
         ] = "inspect",
         name: Annotated[str | None, Field(description="Control name (exact, wildcard or part)")] = None,
@@ -404,6 +499,11 @@ def register(mcp: FastMCP) -> None:
                 ge=0, le=10, description="Poll read-back state for this long after an action; 0 reads once"
             ),
         ] = 3,
+        state: Annotated[
+            str,
+            Field(description="For wait: exists | gone | enabled | value:<text> | toggle:On | toggle:Off"),
+        ] = "exists",
+        timeout_s: Annotated[float, Field(ge=0, le=40, description="For wait: how long at most")] = 20,
     ) -> dict:
         """Read and operate a window's controls (buttons, fields, checkboxes, lists, menus) by
         name instead of pixels, also in classic Win32/WinForms/Delphi programs and installers.
@@ -411,9 +511,13 @@ def register(mcp: FastMCP) -> None:
         type and use it without moving the mouse; click is a real mouse click on it.
         Actions run once, then read back the control. verified=true means its observable state
         matches; false means a mismatch; null means the outcome cannot be confirmed. For invoke/
-        click on a button, inspect the resulting window before deciding whether to repeat it."""
+        click on a button, inspect the resulting window before deciding whether to repeat it.
+        wait polls (up to 40 s) until the control exists, is gone, is enabled or shows a value,
+        e.g. an installer's Next button becoming enabled."""
 
         def work():
+            if action == "wait":
+                return wait_control(window, name, automation_id, control_type, state, timeout_s)
             w = desktop.find_window(window)
             hwnd = w["hwnd"]
             elements = _inspect_controls(hwnd)["elements"]
