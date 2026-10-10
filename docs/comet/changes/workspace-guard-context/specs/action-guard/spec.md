@@ -19,20 +19,25 @@ winhand 在执行会读写这台机器的工具调用前，先把调用描述成
 
 | 工具 | 动作 |
 |---|---|
-| `run`、`job_start` | `command`：`text` 为命令行或脚本内容，`cwd` 为调用的 `cwd` |
+| `run` | `command`：`text` 为命令行或脚本内容，加上 `stdin`（交给 shell 或解释器的内容同样会执行）；`cwd` 为调用的 `cwd` |
+| `job_start` | `command`：`text` 为命令，`cwd` 为调用的 `cwd` |
 | `session_start` | `command`：`text` 为 profile 与参数拼出的命令行 |
-| `remote_run` | `command`：`text` 为脚本，`host` 为目标主机 |
+| `remote_run` | `command`：`text` 为脚本加参数，`host` 为目标主机 |
 | `session_send` | `input`（见 R9） |
 | `fs_write`、`fs_write_bytes`、`fs_upload_url` | `write` |
+| `secret_prompt` 带 `save_to` | `write`，路径为 `save_to` |
 | `fs_op` 的 `copy` | 目标路径为 `write`，源路径为 `read` |
 | `fs_op` 的 `mkdir` | `write` |
 | `fs_op` 的 `delete` | `delete` |
-| `fs_op` 的 `move` | `move`，源和目标都在 `paths` 中 |
+| `fs_op` 的 `move` | `move`，源和目标都在 `paths` 中；另有源路径的 `read`（移走文件等于交出它的内容） |
 | `fs_edit` | `edit` |
 | `fs_apply_patch` | `edit`，`paths` 为补丁涉及的全部文件（相对 `root` 解析） |
 | `fs_read`、`fs_send`、`fs_download_url` | `read` |
+| `fs_search` | `read`，路径为搜索的目录或文件 |
 
 其他工具（查询类，以及桌面类工具）不产生动作，不受守卫影响。
+
+路径按工具自己的方式解析：`fs_*` 工具展开 `~`、相对路径以 winhand 的工作目录为基准、不展开环境变量；`fs_upload_url` 和 `fs_download_url` 另外展开 `%VAR%` 和 `$VAR`。守卫判断的路径与工具实际操作的路径一致。
 
 ### R2 规则文件
 
@@ -47,10 +52,10 @@ winhand 在执行会读写这台机器的工具调用前，先把调用描述成
   | `path` | 否 | glob 列表，匹配 `paths` 中任一路径 |
   | `decision` | 是 | `deny`、`ask` 或 `note` |
   | `reason` | 否 | 给模型和人看的说明 |
-  | `timeout_s` | 否 | 仅 ask 规则，等待确认的秒数，默认 120 |
+  | `timeout_s` | 否 | 仅 ask 规则，等待确认的秒数，默认 40，超过 50 按 50 计（客户端约 60 秒放弃一次工具调用） |
 
 - 规则编号从 1 开始，按文件里出现的顺序计算。
-- 文件修改后，下一次调用即生效，不需要重启 winhand。
+- 文件修改后，下一次调用即生效，不需要重启 winhand；即使修改前后大小和修改时间都相同也一样。
 
 ### R3 匹配
 
@@ -59,7 +64,8 @@ winhand 在执行会读写这台机器的工具调用前，先把调用描述成
   - 写了 `match` 时，`match` 用 `re.search` 能在 `text` 中找到；
   - 写了 `path` 时，`paths` 中至少一个路径匹配其中一个 glob。
 - `path` 的 glob 支持 `**`。Windows 上不区分大小写，`/` 与 `\` 等价。
-- glob 相对路径的基准：项目规则相对于该 `.winhand` 所在目录，全局规则相对于路径本身（通常以 `**/` 开头）。
+- glob 相对路径的基准：项目规则相对于该 `.winhand` 所在目录；全局规则的相对模式匹配任意位置（`*.pem` 等同 `**/*.pem`）。
+- 每个路径同时按以下写法判断，任一写法命中即命中：去掉 `\\?\`（及 `\\?\UNC\`）前缀和 NTFS 数据流后缀（如 `::$DATA`）的写法；解析符号链接、目录联接和短文件名后的真实路径。查找项目规则文件时也使用真实路径。
 - 正则编译失败按 R10 处理。
 
 ### R4 裁决
@@ -127,20 +133,29 @@ Scenario: (A7) call 转发同样受约束
 
 ### R9 交互式会话的输入
 
-- `session_send` 带 `submit=true` 时，发送的文字视为一整行，产生 `input` 动作：`text` 为这一行，`cwd` 为会话的工作目录。
-- 文字中含换行时，每个以换行结束的行同样会被执行，因此各自产生一个 `input` 动作；不带 `submit` 时，最后一段没有换行的文字只是输入、不会执行，不检查。
-- 只对 shell 类会话生效。判定条件：profile 为 `shell` 或 `ssh`，或程序名（去掉路径和扩展名）是 pwsh、powershell、cmd、bash、sh、zsh 之一。
-- 其他会话（gdb、串口、python 等）以及只发按键的调用不产生动作。
-- 被拒绝时这一行不发给程序，会话状态不变。
+- 只对 shell 类会话生效。判定条件：profile 为 `shell` 或 `ssh`，或程序名（去掉路径和扩展名）是 pwsh、powershell、cmd、bash、sh、zsh 之一，或没有指定程序（默认 shell）。gdb、串口、python 等会话不产生动作。
+- 守卫为每个 shell 会话记住“已输入、还没执行”的内容。一次 `session_send` 按“文字 → 按键 → submit”的顺序处理：
+  - 换行、Enter 键（以及 Ctrl+M、Ctrl+J）和 `submit` 都会执行当前这一行；
+  - 每个被执行的行（含之前输入、还没执行的部分）产生一个 `input` 动作，`text` 为这一行（去掉光标移动等控制序列和 Tab），`cwd` 为会话的工作目录；
+  - Ctrl+C 清掉正在输入的一行，Backspace 删掉最后一个字符；其他编辑键保留已输入的内容，宁可多判断，不少判断。
+- 只输入、不执行的文字不检查。
+- 被拒绝时这次调用的文字和按键都不发给程序，记住的内容不变。
 
 Scenario: (A8) shell 会话里的命令也受约束
 - 设置：一条 `on = "input"` 的规则，`match` 能匹配 `rm -rf`；
-- 操作：在 shell 类会话中 `session_send(text="rm -rf /tmp/x", submit=true)`，再发送不带 `submit`、但以换行结尾的 `"rm -rf /tmp/y\n"`；在非 shell 会话中发送同样的文字；
-- 结果：shell 会话里两次都被拒绝，程序没有收到这些行；非 shell 会话照常发送。
+- 操作：在 shell 类会话中依次：
+  - `session_send(text="rm -rf /tmp/x", submit=true)`；
+  - 发送不带 `submit`、但以换行结尾的 `"rm -rf /tmp/y\n"`；
+  - `session_send(text="rm -rf /tmp/z", keys=["Enter"])`；
+  - 先只输入 `"rm -rf /tmp/w"`（不执行），再分别用 `keys=["Enter"]` 和 `text="", submit=true` 执行；
+
+  在非 shell 会话中发送同样的文字。
+- 结果：只输入的那一次放行；shell 会话里其余各次都被拒绝，程序没有执行这些行；非 shell 会话照常发送。
 
 ### R10 规则文件出错
 
-- 出错的情况：TOML 解析失败、字段缺失或类型不对、`decision` 不在三种之内、正则编译失败。
+- 出错的情况：TOML 解析失败、字段缺失或类型不对、`decision` 不在三种之内、正则编译失败、文件存在但读不了。
+- 不算出错、视为没有规则文件：路径不存在、路径中某一级是文件而不是目录、winhand 没有权限查看的目录。
 - 出错文件管辖的范围：全局文件出错时是全部动作，项目文件出错时是该目录下的动作。这个范围内的动作一律拒绝，错误里写明文件路径和具体错误。
 - 文件修正后下一次调用即恢复。
 

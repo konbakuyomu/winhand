@@ -79,7 +79,7 @@
 - **A5** 一条 ask 规则命中时，电脑上弹出确认框：选“是”就照常执行；选“否”、超时或无法弹窗时都不执行，并说明是哪种情况。
 - **A6** 一条 note 规则命中时，动作照常执行，结果里带上这条附注。
 - **A7** 通过 `call("fs_write", {...})` 转发的写入，与直接调用 `fs_write` 受同样的规则约束。
-- **A8** 在 shell 类会话里提交一整行、且命中 `input` 规则时，这一行不会发给程序，会话不受影响；gdb、串口等非 shell 会话的输入不检查。
+- **A8** 在 shell 类会话里真正被执行的一行命中 `input` 规则时，这一行不会被执行，会话不受影响。“被执行”包括 `submit`、Enter 键和换行，也包括之前输入、还没执行的部分。gdb、串口等非 shell 会话的输入不检查。
 - **A9** 规则文件解析失败时，它管辖范围内的动作一律被拒绝，结果里写明文件路径和解析错误；文件改好后下一次调用即恢复。
 - **A10** `context(path)` 返回：
   - 全局规矩；
@@ -103,6 +103,7 @@
 - 守卫的拒绝和附注同样经过 `[redact]` 脱敏，并记录到 `history()` 和桌面端时间线。
 - Windows 上路径匹配不区分大小写，`/` 与 `\` 等价。
 - Linux 和 Windows CI 都要通过。
+- 守卫按工具的参数判断，不是沙箱：`run` 里的程序自己读写什么、正则没覆盖到的写法、`proc_kill` 和桌面工具都不在它的范围内。README 写明这一点。
 
 # Decisions
 
@@ -120,6 +121,9 @@
 - D12（Q7=A）：技能目录默认是用户级 `~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`，以及项目级 `.agents/skills`、`.claude/skills`，同名时项目优先；可用 `[context] skills` 改用户级目录。
 - D13（Q8=A）：本机 stdio 入口默认不显示 `context()` 提示，`[context] stdio_hint = true` 时显示；远程入口始终显示。
 - D14：用户回复“全部按照推荐来进行项目推进吧，开始”（2026-10-10），确认以上全部决定、A1–A14 和非目标，Shape 完成，进入 Build。
+- D15（Verify 第 1 轮后，待用户确认）：ask 的默认等待从 120 秒改为 40 秒，`timeout_s` 超过 50 按 50 计。理由：客户端约 60 秒就放弃一次工具调用，更晚的“是”会执行一个 AI 以为已经失败的操作。
+- D16（Verify 第 1 轮后）：A8 的“提交一整行”按 shell 实际执行的行理解，Enter 键和分两次的输入都算（Verifier 发现 `keys=["Enter"]` 能绕过）。
+- D17（Verify 第 1 轮后）：堵住 Verifier 指出的参数层面的绕过：`run` 的 `stdin`、`remote_run` 的参数、`fs_search`、`move` 的来源、`secret_prompt` 的 `save_to`、按工具实际方式解析的路径、链接和特殊路径写法。同时在 README 写明守卫不是沙箱。
 
 # Open questions
 

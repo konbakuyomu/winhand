@@ -164,7 +164,8 @@ GUIDE_CONTEXT = """\
 def instructions(cfg: Config, local_stdio: bool = False) -> str:
     """The instructions for this entry point: stdio clients on this machine read their own rules,
     so they get the context() hint only when [context] stdio_hint is set."""
-    hint = not local_stdio or bool((cfg.context or {}).get("stdio_hint"))
+    flag = (cfg.context or {}).get("stdio_hint")
+    hint = not local_stdio or flag is True or str(flag).strip().lower() in ("true", "1", "yes", "on")
     return GUIDE + GUIDE_CONTEXT if hint else GUIDE
 
 

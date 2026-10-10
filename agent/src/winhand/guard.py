@@ -12,6 +12,9 @@ A rule only ever restricts: deny refuses the call, ask lets the person at the ma
 dialog (no answer = refused), note lets it run and adds the reason to the result. There is no
 allow, so a project's file cannot loosen the global one. A file that cannot be read refuses
 everything it governs until it is fixed: rules that silently stop applying are worse than none.
+
+Rules judge a call's arguments, not what a program does once it runs: a guard is a seat belt for
+an AI that means well, not a sandbox (`run cat .env` reads what a read rule on .env protects).
 """
 
 from __future__ import annotations
@@ -27,12 +30,16 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mcp.types import TextContent
 
-from .actions import KINDS, Action, describe
+from .actions import KINDS, Action, describe, session_input
 
 FILE_NAME = "guards.toml"
 PROJECT_DIR = ".winhand"
 DECISIONS = ("deny", "ask", "note")
-ASK_TIMEOUT_S = 120.0
+# a client gives up on a tool call after about 60 s: past that, a late "yes" would run an action
+# the AI has already been told failed
+ASK_TIMEOUT_S = 40.0
+ASK_TIMEOUT_MAX_S = 50.0
+_MISSING = (FileNotFoundError, NotADirectoryError, PermissionError)
 _KEYS = {"on", "match", "path", "decision", "reason", "timeout_s"}
 _PurePath = PureWindowsPath if os.name == "nt" else PurePosixPath
 
@@ -76,7 +83,7 @@ class RuleFile:
     error: str | None = None
 
 
-_cache: dict[str, tuple[tuple[int, int], RuleFile]] = {}
+_cache: dict[str, tuple[bytes, RuleFile]] = {}
 _cache_lock = threading.Lock()
 
 
@@ -87,11 +94,10 @@ def _as_list(value, what: str) -> list[str]:
     return items
 
 
-def _parse(path: str, base: str | None) -> RuleFile:
+def _parse(path: str, base: str | None, raw: bytes) -> RuleFile:
     out = RuleFile(path, base)
     try:
-        with open(path, "rb") as fh:
-            data = tomllib.loads(fh.read().decode("utf-8-sig"))
+        data = tomllib.loads(raw.decode("utf-8-sig"))
         extra = set(data) - {"guard"}
         if extra:
             raise ValueError(f"unknown top-level key(s) {sorted(extra)}; rules are [[guard]] tables")
@@ -140,35 +146,64 @@ def _rule(path: str, index: int, entry, base: str | None) -> Rule:
         reason=reason,
         match=re.compile(match) if match is not None else None,
         path=tuple(_as_list(entry["path"], "path")) if "path" in entry else (),
-        timeout_s=float(timeout),
+        timeout_s=min(float(timeout), ASK_TIMEOUT_MAX_S),
         base=base,
     )
 
 
 def load(path: str | os.PathLike, base: str | None = None) -> RuleFile | None:
-    """The rules in one file (None if it does not exist); re-read whenever the file changes."""
+    """The rules in one file, None if there is none. The file is read on every call (it is small)
+    and parsed again whenever its bytes change, so an edit applies to the very next call."""
     path = str(path)
     try:
-        st = os.stat(path)
-    except FileNotFoundError:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except _MISSING as exc:
+        # a folder winhand cannot look into has no rules it could apply either; a rule file
+        # that exists but cannot be read is broken
+        if isinstance(exc, PermissionError) and os.path.isfile(path):
+            return RuleFile(path, base, error=f"{type(exc).__name__}: {exc}")
         with _cache_lock:
             _cache.pop(path, None)
         return None
     except OSError as exc:
         return RuleFile(path, base, error=f"{type(exc).__name__}: {exc}")
-    stamp = (st.st_mtime_ns, st.st_size)
     with _cache_lock:
         hit = _cache.get(path)
-    if hit and hit[0] == stamp and hit[1].base == base:
+    if hit and hit[0] == raw and hit[1].base == base:
         return hit[1]
-    parsed = _parse(path, base)
+    parsed = _parse(path, base, raw)
     with _cache_lock:
-        _cache[path] = (stamp, parsed)
+        _cache[path] = (raw, parsed)
     return parsed
 
 
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
+
+
+def variants(path: str) -> list[str]:
+    """Spellings of one path a rule must see: as given (without a \\\\?\\ prefix or an NTFS
+    stream suffix such as `::$DATA`) and with links, junctions and short names resolved."""
+    p = path
+    if p.startswith("\\\\?\\UNC\\"):
+        p = "\\\\" + p[8:]
+    elif p.startswith("\\\\?\\"):
+        p = p[4:]
+    if os.name == "nt":
+        head, tail = os.path.split(p)
+        if ":" in tail:
+            p = os.path.join(head, tail.split(":", 1)[0])
+    out = [p]
+    try:
+        real = os.path.realpath(p)
+    except (OSError, ValueError):
+        real = p
+    if _norm(real) != _norm(p):
+        out.append(real)
+    return out
 
 
 def _under(path: str, folder: str) -> bool:
@@ -215,7 +250,7 @@ def files_for(anchors: list[str]) -> list[RuleFile]:
 
 
 def _anchors(action: Action) -> list[str]:
-    return list(action.paths) or ([action.cwd] if action.cwd else [])
+    return [v for p in (list(action.paths) or ([action.cwd] if action.cwd else [])) for v in variants(p)]
 
 
 def _glob_match(path: str, pattern: str, base: str | None) -> bool:
@@ -238,7 +273,9 @@ def matches(rule: Rule, action: Action) -> bool:
         return False
     if rule.match is not None and not (action.text and rule.match.search(action.text)):
         return False
-    if rule.path and not any(_glob_match(p, g, rule.base) for p in action.paths for g in rule.path):
+    if rule.path and not any(
+        _glob_match(v, g, rule.base) for p in action.paths for v in variants(p) for g in rule.path
+    ):
         return False
     return True
 
@@ -355,12 +392,23 @@ class GuardActions(Middleware):
     def __init__(self, sessions=None, confirm=None) -> None:
         self.sessions = sessions
         self._confirm = confirm or _confirm  # tests replace the dialog
+        # per shell session: what was typed there and not run yet (judged with the next Enter)
+        self._typed: dict[str, str] = {}
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
+        message = context.message
+        args = message.arguments or {}
+        actions = describe(message.name, args, self.sessions, self._typed)
+        result = await self._judged(context, call_next, actions)
+        if message.name == "session_send" and not getattr(result, "is_error", False):
+            _, rest = session_input(args, self.sessions, self._typed)
+            if rest is not None:
+                self._typed[args.get("id")] = rest
+        return result
+
+    async def _judged(self, context: MiddlewareContext, call_next, actions: list[Action]):
         from fastmcp.tools.base import ToolResult
 
-        message = context.message
-        actions = describe(message.name, message.arguments or {}, self.sessions)
         if not actions:
             return await call_next(context)
         verdict = await asyncio.to_thread(judge, actions)

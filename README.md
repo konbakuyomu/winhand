@@ -200,19 +200,19 @@ Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructio
 
 | 动作 | 来自 |
 |---|---|
-| `command` | `run`、`job_start`、`session_start`、`remote_run`（`host` 为远程主机） |
-| `input` | 在 shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里执行的每一行；gdb、串口等会话不检查 |
-| `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`fs_op` 的 copy 目标和 mkdir |
+| `command` | `run`（含 `stdin` 送进去的内容）、`job_start`、`session_start`、`remote_run`（含参数，`host` 为远程主机） |
+| `input` | shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里真正被执行的每一行：之前输入但还没执行的内容，加上这次的文字，直到 `submit`、Enter 键或换行。Ctrl+C 会清掉正在输入的一行，Backspace 删掉最后一个字符。gdb、串口等会话不检查 |
+| `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`secret_prompt` 的 `save_to`、`fs_op` 的 copy 目标和 mkdir |
 | `edit` | `fs_edit`、`fs_apply_patch`（补丁涉及的每个文件） |
 | `delete` / `move` | `fs_op` |
-| `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_op` 的 copy 来源 |
+| `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_search`（搜索的目录或文件）、`fs_op` 的 copy 和 move 的来源 |
 
 规则写在 `~/.winhand/guards.toml`（全局），或项目目录下的 `.winhand/guards.toml`（只管该目录及子目录）。winhand 不自带任何规则，下面是示例：
 
 ```toml
 [[guard]]
 on = ["command", "input"]
-match = '(?i)(\brm\s+-\w*r\w*f|Remove-Item\b.*-Recurse|\brd\s+/s|\brmdir\s+/s|\bdel\s+/s)'
+match = '(?i)(\brm\b[^|;&\n]*\s-\w*r|\b(remove-item|ri|rm|rmdir|rd|del|erase)\b[^|;&\n]*\s-r(e(c(u(r(s(e)?)?)?)?)?)?\b|\b(rd|rmdir|del|erase)\b[^|;&\n]*\s/s\b)'
 decision = "deny"
 reason = "禁止批量删除：一次只删一个明确路径的文件，或请用户手动删除"
 
@@ -225,7 +225,7 @@ decision = "deny"
 on = "delete"
 decision = "ask"          # 在电脑上弹窗确认
 reason = "删除前先问我"
-timeout_s = 120
+timeout_s = 40
 
 [[guard]]
 on = "edit"
@@ -240,11 +240,14 @@ reason = "改完记得跑单元测试"
   - `path`：glob 列表，支持 `**`，Windows 上不区分大小写。项目文件里的相对模式以该项目目录为基准；全局文件里的相对模式匹配任意位置（`*.pem` 等于 `**/*.pem`）；
   - `decision`：`deny`、`ask` 或 `note`；
   - `reason`：拒绝、确认或提醒时显示的说明；
-  - `timeout_s`：ask 等待确认的秒数，默认 120。
+  - `timeout_s`：ask 等待确认的秒数，默认 40，最多 50。客户端等一个工具调用大约 60 秒就放弃，再晚的“是”会让 AI 以为失败的操作其实执行了。
 - **裁决**：deny 优先于 ask，ask 优先于 note。没有 allow，所以项目规则只能增加限制，不能放宽全局规则。
 - **拒绝**：工具不执行，以工具错误返回，写明规则文件、第几条和理由。这次调用仍出现在 `history` 和桌面端时间线里。
-- **请人确认**：在电脑上弹出确认框。没人应答、点“否”或弹不出窗口，都不执行。
+- **请人确认**：在电脑上弹出置顶的确认框，写明工具、动作和理由。默认按钮是“否”，正在别处打字时误按回车也不会放行。没人应答、点“否”或弹不出窗口，都不执行。
 - **规则文件写错**：解析失败、字段不认识、正则写错时，这个文件管辖的动作一律拒绝，错误里写明文件和位置；改好后下一次调用即恢复。
+- **路径**：按工具自己的方式解析路径（`fs_*` 不展开环境变量，一次性链接工具会展开），并同时按真实路径判断：符号链接、目录联接、8.3 短名、`\\?\` 前缀、`::$DATA` 这类写法不会绕过路径规则。
+
+守卫按工具的参数判断，**不是沙箱**。它适合拦住善意的 AI 犯错，挡不住刻意绕路：`run` 里的程序自己去读写什么（例如 `run("type .env")`）、正则没覆盖到的写法、`proc_kill` 和桌面工具，它都管不到。真正需要隔离时，用系统权限或单独的账户。
 
 ## 本机的其他 MCP 服务
 

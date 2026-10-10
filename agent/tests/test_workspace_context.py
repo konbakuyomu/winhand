@@ -169,6 +169,8 @@ async def test_stdio_clients_get_the_context_hint_only_when_asked():
 
     plain = await instructions(Config(), local_stdio=True)
     asked = await instructions(Config(context={"stdio_hint": True}), local_stdio=True)
+    as_text = await instructions(Config(context={"stdio_hint": "false"}), local_stdio=True)
     remote = await instructions(Config())
     assert "context(" not in plain and "context(" in asked and "context(" in remote
+    assert "context(" not in as_text, 'stdio_hint = "false" means false'
     assert all(len(t) <= 4096 for t in (plain, asked, remote))

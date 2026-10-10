@@ -238,6 +238,7 @@ async def test_ask_runs_only_after_a_yes(client, winhand_home, tmp_path, monkeyp
         "fs_op", {"action": "delete", "path": str(victim), "permanent": True}, raise_on_error=False
     )
     assert asked and "deleting needs my OK" in asked[0][0] and str(victim) in asked[0][0]
+    assert "fs_op" in asked[0][0], "the dialog names the tool"
     assert asked[0][1] == 1
     assert victim.exists() is not done
     assert result.is_error is not done
@@ -310,9 +311,22 @@ async def test_lines_typed_into_a_shell_session_are_judged(client, winhand_home)
             "session_send", {"id": shell, "text": "echo rm -rf /tmp/y\n"}, raise_on_error=False
         )
         assert sneaky.is_error
+        by_key = await client.call_tool(
+            "session_send",
+            {"id": shell, "text": "echo rm -rf /tmp/z", "keys": ["Enter"]},
+            raise_on_error=False,
+        )
+        assert by_key.is_error, "Enter as a key runs the line as much as submit does"
         ok = await client.call_tool("session_send", {"id": shell, "text": "echo safe", "submit": True})
         assert "safe" in ok.structured_content["output"]
         assert "rm -rf" not in ok.structured_content["output"]
+        typed = await client.call_tool(
+            "session_send", {"id": shell, "text": "echo rm -rf /tmp/w", "wait_s": 0}
+        )
+        assert not typed.is_error, "typing without running is not judged"
+        for later in ({"keys": ["Enter"]}, {"text": "", "submit": True}):
+            run_it = await client.call_tool("session_send", {"id": shell, **later}, raise_on_error=False)
+            assert run_it.is_error and "rm -rf /tmp/w" in text_of(run_it), later
         other = await client.call_tool(
             "session_send", {"id": plain, "text": "echo rm -rf /tmp/x", "submit": True}
         )
@@ -398,3 +412,138 @@ def test_the_confirm_dialog_defaults_to_no(monkeypatch, capsys):
     assert secret_prompt.dialog_main(payload) == 0
     assert seen["default"] == "no" and seen["message"] == "删除？"
     assert json.loads(capsys.readouterr().out) == {"value": False}
+
+
+# ------------------------------------------------------------------ found by the Verifier
+
+
+@pytest.mark.parametrize(
+    ("text", "keys", "submit", "before", "lines", "rest"),
+    [
+        ("rm -rf x", ["Enter"], False, "", ["rm -rf x"], ""),
+        ("rm -rf x", None, False, "", [], "rm -rf x"),
+        (None, ["Enter"], False, "rm -rf x", ["rm -rf x"], ""),
+        ("", None, True, "rm -rf x", ["rm -rf x"], ""),
+        ("x", ["Ctrl+C"], False, "rm -rf", [], ""),
+        ("abc", ["Backspace"], True, "", ["ab"], ""),
+        ("Remove-Item -Recur", ["Tab", "Enter"], False, "", ["Remove-Item -Recur"], ""),
+        ("a\nb", None, False, "", ["a"], "b"),
+        ("ls", ["Up", "Enter"], False, "", ["ls"], ""),
+        ("ls", ["Ctrl+M"], False, "", ["ls"], ""),
+    ],
+)
+def test_typed_lines_follow_what_the_shell_runs(text, keys, submit, before, lines, rest):
+    assert actions.typed_lines(text, keys, submit, before) == (lines, rest)
+
+
+async def test_stdin_and_remote_args_are_part_of_the_command(client, winhand_home, tmp_path):
+    write_rules(winhand_home / "guards.toml", NO_BATCH_DELETE)
+    victim = tmp_path / "keep"
+    victim.mkdir()
+    piped = await client.call_tool(
+        "run", {"command": "bash", "args": ["-s"], "stdin": f"rm -rf {victim}"}, raise_on_error=False
+    )
+    assert piped.is_error and victim.exists()
+    (remote,) = actions.describe("remote_run", {"host": "pi", "script": "rm", "args": ["-rf", "/srv"]})
+    assert guard.judge([remote]).decision == "deny"
+
+
+async def test_secrets_cannot_be_searched_or_moved_out(client, winhand_home, tmp_path):
+    write_rules(
+        winhand_home / "guards.toml",
+        """\
+        [[guard]]
+        on = "read"
+        path = ["**/.env"]
+        decision = "deny"
+        """,
+    )
+    env = tmp_path / ".env"
+    env.write_text("TOKEN=s3cret")
+    searched = await client.call_tool(
+        "fs_search", {"pattern": "TOKEN", "path": str(env)}, raise_on_error=False
+    )
+    assert searched.is_error and "s3cret" not in text_of(searched)
+    moved = await client.call_tool(
+        "fs_op", {"action": "move", "path": str(env), "to": str(tmp_path / "env.txt")}, raise_on_error=False
+    )
+    assert moved.is_error and env.exists()
+    (save,) = actions.describe("secret_prompt", {"message": "token", "save_to": str(tmp_path / ".env")})
+    assert save.kind == "write" and save.paths == (str(env),)
+
+
+async def test_paths_are_judged_as_the_tool_resolves_them(client, tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    write_rules(
+        proj / ".winhand" / "guards.toml",
+        """\
+        [[guard]]
+        on = "write"
+        path = ["build/**"]
+        decision = "deny"
+        """,
+    )
+    monkeypatch.setenv("WH_PROBE", "/a/b")
+    target = proj / "build" / "a.txt"
+    sneaky = await client.call_tool(
+        "fs_write", {"path": f"{proj}/$WH_PROBE/../build/a.txt", "content": "x"}, raise_on_error=False
+    )
+    assert sneaky.is_error and not target.exists()
+    (link,) = actions.describe("fs_upload_url", {"path": "$WH_PROBE/x.bin"})
+    assert link.paths == (os.path.abspath("/a/b/x.bin"),), (
+        "the link tools expand variables, so the guard does"
+    )
+
+
+async def test_a_path_through_a_file_is_the_tools_error_not_a_guard_refusal(client, tmp_path):
+    f = tmp_path / "f.txt"
+    f.write_text("x")
+    result = await client.call_tool("fs_read", {"path": str(f / "x")}, raise_on_error=False)
+    assert "guard" not in text_of(result)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra rights on Windows")
+async def test_links_are_judged_by_where_they_lead(client, winhand_home, tmp_path):
+    write_rules(
+        winhand_home / "guards.toml",
+        """\
+        [[guard]]
+        on = "read"
+        path = ["**/secret/**"]
+        decision = "deny"
+        """,
+    )
+    (tmp_path / "secret").mkdir()
+    (tmp_path / "secret" / "a.txt").write_text("x")
+    (tmp_path / "alias").symlink_to(tmp_path / "secret", target_is_directory=True)
+    result = await client.call_tool(
+        "fs_read", {"path": str(tmp_path / "alias" / "a.txt")}, raise_on_error=False
+    )
+    assert result.is_error
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path spellings")
+def test_windows_path_spellings_are_judged_as_the_file():
+    assert guard.variants(r"\\?\C:\data\.env")[0] == r"C:\data\.env"
+    assert guard.variants(r"C:\data\.env::$DATA")[0] == r"C:\data\.env"
+    assert guard.variants(r"\\?\UNC\srv\share\x")[0] == r"\\srv\share\x"
+
+
+def test_an_edit_of_the_same_size_and_time_still_applies(tmp_path):
+    path = tmp_path / "guards.toml"
+    path.write_text('[[guard]]\non = "write"\ndecision = "note"\n', encoding="utf-8")
+    stamp = os.stat(path).st_mtime_ns
+    assert guard.load(path).rules[0].decision == "note"
+    path.write_text('[[guard]]\non = "write"\ndecision = "deny"\n', encoding="utf-8")
+    os.utime(path, ns=(stamp, stamp))
+    assert guard.load(path).rules[0].decision == "deny"
+
+
+def test_ask_waits_less_than_a_client_does(tmp_path):
+    path = tmp_path / "guards.toml"
+    path.write_text(
+        '[[guard]]\non = "delete"\ndecision = "ask"\n\n[[guard]]\non = "delete"\ndecision = "ask"\ntimeout_s = 120\n',
+        encoding="utf-8",
+    )
+    first, second = guard.load(path).rules
+    assert first.timeout_s == guard.ASK_TIMEOUT_S == 40 and second.timeout_s == guard.ASK_TIMEOUT_MAX_S == 50
