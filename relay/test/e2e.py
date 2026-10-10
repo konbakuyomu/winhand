@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import sys
+import time
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -31,6 +32,7 @@ from winhand.server import build_server
 BASE = os.environ.get("RELAY", "http://127.0.0.1:8787")
 PASSPHRASE = os.environ.get("OWNER_PASSPHRASE", "test-passphrase-123")
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "test-agent-token-456")
+GRACE_S = float(os.environ.get("AGENT_GRACE_S", "4"))  # must match .dev.vars
 REDIRECT = "http://127.0.0.1:9/callback"
 
 
@@ -95,11 +97,23 @@ async def main() -> None:
         confidential = await oauth_token(http, "client_secret_basic")
         check(confidential != token, "a confidential client gets its own token")
 
-        offline = await http.post(f"{BASE}/mcp", headers={"Authorization": f"Bearer {token}",
-                                  "Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
-                                  json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
-        check(offline.status_code == 503 and "not connected" in offline.text, "clear error while agent offline")
+        rpc_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream",
+                       "Content-Type": "application/json"}
+        began = time.monotonic()
+        offline = await http.post(f"{BASE}/mcp", headers=rpc_headers, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        waited = time.monotonic() - began
+        body = offline.json()
+        check(offline.status_code == 200 and body.get("id") == 1 and "offline" in body["error"]["message"],
+              f"agent offline: a JSON-RPC error for the same id ({offline.status_code} {offline.text[:120]})")
+        check(waited >= GRACE_S - 0.5, f"the relay waited {waited:.1f}s for the agent first")
+        note = await http.post(f"{BASE}/mcp", headers=rpc_headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        check(note.status_code == 202, "a notification while offline is simply accepted")
 
+        # a call made while the agent is (re)connecting waits for it instead of failing
+        initialize = {"jsonrpc": "2.0", "id": 7, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "1"}}}
+        early = asyncio.create_task(http.post(f"{BASE}/mcp", headers=rpc_headers, json=initialize))
+        await asyncio.sleep(0.5)
         stop = asyncio.Event()
         ws_url = BASE.replace("http", "ws", 1) + "/agent"
         fake = os.path.join(os.path.dirname(__file__), "..", "..", "agent", "tests", "fake_mcp_server.py")
@@ -107,6 +121,9 @@ async def main() -> None:
         agent = asyncio.create_task(
             run_forever(ws_url, AGENT_TOKEN, mcp=build_server(Config()), services=services, stop=stop)
         )
+        answered = await early
+        check('"result"' in answered.text and "offline" not in answered.text,
+              f"a call made during the reconnect is served once the agent is back ({answered.text[:120]})")
         for _ in range(100):
             if "电脑在线" in (await http.get(f"{BASE}/")).text:
                 break
@@ -131,6 +148,26 @@ async def main() -> None:
             sent = (await mcp.call_tool("session_send", {"id": sid, "text": "print(21*2)", "submit": True})).structured_content
             check("42" in sent["output"] and sent["state"] == "awaiting_input", "interactive session through tunnel")
             await mcp.call_tool("session_stop", {"id": sid, "force": True})
+
+            # one-time links: the bytes go relay -> tunnel -> disk, not through the conversation
+            here = os.path.dirname(os.path.abspath(__file__))
+            payload = os.urandom(300_000)
+            target = os.path.join(here, "uploaded.tmp")
+            link = (await mcp.call_tool("fs_upload_url", {
+                "path": target, "sha256": hashlib.sha256(payload).hexdigest()})).structured_content
+            check(link["url"].startswith(f"{BASE}/t/"), "upload link points at the relay")
+            put = await http.put(link["url"], content=payload)
+            check(put.status_code == 200 and put.json()["bytes"] == len(payload), f"upload through the relay ({put.status_code})")
+            with open(target, "rb") as fh:
+                check(fh.read() == payload, "uploaded file is byte-identical")
+            again = await http.put(link["url"], content=b"x")
+            check(again.status_code == 404, "an upload link works once")
+            down = (await mcp.call_tool("fs_download_url", {"path": target})).structured_content
+            got = await http.get(down["url"])
+            check(got.status_code == 200 and got.content == payload, "download through the relay")
+            os.remove(target)
+            bogus = await http.get(f"{BASE}/t/{'A' * 43}")
+            check(bogus.status_code == 404, "unknown link refused")
 
         # a local MCP server of the machine, as its own endpoint (a separate connector in claude.ai)
         challenge = await http.post(f"{BASE}/mcp/fake", json={})

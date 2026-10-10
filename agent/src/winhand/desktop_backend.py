@@ -22,7 +22,7 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
-from . import __version__, config
+from . import __version__, config, transfer
 from .activity import ActivityHub, ToolActivity
 from .mcp_bridge import Services, probe
 from .relay_client import AlreadyRunning, Replaced, run_tunnel, single_instance
@@ -76,6 +76,7 @@ class Backend:
         self.mcp.add_middleware(ToolActivity(self.hub))
         self.services = Services(self.cfg.servers, self.hub)
         self.services.listeners.append(lambda _snapshot: self.emit("mcp", self.mcp_state()))
+        transfer.listeners.append(self._on_transfer)
         self.status: dict[str, Any] = {}
         self.tunnel: asyncio.Task | None = None
         self.tunnel_stop: asyncio.Event | None = None
@@ -109,6 +110,12 @@ class Backend:
         }
         if state in titles:
             self.hub.record("connection", titles[state], status=state, summary=detail.get("reason") or "")
+
+    def _on_transfer(self, entry: dict) -> None:
+        verb = "上传了" if entry["kind"] == "upload" else "下载了"
+        self.hub.record(
+            "transfer", f"经一次性链接{verb} {entry['path']}", status="ok", summary=f"{entry['bytes']} 字节"
+        )
 
     # ----------------------------------------------------------------- tunnel
 

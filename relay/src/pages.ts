@@ -48,7 +48,7 @@ export function statusPage(status: Record<string, unknown>, mcpUrl: string): str
 <h1>winhand 中转</h1>
 <p><span class="dot" style="background:${online ? "#2e9d57" : "#b54708"}"></span>${online ? "电脑在线" : "电脑离线"}${
     online && agent.hostname ? `：${escape(agent.hostname)}（${escape(agent.platform ?? "")}，winhand ${escape(agent.version ?? "")}）` : ""
-  }</p>
+  }${!online && typeof status.offlineSince === "number" ? `（自 ${escape(new Date(status.offlineSince).toISOString())} 起）` : ""}</p>
 <p>在 claude.ai 添加自定义连接器，地址填：</p>
 <p><code>${escape(mcpUrl)}</code></p>
 <p>本机的其他 MCP 服务（在 winhand 应用的“MCP 服务”页启用）各有自己的地址：<code>${escape(mcpUrl)}/&lt;名称&gt;</code>，分别添加为连接器。</p>

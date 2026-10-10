@@ -7,6 +7,10 @@ export { Bridge };
 const SCOPE = "winhand";
 const MAX_FAILURES = 5;
 const FAILURE_WINDOW_S = 15 * 60;
+// One-time file links (/t/<token>) are capabilities checked by the agent; an IP that keeps
+// presenting unknown tokens is turned away for a while.
+const TRANSFER_PATH = /^\/t\/([A-Za-z0-9_-]{43})$/;
+const MAX_TRANSFER_FAILURES = 20;
 
 function bridge(env: Env) {
   return env.BRIDGE.get(env.BRIDGE.idFromName("default"));
@@ -20,6 +24,27 @@ async function secretEquals(given: string, expected: string | undefined): Promis
   if (!expected) return false;
   const [a, b] = await Promise.all([digest(given), digest(expected)]);
   return crypto.subtle.timingSafeEqual(a, b);
+}
+
+async function transferLink(request: Request, env: Env, token: string): Promise<Response> {
+  if (!["GET", "PUT", "POST"].includes(request.method)) {
+    return new Response("method not allowed", { status: 405, headers: { allow: "GET, PUT, POST" } });
+  }
+  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const failKey = `winhand:tfail:${ip}`;
+  const failures = Number((await env.OAUTH_KV.get(failKey)) ?? "0");
+  if (failures >= MAX_TRANSFER_FAILURES) return new Response("too many invalid links; try later", { status: 429 });
+  const target = new URL("https://bridge/forward");
+  target.searchParams.set("path", `/transfer/${token}`);
+  const headers = new Headers(request.headers);
+  headers.set("x-winhand-user", "transfer-link");
+  const response = await bridge(env).fetch(
+    new Request(target, { method: request.method, headers, body: request.body, signal: request.signal }),
+  );
+  if (response.status === 404) {
+    await env.OAUTH_KV.put(failKey, String(failures + 1), { expirationTtl: FAILURE_WINDOW_S });
+  }
+  return response;
 }
 
 // Authenticated MCP traffic: tunnel it to the machine.
@@ -191,6 +216,8 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/oauth/token" && request.method === "POST") request = await singleClientAuth(request);
+    const link = url.pathname.match(TRANSFER_PATH);
+    if (link) return transferLink(request, env, link[1]);
     if (url.pathname === "/agent") {
       const auth = request.headers.get("authorization") ?? "";
       const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";

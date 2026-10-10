@@ -18,6 +18,9 @@ type Pending = {
 };
 
 const HEAD_TIMEOUT_MS = 120_000;
+// The agent drops off for seconds at a time (winhand restarting or updating, the PC's network
+// switching). A request arriving then waits this long for it to come back before failing.
+const DEFAULT_GRACE_S = 20;
 
 // One Bridge instance per device. The agent keeps a single WebSocket open to it;
 // every authenticated MCP request is pushed down that socket and the agent's
@@ -25,6 +28,7 @@ const HEAD_TIMEOUT_MS = 120_000;
 // connection costs nothing and survives Durable Object eviction.
 export class Bridge extends DurableObject<Env> {
   private pending = new Map<string, Pending>();
+  private waiters: Array<() => void> = [];
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -49,7 +53,47 @@ export class Bridge extends DurableObject<Env> {
   private async status() {
     const socket = this.agent();
     const hello = socket ? (socket.deserializeAttachment() as Record<string, unknown> | null) : null;
-    return { online: Boolean(socket), agent: hello, inFlight: this.pending.size };
+    const offlineSince = socket ? null : ((await this.ctx.storage.get<number>("offlineSince")) ?? null);
+    return { online: Boolean(socket), agent: hello, inFlight: this.pending.size, offlineSince };
+  }
+
+  private graceMs(): number {
+    const configured = Number(this.env.AGENT_GRACE_S);
+    return (Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_GRACE_S) * 1000;
+  }
+
+  /** The agent's socket, waiting up to the grace period for it to (re)connect. */
+  private async waitForAgent(): Promise<WebSocket | undefined> {
+    const socket = this.agent();
+    if (socket) return socket;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((w) => w !== done);
+        resolve();
+      }, this.graceMs());
+      this.waiters.push(done);
+    });
+    return this.agent();
+  }
+
+  private wakeWaiters() {
+    const waiting = this.waiters;
+    this.waiters = [];
+    for (const wake of waiting) wake();
+  }
+
+  private async offlineMessage(): Promise<string> {
+    const since = await this.ctx.storage.get<number>("offlineSince");
+    const when = since ? ` since ${new Date(since).toISOString()} (${describe(Date.now() - since)} ago)` : "";
+    return (
+      `winhand on the PC is offline${when}; waited ${Math.round(this.graceMs() / 1000)} s for it to reconnect. ` +
+      "Likely the PC is asleep or off, winhand is restarting or updating, or its network changed. " +
+      "Try again in a minute; once it is back, call history() to see whether earlier calls ran before resending them."
+    );
   }
 
   private acceptAgent(request: Request): Response {
@@ -65,10 +109,11 @@ export class Bridge extends DurableObject<Env> {
         // already closed
       }
     }
-    this.failAll("agent reconnected");
+    this.failAll("winhand reconnected to the relay while this call was in flight; check history() before resending");
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1], ["agent"]);
     pair[1].serializeAttachment({ connectedAt: new Date().toISOString(), active: true });
+    this.ctx.waitUntil(this.ctx.storage.delete("offlineSince"));
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
@@ -77,8 +122,14 @@ export class Bridge extends DurableObject<Env> {
   }
 
   private async forward(request: Request, path: string, user: string): Promise<Response> {
-    const socket = this.agent();
-    if (!socket) return offline("winhand agent is not connected; start `winhand connect` on the machine");
+    // MCP calls are small JSON-RPC bodies: read them, so a failure can be answered as a JSON-RPC
+    // error for the same id, which every client shows to the model. File transfers stream.
+    const mcp = !path.startsWith("/transfer/");
+    const body = mcp && request.body ? new Uint8Array(await request.arrayBuffer()) : null;
+    const reply = errorReply(request.method, mcp ? body : null);
+
+    const socket = await this.waitForAgent();
+    if (!socket) return reply(await this.offlineMessage(), 503);
 
     const id = crypto.randomUUID();
     const headers = forwardableRequestHeaders(request.headers);
@@ -86,7 +137,13 @@ export class Bridge extends DurableObject<Env> {
     const response = new Promise<Response>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        resolve(offline("winhand agent did not answer in time", 504));
+        resolve(
+          reply(
+            `winhand on the PC did not answer within ${HEAD_TIMEOUT_MS / 1000} s; the call may still be running there. ` +
+              "Check history() before resending it.",
+            504,
+          ),
+        );
       }, HEAD_TIMEOUT_MS);
       this.pending.set(id, {
         socket,
@@ -97,14 +154,18 @@ export class Bridge extends DurableObject<Env> {
         },
         fail: (message, status = 502) => {
           clearTimeout(timer);
-          resolve(offline(message, status));
+          resolve(reply(message, status));
         },
       });
     });
 
     try {
       this.send(socket, { type: "req", id, method: request.method, path, headers });
-      if (request.body) {
+      if (body) {
+        for (let at = 0; at < body.length; at += CHUNK_BYTES) {
+          this.send(socket, { type: "req_body", id, data: toBase64(body.subarray(at, at + CHUNK_BYTES)) });
+        }
+      } else if (request.body) {
         const reader = request.body.getReader();
         let buffered: Uint8Array = new Uint8Array(0);
         for (;;) {
@@ -120,7 +181,7 @@ export class Bridge extends DurableObject<Env> {
       }
       this.send(socket, { type: "req_end", id });
     } catch (error) {
-      this.pending.get(id)?.fail(`could not reach the agent: ${String(error)}`);
+      this.pending.get(id)?.fail(`could not reach winhand on the PC: ${String(error)}`);
       this.pending.delete(id);
     }
 
@@ -144,6 +205,7 @@ export class Bridge extends DurableObject<Env> {
     }
     if (frame.type === "hello") {
       ws.serializeAttachment({ ...frame, ...(ws.deserializeAttachment() as object | null) });
+      this.wakeWaiters();
       return;
     }
     const entry = this.pending.get(frame.id);
@@ -172,7 +234,14 @@ export class Bridge extends DurableObject<Env> {
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
-    this.failAll(`agent disconnected (${code} ${reason})`, ws);
+    // A socket closed because a newer agent connection replaced it: the PC is not offline.
+    // Only the calls sent down this socket fail; calls on the new one carry on.
+    if (!this.replaced(ws)) await this.markOffline();
+    this.failAll(
+      `winhand on the PC disconnected while this call was in flight (${code} ${reason}); ` +
+        "check history() once it is back before resending",
+      ws,
+    );
     try {
       ws.close(code, reason);
     } catch {
@@ -181,7 +250,24 @@ export class Bridge extends DurableObject<Env> {
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    this.failAll("agent connection error", ws);
+    if (!this.replaced(ws)) await this.markOffline();
+    this.failAll(
+      "the connection to winhand on the PC failed while this call was in flight; check history() before resending",
+      ws,
+    );
+  }
+
+  /** Whether another agent connection, not yet replaced itself, has taken over from this one. */
+  private replaced(closed: WebSocket): boolean {
+    return this.ctx.getWebSockets("agent").some(
+      (s) => s !== closed && (s.deserializeAttachment() as { active?: boolean } | null)?.active !== false,
+    );
+  }
+
+  private async markOffline() {
+    if ((await this.ctx.storage.get<number>("offlineSince")) === undefined) {
+      await this.ctx.storage.put("offlineSince", Date.now());
+    }
   }
 
   private failAll(message: string, socket?: WebSocket) {
@@ -202,7 +288,38 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out;
 }
 
-// MCP clients show JSON-RPC errors to the model, which is more useful than a bare 502.
-function offline(message: string, status = 503): Response {
-  return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32000, message } }, { status });
+function describe(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 90) return `${s} s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  if (s < 172800) return `${Math.round(s / 3600)} h`;
+  return `${Math.round(s / 86400)} days`;
+}
+
+/**
+ * How to answer a request the agent could not serve. For a JSON-RPC request the answer is a
+ * JSON-RPC error with the request's own id over HTTP 200: MCP clients hand that message to the
+ * model, while a bare 5xx often reaches it only as "Service Unavailable".
+ */
+function errorReply(method: string, body: Uint8Array | null): (message: string, status: number) => Response {
+  let ids: unknown[] | null = null;
+  let batch = false;
+  if (method === "POST" && body && body.length) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(body)) as unknown;
+      batch = Array.isArray(parsed);
+      const messages = (batch ? parsed : [parsed]) as Array<Record<string, unknown>>;
+      ids = messages
+        .filter((m) => m && typeof m === "object" && "method" in m && "id" in m && m.id !== null)
+        .map((m) => m.id);
+    } catch {
+      ids = null;
+    }
+  }
+  return (message, status) => {
+    const error = (id: unknown) => ({ jsonrpc: "2.0", id, error: { code: -32000, message } });
+    if (ids === null) return Response.json(error(null), { status });
+    if (ids.length === 0) return new Response(null, { status: 202 }); // only notifications
+    return Response.json(batch ? ids.map(error) : error(ids[0]), { status: 200 });
+  };
 }

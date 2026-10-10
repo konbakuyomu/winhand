@@ -9,5 +9,7 @@ declare global {
     PUBLIC_ORIGIN: string;
     OWNER_PASSPHRASE: string;
     AGENT_TOKEN: string;
+    /** Seconds a request waits for the agent to reconnect before failing (default 20). */
+    AGENT_GRACE_S?: string;
   }
 }
