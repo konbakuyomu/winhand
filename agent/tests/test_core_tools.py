@@ -112,8 +112,20 @@ def test_adjust_argv_fixes_python_isolation_and_powershell_encoding():
 
 
 def test_decode_mixes_utf8_and_legacy_lines():
-    data = "第一行 utf-8\n".encode() + "第二行 gbk\n".encode("gbk") + "完成".encode()[:-1]
-    assert proc._decode(data) == "第一行 utf-8\n第二行 gbk\n完"
+    """One line in the machine's legacy code page (cp936 on Chinese Windows, cp1252 on an English
+    one) does not garble the UTF-8 lines around it, nor does half a character at the end."""
+    legacy = proc._legacy_encodings()[0]
+    text = next(t for t in ("第二行 旧代码页", "Ünïcödé façade", "plain") if _encodable(t, legacy))
+    data = "第一行 utf-8\n".encode() + f"{text}\n".encode(legacy) + "完成".encode()[:-1]
+    assert proc._decode(data) == f"第一行 utf-8\n{text}\n完"
+
+
+def _encodable(text: str, enc: str) -> bool:
+    try:
+        text.encode(enc)
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
 
 
 def test_exit_codes_are_signed_with_crash_notes(monkeypatch):
@@ -122,8 +134,9 @@ def test_exit_codes_are_signed_with_crash_notes(monkeypatch):
     code, note = proc.exit_info(0xC0000005)
     assert code == -1073741819 and "ACCESS_VIOLATION" in note
     assert proc.exit_info(3) == (3, None)
-    monkeypatch.setattr(proc.winenv, "IS_WINDOWS", False)
-    assert proc.exit_info(-9) == (-9, "killed by signal SIGKILL")
+    if sys.platform != "win32":  # Windows has no SIGKILL
+        monkeypatch.setattr(proc.winenv, "IS_WINDOWS", False)
+        assert proc.exit_info(-9) == (-9, "killed by signal SIGKILL")
 
 
 # ------------------------------------------------------------------ waiting
