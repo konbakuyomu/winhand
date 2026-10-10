@@ -168,6 +168,50 @@ def test_shell_command_line_with_pipes_and_cjk():
     assert res["stdout"].strip() in ("丙", "乙", "甲") and res["exit_code"] == 0, res
 
 
+def test_nested_powershell_command_line_keeps_its_variables():
+    need("powershell")
+    res = proc.run('powershell -NoProfile -Command "$p = \'a b\'; Write-Output \\"[$p]\\""')
+    assert res["exit_code"] == 0 and "[a b]" in res["stdout"], res
+    assert res.get("notes"), res
+
+
+def test_powershell_with_args_prints_utf8():
+    need("powershell")
+    res = proc.run("powershell", ["-NoProfile", "-Command", "Write-Output '中文 😀 done'"])
+    assert "中文 😀 done" in res["stdout"], res
+
+
+def test_scripts_in_every_windows_shell():
+    res = proc.run(script="$x = \"a $(1+1)\"\nWrite-Output $x\nWrite-Output '中文 😀'", shell="powershell")
+    assert "a 2" in res["stdout"] and "中文 😀" in res["stdout"], res
+    res = proc.run(script="@echo off\necho 中文 %~nx0", shell="cmd")
+    assert "中文 run-" in res["stdout"], res
+    if shutil.which("pwsh"):
+        res = proc.run(script="Get-Item -LiteralPath . | ForEach-Object { $_.GetType().Name }")
+        assert res["stdout"].strip() == "DirectoryInfo", res
+
+
+def test_batch_file_refuses_multiline_arguments(weird_dir):
+    bat = weird_dir / "shim.cmd"
+    bat.write_text("@echo off\r\necho %*\r\n", encoding="ascii")
+    assert "line breaks" in proc.run(str(bat), ["one\ntwo"])["error"]
+
+
+def test_delete_goes_to_the_recycle_bin(weird_dir):
+    target = weird_dir / "回收站测试.txt"
+    target.write_text("x", encoding="utf-8")
+    out = fs.fs_op("delete", str(target))
+    assert out["recycled"] and not target.exists(), out
+
+
+def test_atomic_write_keeps_crlf_and_replaces_in_place(weird_dir):
+    p = weird_dir / "keep.ini"
+    p.write_bytes(b"a=1\r\n")
+    fs.fs_edit(str(p), "a=1", "a=2")
+    assert p.read_bytes() == b"a=2\r\n"
+    assert sorted(x.name for x in weird_dir.iterdir()) == ["keep.ini"]
+
+
 # ------------------------------------------------------------ prompts
 
 

@@ -10,6 +10,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -21,11 +22,34 @@ from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import desktop, jobs, media, proc, winenv
+from . import coalesce, desktop, jobs, media, proc, winenv
 from .secret_prompt import PromptUnavailable, ask_pick
 
 UIA_SCRIPT = Path(__file__).parent / "scripts" / "uia.ps1"
 SEND_LIMIT = 20 * 1024 * 1024
+MAX_JOB_WAIT_S = 40.0  # the reply must reach the client within its ~60 s limit
+JOB_POLL_S = 0.5
+
+
+async def wait_job(fetch, wait_s: float, regexes: list[re.Pattern[str]]) -> dict:
+    """Poll a job's status until it is no longer running, its new output matches, or time is up."""
+    began = time.monotonic()
+    deadline = began + min(wait_s, MAX_JOB_WAIT_S)
+    while True:
+        status = await asyncio.to_thread(fetch)
+        if status.get("error") or status.get("state") != "running":
+            return status
+        output = status.get("output") or ""
+        hit = next((r.pattern for r in regexes if r.search(output)), None)
+        if hit is not None:
+            return {**status, "matched": hit}
+        if time.monotonic() >= deadline:
+            return {
+                **status,
+                "waited_s": round(time.monotonic() - began, 1),
+                "note": "still running; call job_status again with since=cursor (and wait_s) to keep waiting",
+            }
+        await asyncio.sleep(JOB_POLL_S)
 
 
 def _facts(data: dict) -> TextContent:
@@ -498,13 +522,48 @@ def register(mcp: FastMCP) -> None:
     async def job_status(
         id: Annotated[str | None, Field(description="Job id; omit to list recent jobs")] = None,
         since: Annotated[int, Field(description="Output cursor from the previous call")] = 0,
+        wait_s: Annotated[
+            float,
+            Field(
+                ge=0,
+                description="Wait up to this long (max 40 s) for the job to finish or a pattern to appear; "
+                "0 answers at once. Use instead of sleeping or polling",
+            ),
+        ] = 0,
+        patterns: Annotated[
+            list[str] | None, Field(description="Regexes: stop waiting once new output matches one")
+        ] = None,
+        tail: Annotated[
+            int | None, Field(ge=1, description="Return at most this many characters of output (the end)")
+        ] = None,
     ) -> dict:
-        """State (running/finished/vanished), exit code and output of a background job."""
+        """State (running/finished/vanished), exit code and output of a background job or of a `run`
+        that was still going (run-N). With wait_s it blocks until the job ends, new output matches
+        `patterns`, or the wait runs out (then call again with since=cursor)."""
         if id is None:
             return await asyncio.to_thread(_errors, lambda: {"jobs": jobs.list_jobs()})
-        if id.startswith("run-"):  # a `run` command that was still going when run answered
-            return await asyncio.to_thread(_errors, proc.run_status, id, since)
-        return await asyncio.to_thread(_errors, jobs.status, id, since)
+        limit = tail or 20_000
+
+        def fetch() -> dict:
+            if id.startswith("run-"):  # a `run` command that was still going when run answered
+                return _errors(proc.run_status, id, since, limit)
+            return _errors(jobs.status, id, since, limit)
+
+        if wait_s <= 0:
+            return await asyncio.to_thread(fetch)
+        try:
+            regexes = [re.compile(p, re.MULTILINE) for p in patterns or []]
+        except re.error as exc:
+            return {"error": f"invalid regex: {exc}"}
+        key = (
+            "job_status",
+            id,
+            since,
+            round(min(wait_s, MAX_JOB_WAIT_S), 1),
+            coalesce.freeze(patterns),
+            limit,
+        )
+        return await coalesce.shared(key, lambda: wait_job(fetch, wait_s, regexes))
 
     @mcp.tool
     async def job_stop(id: str) -> dict:

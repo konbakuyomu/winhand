@@ -61,7 +61,10 @@ def test_fs_write_list_search_stat(tmp_path):
     fs.fs_write(str(tmp_path / "deep" / "dir" / "note.md"), "hello needle\n")
     fs.fs_write(str(tmp_path / "other.txt"), "no match\n")
     listing = fs.fs_list(str(tmp_path), depth=3)
-    assert {"path": "deep/", "type": "dir"} in listing["entries"]
+    assert {"path": "deep/", "type": "dir"} in [
+        {k: e[k] for k in ("path", "type")} for e in listing["entries"]
+    ]
+    assert all("modified" in e for e in listing["entries"])
     found = fs.fs_search("needle", str(tmp_path))
     assert found["count"] == 1 and "note.md:1:hello needle" in found["matches"][0]
     assert fs.fs_stat(str(tmp_path / "nope"))["exists"] is False
