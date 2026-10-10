@@ -23,9 +23,7 @@ Scenario: (A1) instructions 不被截断，help() 完整
   - instructions 不超过 4096 字符，包含 `context(` 和 `help()`；
   - `help()` 的结果包含以下各段：桌面操作、`job_start`、`sys_info(checks=true)`、`call(tool, arguments)`、本机 MCP 服务是独立地址。
 
-### R3 本机 stdio 客户端（待 Q8）
-
-（以下按推荐写。）
+### R3 本机 stdio 客户端
 
 - `winhand stdio` 入口默认不显示 R1 中关于 `context()` 的那一句，因为本机客户端自己会读规则。
 - 配置 `[context] stdio_hint = true` 时显示。

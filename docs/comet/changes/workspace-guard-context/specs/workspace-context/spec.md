@@ -17,17 +17,17 @@
 - 项目根：从 path 向上，找到最近一个含 `.git` 的目录；找不到时，项目根就是 path 所在目录。
 - 收集项目根到 path 所在目录沿途每一级的 `AGENTS.md`，按从根到深的顺序返回。每份带路径和正文。
 
-### R3 全局规矩（待 Q6）
+### R3 全局规矩
 
 - 配置项 `[context] rules`：一个文件路径列表，支持 `~` 和环境变量。
-- 没有配置时用默认列表（推荐）：`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md`。
+- 没有配置时用默认列表：`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md`。
 - 不存在的文件静默跳过；配置了 `rules = []` 时不读任何全局规矩。
 - 每份带路径和正文。
 
-### R4 技能（待 Q7）
+### R4 技能
 
 - 配置项 `[context] skills`：用户级技能目录列表。
-- 没有配置时默认（推荐）：`~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`。
+- 没有配置时默认：`~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`。
 - 项目级目录固定为项目根下的 `.agents/skills`、`.claude/skills`。
 - 每个技能是一个含 `SKILL.md` 的子目录。读取 frontmatter 中的 `name` 和 `description`；没有 `name` 时用目录名。
 - 跳过以 `.` 开头的目录和非目录项（例如 zip）。
