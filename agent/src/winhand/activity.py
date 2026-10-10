@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import contextvars
 import itertools
 import json
 import threading
@@ -146,19 +147,31 @@ class ToolActivity(Middleware):
 
     def __init__(self, hub: ActivityHub) -> None:
         self.hub = hub
+        # the entry of a call(tool, arguments) in progress: the tool it runs comes through here
+        # again and takes that entry over, so the timeline shows one call under the tool's name
+        self._wrapper: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+            f"winhand-activity-{id(self)}", default=None
+        )
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         message = context.message
+        args = mask(preview(message.arguments or {}))
+        wrapper = self._wrapper.get()
+        if wrapper is not None:
+            wrapper.update(title=message.name, args=args)
+            self.hub.publish(dict(wrapper), persist=False)
+            return await call_next(context)
         started = time.time()
         entry = {
             "id": self.hub.new_id(),
             "t": started,
             "kind": "tool",
             "title": message.name,
-            "args": mask(preview(message.arguments or {})),
+            "args": args,
             "status": "running",
         }
         self.hub.publish(entry, persist=False)
+        token = self._wrapper.set(entry) if message.name == "call" else None
         try:
             result = await call_next(context)
         except BaseException as exc:
@@ -172,6 +185,9 @@ class ToolActivity(Middleware):
                 }
             )
             raise
+        finally:
+            if token is not None:
+                self._wrapper.reset(token)
         failed = bool(getattr(result, "is_error", False)) or _reports_error(result)
         self.hub.counts["error" if failed else "ok"] += 1
         self.hub.publish(
