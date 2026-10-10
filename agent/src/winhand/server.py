@@ -878,7 +878,8 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         tool: Annotated[str | None, Field(description="Only calls of this tool, e.g. run")] = None,
     ) -> dict:
         """The most recent tool calls this machine handled (newest first): status, summary, exit code
-        and run id. After a connection error, check here whether your call ran before resending it."""
+        and run id. After a connection error, check here whether your call ran before resending it.
+        A tool reached through call() is listed under its own name, with via="call"."""
         out = {"calls": recent.list(limit, tool), "winhand": __version__}
         if transfer.recent:
             out["transfers"] = list(transfer.recent)[::-1][:10]

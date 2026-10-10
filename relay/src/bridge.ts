@@ -15,6 +15,12 @@ type Pending = {
   fail: (message: string, status?: number) => void;
   writer?: WritableStreamDefaultWriter<Uint8Array>;
   started: boolean;
+  /** JSON-RPC ids of the request (null: not a JSON-RPC request). */
+  ids: unknown[] | null;
+  /** The response streams as server-sent events. */
+  sse?: boolean;
+  /** The bytes streamed so far end between two events. */
+  between?: boolean;
 };
 
 const HEAD_TIMEOUT_MS = 120_000;
@@ -126,7 +132,8 @@ export class Bridge extends DurableObject<Env> {
     // error for the same id, which every client shows to the model. File transfers stream.
     const mcp = !path.startsWith("/transfer/");
     const body = mcp && request.body ? new Uint8Array(await request.arrayBuffer()) : null;
-    const reply = errorReply(request.method, mcp ? body : null);
+    const rpc = requestIds(request.method, mcp ? body : null);
+    const reply = errorReply(rpc);
 
     const socket = await this.waitForAgent();
     if (!socket) return reply(await this.offlineMessage(), 503);
@@ -148,6 +155,7 @@ export class Bridge extends DurableObject<Env> {
       this.pending.set(id, {
         socket,
         started: false,
+        ids: rpc.ids,
         head: (r) => {
           clearTimeout(timer);
           resolve(r);
@@ -215,18 +223,23 @@ export class Bridge extends DurableObject<Env> {
         const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
         entry.writer = writable.getWriter();
         entry.started = true;
+        entry.sse = frame.headers.some(([k, v]) => k.toLowerCase() === "content-type" && v.includes("text/event-stream"));
+        entry.between = true;
         entry.head(new Response(readable, { status: frame.status, headers: forwardableResponseHeaders(frame.headers) }));
         break;
       }
-      case "body":
-        await entry.writer?.write(fromBase64(frame.data)).catch(() => this.pending.delete(frame.id));
+      case "body": {
+        const data = fromBase64(frame.data);
+        if (data.length) entry.between = endsEvent(data);
+        await entry.writer?.write(data).catch(() => this.pending.delete(frame.id));
         break;
+      }
       case "end":
         await entry.writer?.close().catch(() => {});
         this.pending.delete(frame.id);
         break;
       case "error":
-        if (entry.started) await entry.writer?.abort(frame.message).catch(() => {});
+        if (entry.started) endStream(entry, frame.message);
         else entry.fail(frame.message);
         this.pending.delete(frame.id);
         break;
@@ -273,7 +286,7 @@ export class Bridge extends DurableObject<Env> {
   private failAll(message: string, socket?: WebSocket) {
     for (const [id, entry] of this.pending) {
       if (socket && entry.socket !== socket) continue;
-      if (entry.started) entry.writer?.abort(message).catch(() => {});
+      if (entry.started) endStream(entry, message);
       else entry.fail(message);
       this.pending.delete(id);
     }
@@ -296,30 +309,63 @@ function describe(ms: number): string {
   return `${Math.round(s / 86400)} days`;
 }
 
+/** The ids of a JSON-RPC request body (null when it is not one), and whether it is a batch. */
+function requestIds(method: string, body: Uint8Array | null): { ids: unknown[] | null; batch: boolean } {
+  if (method !== "POST" || !body || !body.length) return { ids: null, batch: false };
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(body)) as unknown;
+    const batch = Array.isArray(parsed);
+    const messages = (batch ? parsed : [parsed]) as Array<Record<string, unknown>>;
+    const ids = messages
+      .filter((m) => m && typeof m === "object" && "method" in m && "id" in m && m.id !== null)
+      .map((m) => m.id);
+    return { ids, batch };
+  } catch {
+    return { ids: null, batch: false };
+  }
+}
+
+function rpcError(id: unknown, message: string) {
+  return { jsonrpc: "2.0", id, error: { code: -32000, message } };
+}
+
 /**
  * How to answer a request the agent could not serve. For a JSON-RPC request the answer is a
  * JSON-RPC error with the request's own id over HTTP 200: MCP clients hand that message to the
  * model, while a bare 5xx often reaches it only as "Service Unavailable".
  */
-function errorReply(method: string, body: Uint8Array | null): (message: string, status: number) => Response {
-  let ids: unknown[] | null = null;
-  let batch = false;
-  if (method === "POST" && body && body.length) {
-    try {
-      const parsed = JSON.parse(new TextDecoder().decode(body)) as unknown;
-      batch = Array.isArray(parsed);
-      const messages = (batch ? parsed : [parsed]) as Array<Record<string, unknown>>;
-      ids = messages
-        .filter((m) => m && typeof m === "object" && "method" in m && "id" in m && m.id !== null)
-        .map((m) => m.id);
-    } catch {
-      ids = null;
-    }
-  }
+function errorReply({ ids, batch }: { ids: unknown[] | null; batch: boolean }): (message: string, status: number) => Response {
   return (message, status) => {
-    const error = (id: unknown) => ({ jsonrpc: "2.0", id, error: { code: -32000, message } });
-    if (ids === null) return Response.json(error(null), { status });
+    if (ids === null) return Response.json(rpcError(null, message), { status });
     if (ids.length === 0) return new Response(null, { status: 202 }); // only notifications
-    return Response.json(batch ? ids.map(error) : error(ids[0]), { status: 200 });
+    return Response.json(batch ? ids.map((id) => rpcError(id, message)) : rpcError(ids[0], message), { status: 200 });
   };
+}
+
+/**
+ * Finish a response that was already streaming when its call failed. An event stream for a
+ * JSON-RPC request ends with a JSON-RPC error event for each id, then closes normally: the
+ * client answers the call with that message at once, where a cut-off stream leaves it waiting
+ * until its own timeout. Anything else can only be cut off.
+ */
+function endStream(entry: Pending, message: string) {
+  const writer = entry.writer;
+  if (!writer) return;
+  if (!entry.sse || !entry.ids?.length) {
+    writer.abort(message).catch(() => {});
+    return;
+  }
+  // a stream cut inside an event first ends that event, so ours is parsed on its own
+  const events = (entry.between ? "" : "\n\n") +
+    entry.ids.map((id) => `event: message\ndata: ${JSON.stringify(rpcError(id, message))}\n\n`).join("");
+  writer
+    .write(new TextEncoder().encode(events))
+    .then(() => writer.close())
+    .catch(() => writer.abort(message).catch(() => {}));
+}
+
+/** Whether these streamed bytes end at the blank line that closes a server-sent event. */
+function endsEvent(data: Uint8Array): boolean {
+  const n = data.length;
+  return (n >= 2 && data[n - 1] === 10 && data[n - 2] === 10) || (n >= 4 && data[n - 1] === 10 && data[n - 2] === 13 && data[n - 3] === 10);
 }

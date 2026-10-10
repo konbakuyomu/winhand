@@ -752,6 +752,23 @@ def sys_info() -> dict:
     return info
 
 
+def _shim_summary(folders: list[str]) -> str:
+    """The scoop/mise shim folders on PATH, in one short line: the shim folders themselves, and
+    only a count of mise's per-tool install folders (mise activate puts one per tool on PATH)."""
+    shims, tools = [], 0
+    for folder in dict.fromkeys(f.strip().rstrip("\\/") for f in folders if f.strip()):
+        if re.split(r"[\\/]", folder)[-1].lower() == "shims":
+            shims.append(folder)
+        elif re.search(r"(?i)[\\/]mise[\\/]installs[\\/]", folder):
+            tools += 1
+    if not shims and not tools:
+        return "no scoop/mise shim folders on PATH"
+    found = "; ".join(shims) or "no shims folder"
+    if tools:
+        found += f" (+{tools} mise tool folder{'s' if tools != 1 else ''})"
+    return found + " — .cmd shims cannot take multi-line arguments; use run(script=...)"
+
+
 def doctor() -> list[dict]:
     """Checks for the Windows setups that tripped AI sessions before, each with a fix."""
     checks: list[dict] = []
@@ -807,14 +824,7 @@ def doctor() -> list[dict]:
         add("git_bash", bool(bash), bash or "not found", "install Git for Windows for run(shell='bash')")
         wsl = shutil.which("wsl")
         add("wsl", bool(wsl), wsl or "not installed", "wsl --install, if Linux tooling is needed")
-        shims = [d for d in path.split(os.pathsep) if re.search(r"(?i)[\\/](shims|mise)[\\/]?", d)]
-        add(
-            "shims",
-            True,
-            ("; ".join(shims) + " — .cmd shims cannot take multi-line arguments; use run(script=...)")
-            if shims
-            else "no scoop/mise shim folders on PATH",
-        )
+        add("shims", True, _shim_summary(path.split(os.pathsep)))
     ssh = shutil.which("ssh")
     ssh_config = os.path.join(os.path.expanduser("~"), ".ssh", "config")
     add(

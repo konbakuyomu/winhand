@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -23,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from fastmcp.client import Client
 from fastmcp.client.transports import StreamableHttpTransport
+from websockets.asyncio.client import connect
 
 from winhand.config import Config, ServerEntry
 from winhand.mcp_bridge import Services
@@ -89,6 +91,38 @@ async def oauth_token(http: httpx.AsyncClient, auth_method: str = "none") -> str
     return token.json()["access_token"]
 
 
+async def dropped_mid_stream(http: httpx.AsyncClient, rpc_headers: dict, ws_url: str) -> None:
+    """A fake agent starts a streamed (SSE) answer, then drops off. The relay must end the
+    client's stream with a JSON-RPC error for the call at once, not leave it to time out."""
+    progress = 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\n'
+    call = {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "run", "arguments": {}}}
+    async with connect(ws_url, additional_headers={"Authorization": f"Bearer {AGENT_TOKEN}"}) as agent:
+        await agent.send(json.dumps({"type": "hello", "hostname": "e2e-fake-agent"}))
+
+        async def answer_then_drop() -> None:
+            while (frame := json.loads(await agent.recv()))["type"] != "req_end":
+                rid = frame["id"]
+            await agent.send(json.dumps({"type": "head", "id": rid, "status": 200,
+                                         "headers": [["content-type", "text/event-stream"]]}))
+            await agent.send(json.dumps({"type": "body", "id": rid,
+                                         "data": base64.b64encode(progress.encode()).decode()}))
+            await asyncio.sleep(0.5)
+            await agent.close()
+
+        dropper = asyncio.create_task(answer_then_drop())
+        began = time.monotonic()
+        async with http.stream("POST", f"{BASE}/mcp", headers=rpc_headers, json=call) as response:
+            text = (await response.aread()).decode()
+        took = time.monotonic() - began
+        await dropper
+    events = [e for e in text.split("\n\n") if e.strip()]
+    last = json.loads(events[-1].split("data: ", 1)[1]) if events and "data: " in events[-1] else {}
+    check(len(events) == 2 and "notifications/progress" in events[0], f"the streamed answer arrives ({text[:160]!r})")
+    check(last.get("id") == 5 and "disconnected" in last.get("error", {}).get("message", ""),
+          f"a drop mid-stream ends the call with a JSON-RPC error event ({events[-1][:160] if events else text!r})")
+    check(took < 10, f"the client learns of the drop at once ({took:.1f}s)")
+
+
 async def main() -> None:
     async with httpx.AsyncClient(timeout=30) as http:
         bad = await http.get(f"{BASE}/agent", headers={"Authorization": "Bearer wrong", "Upgrade": "websocket"})
@@ -108,6 +142,8 @@ async def main() -> None:
         check(waited >= GRACE_S - 0.5, f"the relay waited {waited:.1f}s for the agent first")
         note = await http.post(f"{BASE}/mcp", headers=rpc_headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
         check(note.status_code == 202, "a notification while offline is simply accepted")
+        ws_url = BASE.replace("http", "ws", 1) + "/agent"
+        await dropped_mid_stream(http, rpc_headers, ws_url)
 
         # a call made while the agent is (re)connecting waits for it instead of failing
         initialize = {"jsonrpc": "2.0", "id": 7, "method": "initialize", "params": {
@@ -115,7 +151,6 @@ async def main() -> None:
         early = asyncio.create_task(http.post(f"{BASE}/mcp", headers=rpc_headers, json=initialize))
         await asyncio.sleep(0.5)
         stop = asyncio.Event()
-        ws_url = BASE.replace("http", "ws", 1) + "/agent"
         fake = os.path.join(os.path.dirname(__file__), "..", "..", "agent", "tests", "fake_mcp_server.py")
         services = Services([ServerEntry(name="fake", command=sys.executable, args=["-u", fake])])
         agent = asyncio.create_task(

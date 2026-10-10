@@ -52,7 +52,7 @@ function harness(env = {}) {
     WebSocket: Socket,
     WebSocketPair: class { constructor() { this[0] = new Socket(); this[1] = new Socket(); } },
     WebSocketRequestResponsePair: class { constructor(request, response) { Object.assign(this, {request, response}); } },
-    Response: WorkerResponse, Headers, URL, Request, TransformStream, Uint8Array, TextDecoder, crypto: webcrypto, atob, btoa,
+    Response: WorkerResponse, Headers, URL, Request, TransformStream, Uint8Array, TextDecoder, TextEncoder, crypto: webcrypto, atob, btoa,
     setTimeout(fn, ms) { const id = nextTimer++; timers.set(id, {fn, ms}); return id; },
     clearTimeout(id) { timers.delete(id); },
   };
@@ -248,4 +248,41 @@ test('a replaced connection closing does not mark the PC offline', async () => {
   assert.equal(h.ctx.stored.has('offlineSince'), false);
   await h.object.webSocketClose(h.current, 1006, 'gone');
   assert.equal(typeof h.ctx.stored.get('offlineSince'), 'number');
+});
+
+async function streaming(contentType, chunk) {
+  const h = harness(), socket = new h.Socket();
+  h.ctx.sockets = [socket];
+  const pending = h.object.fetch(rpc(9));
+  await settle();
+  const id = socket.sent.findLast(f => f.type === 'req').id;
+  await message(h.object, socket, {type: 'head', id, status: 200, headers: [['content-type', contentType]]});
+  const response = await pending;
+  const body = response.text();
+  if (chunk) await message(h.object, socket, {type: 'body', id, data: btoa(chunk)});
+  await h.object.webSocketClose(socket, 1006, 'gone');
+  return {h, body};
+}
+
+test('an event stream cut by a disconnect ends with a JSON-RPC error for the call', async () => {
+  const {h, body} = await streaming('text/event-stream', 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n');
+  const text = await body;
+  const events = text.split('\n\n').filter(Boolean);
+  assert.equal(events.length, 2);
+  assert.match(events[1], /^event: message\ndata: /);
+  const error = JSON.parse(events[1].split('data: ')[1]);
+  assert.equal(error.id, 9);
+  assert.match(error.error.message, /disconnected while this call was in flight/);
+  assert.equal(h.object.pending.size, 0);
+});
+
+test('a stream cut inside an event closes that event before the error', async () => {
+  const {body} = await streaming('text/event-stream', 'event: message\ndata: {"partial');
+  const text = await body;
+  assert.match(text, /\{"partial\n\nevent: message\ndata: \{"jsonrpc":"2.0","id":9,"error"/);
+});
+
+test('a plain streamed response is still cut off', async () => {
+  const {body} = await streaming('application/octet-stream', 'abc');
+  await assert.rejects(body);
 });

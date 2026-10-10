@@ -8,6 +8,8 @@ command run, and what was its run id / exit code?" so nothing is blindly sent tw
 from __future__ import annotations
 
 import collections
+import contextlib
+import contextvars
 import itertools
 import threading
 import time
@@ -33,21 +35,35 @@ class RecentCalls(Middleware):
         self.entries: collections.deque[dict] = collections.deque(maxlen=keep)
         self._numbers = itertools.count(1)
         self._lock = threading.Lock()
+        # the entry of a call(tool, arguments) in progress: the tool it runs comes through this
+        # middleware again and fills that entry in, so one call is one entry, under the tool's name
+        self._wrapper: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+            f"winhand-history-{id(self)}", default=None
+        )
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         message = context.message
+        wrapper = self._wrapper.get()
         if message.name in _SKIP:
+            if wrapper is not None:  # history() reached through call() is not recorded either
+                with self._lock, contextlib.suppress(ValueError):
+                    self.entries.remove(wrapper)
+            return await call_next(context)
+        args = mask(preview(message.arguments or {}, 160))
+        if wrapper is not None:
+            wrapper.update(tool=message.name, args=args, via="call")
             return await call_next(context)
         started = time.time()
         entry: dict[str, Any] = {
             "n": next(self._numbers),
             "tool": message.name,
-            "args": mask(preview(message.arguments or {}, 160)),
+            "args": args,
             "started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started)),
             "status": "running",
         }
         with self._lock:
             self.entries.append(entry)
+        token = self._wrapper.set(entry) if message.name == "call" else None
         try:
             result = await call_next(context)
         except BaseException as exc:
@@ -57,6 +73,9 @@ class RecentCalls(Middleware):
                 duration_ms=round((time.time() - started) * 1000),
             )
             raise
+        finally:
+            if token is not None:
+                self._wrapper.reset(token)
         data = _structured(result) or {}
         entry.update(
             status="error" if bool(getattr(result, "is_error", False)) or _reports_error(result) else "ok",
