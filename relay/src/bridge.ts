@@ -10,6 +10,7 @@ import {
 } from "./protocol";
 
 type Pending = {
+  socket: WebSocket;
   head: (response: Response) => void;
   fail: (message: string, status?: number) => void;
   writer?: WritableStreamDefaultWriter<Uint8Array>;
@@ -32,7 +33,10 @@ export class Bridge extends DurableObject<Env> {
   }
 
   private agent(): WebSocket | undefined {
-    return this.ctx.getWebSockets("agent")[0];
+    return this.ctx.getWebSockets("agent").find((ws) =>
+      ws.readyState === WebSocket.OPEN &&
+      (ws.deserializeAttachment() as { active?: boolean } | null)?.active !== false
+    );
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -55,6 +59,7 @@ export class Bridge extends DurableObject<Env> {
     // A newer connection from the agent replaces any stale one.
     for (const old of this.ctx.getWebSockets("agent")) {
       try {
+        old.serializeAttachment({ ...(old.deserializeAttachment() as object | null), active: false });
         old.close(4000, "replaced by a new agent connection");
       } catch {
         // already closed
@@ -63,7 +68,7 @@ export class Bridge extends DurableObject<Env> {
     this.failAll("agent reconnected");
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1], ["agent"]);
-    pair[1].serializeAttachment({ connectedAt: new Date().toISOString() });
+    pair[1].serializeAttachment({ connectedAt: new Date().toISOString(), active: true });
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
@@ -84,6 +89,7 @@ export class Bridge extends DurableObject<Env> {
         resolve(offline("winhand agent did not answer in time", 504));
       }, HEAD_TIMEOUT_MS);
       this.pending.set(id, {
+        socket,
         started: false,
         head: (r) => {
           clearTimeout(timer);
@@ -122,8 +128,7 @@ export class Bridge extends DurableObject<Env> {
       if (this.pending.has(id)) {
         this.pending.get(id)?.writer?.close().catch(() => {});
         this.pending.delete(id);
-        const live = this.agent();
-        if (live) this.send(live, { type: "cancel", id });
+        if (socket.readyState === WebSocket.OPEN) this.send(socket, { type: "cancel", id });
       }
     });
     return response;
@@ -138,11 +143,11 @@ export class Bridge extends DurableObject<Env> {
       return;
     }
     if (frame.type === "hello") {
-      ws.serializeAttachment({ ...frame, connectedAt: new Date().toISOString() });
+      ws.serializeAttachment({ ...frame, ...(ws.deserializeAttachment() as object | null) });
       return;
     }
     const entry = this.pending.get(frame.id);
-    if (!entry) return;
+    if (!entry || entry.socket !== ws) return;
     switch (frame.type) {
       case "head": {
         const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -167,7 +172,7 @@ export class Bridge extends DurableObject<Env> {
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
-    this.failAll(`agent disconnected (${code} ${reason})`);
+    this.failAll(`agent disconnected (${code} ${reason})`, ws);
     try {
       ws.close(code, reason);
     } catch {
@@ -175,12 +180,13 @@ export class Bridge extends DurableObject<Env> {
     }
   }
 
-  async webSocketError(): Promise<void> {
-    this.failAll("agent connection error");
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.failAll("agent connection error", ws);
   }
 
-  private failAll(message: string) {
+  private failAll(message: string, socket?: WebSocket) {
     for (const [id, entry] of this.pending) {
+      if (socket && entry.socket !== socket) continue;
       if (entry.started) entry.writer?.abort(message).catch(() => {});
       else entry.fail(message);
       this.pending.delete(id);

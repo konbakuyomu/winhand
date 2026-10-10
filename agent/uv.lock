@@ -1680,6 +1680,7 @@ name = "winhand"
 version = "0.4.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "openpyxl" },
@@ -1706,6 +1707,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.1" },
     { name = "fastmcp", specifier = ">=4.0.10" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "openpyxl", specifier = ">=3.1.5" },

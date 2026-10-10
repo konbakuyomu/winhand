@@ -60,7 +60,14 @@ public sealed partial class MainWindow
         });
 
         var listHost = new Grid();
-        _activityList = new ListView { SelectionMode = ListViewSelectionMode.Single, Padding = new Thickness(12, 8, 12, 8) };
+        // Rows are prepended and can change height when a tool completes. Keep the scroll
+        // offset to avoid WinUI's KeepItemsInView re-anchoring failure in this live list.
+        _activityList = new ListView
+        {
+            SelectionMode = ListViewSelectionMode.Single,
+            Padding = new Thickness(12, 8, 12, 8),
+            ItemsPanel = Resource<ItemsPanelTemplate>("ActivityItemsPanel")
+        };
         Named(_activityList, "活动记录");
         _activityList.SelectionChanged += (_, _) =>
         {

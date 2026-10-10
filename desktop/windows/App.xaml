@@ -7,6 +7,9 @@
       <ResourceDictionary.MergedDictionaries>
         <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
       </ResourceDictionary.MergedDictionaries>
+      <ItemsPanelTemplate x:Key="ActivityItemsPanel">
+        <ItemsStackPanel ItemsUpdatingScrollMode="KeepScrollOffset" />
+      </ItemsPanelTemplate>
       <Style TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
         <Setter Property="MinHeight" Value="36" />
       </Style>

@@ -79,6 +79,8 @@ class Backend:
         self.status: dict[str, Any] = {}
         self.tunnel: asyncio.Task | None = None
         self.tunnel_stop: asyncio.Event | None = None
+        self._tunnel_lock = asyncio.Lock()
+        self._tunnel_generation = 0
         self.lock: contextlib.ExitStack | None = None
         self.last_sessions: list | None = None
         self.done = asyncio.Event()
@@ -111,7 +113,12 @@ class Backend:
     # ----------------------------------------------------------------- tunnel
 
     async def start_tunnel(self) -> None:
-        await self.stop_tunnel(quiet=True)
+        async with self._tunnel_lock:
+            await self._stop_tunnel()
+            if not self.done.is_set():
+                self._start_tunnel()
+
+    def _start_tunnel(self) -> None:
         if not self.cfg.relay_url or not self.cfg.device_token:
             self.set_status("unconfigured")
             return
@@ -123,6 +130,12 @@ class Backend:
             return
         self.lock = lock
         self.tunnel_stop = asyncio.Event()
+        generation = self._tunnel_generation
+
+        def on_status(state: str, **detail: Any) -> None:
+            if generation == self._tunnel_generation:
+                self._on_tunnel_status(state, **detail)
+
         self.tunnel = asyncio.create_task(
             run_tunnel(
                 self.cfg.relay_url,
@@ -130,7 +143,7 @@ class Backend:
                 mcp=self.mcp,
                 services=self.services,
                 stop=self.tunnel_stop,
-                on_status=self._on_tunnel_status,
+                on_status=on_status,
             )
         )
         self.tunnel.add_done_callback(self._on_tunnel_done)
@@ -147,9 +160,12 @@ class Backend:
         self.set_status(state, **detail)
 
     def _on_tunnel_done(self, task: asyncio.Task) -> None:
-        if self.tunnel is task:
-            self.tunnel = None
-            self._release_lock()
+        if self.tunnel is not task:
+            if not task.cancelled():
+                task.exception()  # retrieve an old task's error without changing the new connection
+            return
+        self.tunnel = None
+        self._release_lock()
         if task.cancelled():
             return
         exc = task.exception()
@@ -160,17 +176,33 @@ class Backend:
             self.set_status("offline", reason=f"tunnel crashed: {exc}", retry_in_s=None)
 
     async def stop_tunnel(self, *, quiet: bool = False) -> None:
+        async with self._tunnel_lock:
+            await self._stop_tunnel()
+            if not quiet:
+                self.set_status("paused")
+
+    async def _stop_tunnel(self) -> None:
+        self._tunnel_generation += 1
         task, self.tunnel = self.tunnel, None
-        if task is not None:
-            if self.tunnel_stop is not None:
-                self.tunnel_stop.set()
-            try:
-                await asyncio.wait_for(task, 10)
-            except (TimeoutError, asyncio.CancelledError, Exception):
-                task.cancel()
-        self._release_lock()
-        if not quiet:
-            self.set_status("paused")
+        stop, self.tunnel_stop = self.tunnel_stop, None
+        try:
+            if task is not None:
+                if stop is not None:
+                    stop.set()
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), 10)
+                except TimeoutError:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                except asyncio.CancelledError:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    if asyncio.current_task().cancelling():
+                        raise
+                except Exception as exc:
+                    log.warning("relay ended while stopping: %s", exc)
+        finally:
+            self._release_lock()
 
     def _release_lock(self) -> None:
         lock, self.lock = self.lock, None
@@ -430,6 +462,7 @@ class Backend:
             self.write_line({"id": rid, "error": {"code": "internal", "message": str(exc)}})
 
     async def close(self) -> None:
+        self.done.set()
         await self.stop_tunnel(quiet=True)
         await self.services.close()
         await asyncio.to_thread(self.sessions.stop_all)

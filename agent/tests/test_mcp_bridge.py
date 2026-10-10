@@ -39,11 +39,11 @@ async def site():
         ],
         hub,
     )
-    server = await serve_local(compose_app(build_server(Config()).http_app(), services), port)
+    server, server_task = await serve_local(compose_app(build_server(Config()).http_app(), services), port)
     yield f"http://127.0.0.1:{port}", services, hub
     await services.close()
     server.should_exit = True
-    await asyncio.sleep(0.1)
+    await server_task
 
 
 async def test_a_local_server_is_its_own_endpoint(site):
