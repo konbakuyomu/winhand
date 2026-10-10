@@ -26,16 +26,18 @@ winhand 在执行会读写这台机器的工具调用前，先把调用描述成
 | `session_send` | `input`（见 R9） |
 | `fs_write`、`fs_write_bytes`、`fs_upload_url` | `write` |
 | `secret_prompt` 带 `save_to` | `write`，路径为 `save_to` |
-| `fs_op` 的 `copy` | 目标路径为 `write`，源路径为 `read` |
+| `fs_op` 的 `copy` | 写入路径为 `write`，源路径为 `read`。`to` 是已有文件夹时，写入路径是 `to/<源文件名>`，与 `fs_op` 实际写入的位置一致 |
 | `fs_op` 的 `mkdir` | `write` |
 | `fs_op` 的 `delete` | `delete` |
-| `fs_op` 的 `move` | `move`，源和目标都在 `paths` 中；另有源路径的 `read`（移走文件等于交出它的内容） |
+| `fs_op` 的 `move` | `move`，源和写入路径都在 `paths` 中；另有源路径的 `read`（移走文件等于交出它的内容）和写入路径的 `write`。写入路径的确定同 `copy` |
 | `fs_edit` | `edit` |
-| `fs_apply_patch` | `edit`，`paths` 为补丁涉及的全部文件（相对 `root` 解析） |
+| `fs_apply_patch` | `edit`，`paths` 为补丁涉及的全部文件（相对 `root` 解析）；补丁重命名的源文件另有 `read` |
+| `session_stop`（不带 `force`） | `input`（见 R9）：会话里已输入的内容加上退出命令，作为被执行的一行 |
+| `session_prompt_user` | `input`（见 R9）：已输入的内容不为空时，它加上口令作为被执行的一行 |
 | `fs_read`、`fs_send`、`fs_download_url` | `read` |
-| `fs_search` | `read`，路径为搜索的目录或文件 |
+| `fs_search` | `read`，路径为搜索的目录或文件；搜索文件夹时，结果里读取规则拒绝或要求确认的文件被略去，`guard_hidden` 写明略去了哪些 |
 
-其他工具（查询类，以及桌面类工具）不产生动作，不受守卫影响。
+其他工具（查询类，以及桌面类工具）不产生动作，不受守卫影响。参数格式不对、无法描述成动作的调用，交给工具自己的参数校验处理，不会执行。
 
 路径按工具自己的方式解析：`fs_*` 工具展开 `~`、相对路径以 winhand 的工作目录为基准、不展开环境变量；`fs_upload_url` 和 `fs_download_url` 另外展开 `%VAR%` 和 `$VAR`。守卫判断的路径与工具实际操作的路径一致。
 
@@ -135,10 +137,13 @@ Scenario: (A7) call 转发同样受约束
 
 - 只对 shell 类会话生效。判定条件：profile 为 `shell` 或 `ssh`，或程序名（去掉路径和扩展名）是 pwsh、powershell、cmd、bash、sh、zsh 之一，或没有指定程序（默认 shell）。gdb、串口、python 等会话不产生动作。
 - 守卫为每个 shell 会话记住“已输入、还没执行”的内容。一次 `session_send` 按“文字 → 按键 → submit”的顺序处理：
-  - 换行、Enter 键（以及 Ctrl+M、Ctrl+J）和 `submit` 都会执行当前这一行；
-  - 每个被执行的行（含之前输入、还没执行的部分）产生一个 `input` 动作，`text` 为这一行（去掉光标移动等控制序列和 Tab），`cwd` 为会话的工作目录；
-  - Ctrl+C 清掉正在输入的一行，Backspace 删掉最后一个字符；其他编辑键保留已输入的内容，宁可多判断，不少判断。
+  - 换行、Enter 键（以及 Ctrl+M、Ctrl+J）和 `submit` 都会执行当前这一行；以 `\` 或反引号结尾的行不单独执行，与下一行合起来；
+  - 每个被执行的行（含之前输入、还没执行的部分）产生一个 `input` 动作，`text` 为这一行，`cwd` 为会话的工作目录；
+  - Backspace（文字中的 DEL、BS 字符同样）删掉最后一个字符；Ctrl+C 在终端会话中清掉正在输入的一行，在管道会话中只是一个字符；
+  - 行中出现光标移动、历史记录、Tab 补全等编辑键或其他控制字符时，最终执行的内容无法从输入推断：这一行标为“经过编辑”，任何带 `match` 的 `input` 规则都视为命中，拒绝信息提示先用 Ctrl+C 清行，再直接输入并提交。
+- `session_stop`（不带 `force`）会输入退出命令并回车，`session_prompt_user` 会输入口令并回车，两者同样按被执行的行判断；`session_stop` 被拒绝时，提示可以用 `force=true` 结束会话而不输入任何内容。
 - 只输入、不执行的文字不检查。
+- 同一会话的输入调用按顺序判断和发送：后一个调用等前一个结束后才判断，判断用的已输入内容总是最新的。只发送 Ctrl+C 的调用不排队。
 - 被拒绝时这次调用的文字和按键都不发给程序，记住的内容不变。
 
 Scenario: (A8) shell 会话里的命令也受约束

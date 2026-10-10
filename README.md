@@ -201,11 +201,19 @@ Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructio
 | 动作 | 来自 |
 |---|---|
 | `command` | `run`（含 `stdin` 送进去的内容）、`job_start`、`session_start`、`remote_run`（含参数，`host` 为远程主机） |
-| `input` | shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里真正被执行的每一行：之前输入但还没执行的内容，加上这次的文字，直到 `submit`、Enter 键或换行。Ctrl+C 会清掉正在输入的一行，Backspace 删掉最后一个字符。gdb、串口等会话不检查 |
-| `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`secret_prompt` 的 `save_to`、`fs_op` 的 copy 目标和 mkdir |
+| `input` | shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里真正被执行的每一行，见下文。gdb、串口等会话不检查 |
+| `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`secret_prompt` 的 `save_to`、`fs_op` 的 copy/move 目标（目标是已有文件夹时，按放进去的那个文件判断）和 mkdir |
 | `edit` | `fs_edit`、`fs_apply_patch`（补丁涉及的每个文件） |
 | `delete` / `move` | `fs_op` |
-| `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_search`（搜索的目录或文件）、`fs_op` 的 copy 和 move 的来源 |
+| `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_search`、`fs_op` 的 copy 和 move 来源、`fs_apply_patch` 重命名的来源 |
+
+`fs_search` 搜索文件夹时，读取规则拒绝或要求确认的文件不会出现在结果里，结果中的 `guard_hidden` 写明略去了几个文件。
+
+**shell 会话里的一行**：winhand 记住每个 shell 会话里“已输入、还没执行”的内容。之后换行、Enter 键、`submit`、`session_stop`（会输入退出命令并回车）或 `session_prompt_user`（会输入口令并回车）让这一行执行时，守卫判断的是整行。
+- 以 `\` 或反引号结尾的行，和下一行合起来判断；
+- Backspace 删掉最后一个字符；Ctrl+C 清掉这一行（仅限终端会话，管道会话里它只是一个字符）；
+- 光标移动、历史记录、Tab 补全这类编辑键会让最终执行的内容无法从输入推断。用过它们的行，任何带 `match` 的 `input` 规则都视为命中；
+- 同一会话的输入按顺序判断和发送，单独的 Ctrl+C 不排队。
 
 规则写在 `~/.winhand/guards.toml`（全局），或项目目录下的 `.winhand/guards.toml`（只管该目录及子目录）。winhand 不自带任何规则，下面是示例：
 
@@ -246,6 +254,8 @@ reason = "改完记得跑单元测试"
 - **请人确认**：在电脑上弹出置顶的确认框，写明工具、动作和理由。默认按钮是“否”，正在别处打字时误按回车也不会放行。没人应答、点“否”或弹不出窗口，都不执行。
 - **规则文件写错**：解析失败、字段不认识、正则写错时，这个文件管辖的动作一律拒绝，错误里写明文件和位置；改好后下一次调用即恢复。
 - **路径**：按工具自己的方式解析路径（`fs_*` 不展开环境变量，一次性链接工具会展开），并同时按真实路径判断：符号链接、目录联接、8.3 短名、`\\?\` 前缀、`::$DATA` 这类写法不会绕过路径规则。
+
+参数格式不对的调用不经守卫判断，直接由工具自己报错，什么也不会执行。
 
 守卫按工具的参数判断，**不是沙箱**。它适合拦住善意的 AI 犯错，挡不住刻意绕路：`run` 里的程序自己去读写什么（例如 `run("type .env")`）、正则没覆盖到的写法、`proc_kill` 和桌面工具，它都管不到。真正需要隔离时，用系统权限或单独的账户。
 

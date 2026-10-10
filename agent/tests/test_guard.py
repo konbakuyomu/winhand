@@ -420,20 +420,30 @@ def test_the_confirm_dialog_defaults_to_no(monkeypatch, capsys):
 @pytest.mark.parametrize(
     ("text", "keys", "submit", "before", "lines", "rest"),
     [
-        ("rm -rf x", ["Enter"], False, "", ["rm -rf x"], ""),
+        ("rm -rf x", ["Enter"], False, "", [("rm -rf x", False)], ""),
         ("rm -rf x", None, False, "", [], "rm -rf x"),
-        (None, ["Enter"], False, "rm -rf x", ["rm -rf x"], ""),
-        ("", None, True, "rm -rf x", ["rm -rf x"], ""),
+        (None, ["Enter"], False, "rm -rf x", [("rm -rf x", False)], ""),
+        ("", None, True, "rm -rf x", [("rm -rf x", False)], ""),
         ("x", ["Ctrl+C"], False, "rm -rf", [], ""),
-        ("abc", ["Backspace"], True, "", ["ab"], ""),
-        ("Remove-Item -Recur", ["Tab", "Enter"], False, "", ["Remove-Item -Recur"], ""),
-        ("a\nb", None, False, "", ["a"], "b"),
-        ("ls", ["Up", "Enter"], False, "", ["ls"], ""),
-        ("ls", ["Ctrl+M"], False, "", ["ls"], ""),
+        ("abc", ["Backspace"], True, "", [("ab", False)], ""),
+        ("rmx\x7f -rf d", None, True, "", [("rm -rf d", False)], ""),
+        ("Remove-It", ["Tab", "Enter"], False, "", [("Remove-It", True)], ""),
+        ("a\nb", None, False, "", [("a", False)], "b"),
+        ("ls", ["Up", "Enter"], False, "", [("ls", True)], ""),
+        ("-rf d\x01rm ", None, True, "", [("-rf drm ", True)], ""),
+        ("ls", ["Ctrl+M"], False, "", [("ls", False)], ""),
+        ("rm \\\n-rf d\n", None, False, "", [("rm  -rf d", False)], ""),
+        ("Remove-Item `\n-Recurse d", None, True, "", [("Remove-Item  -Recurse d", False)], ""),
     ],
 )
 def test_typed_lines_follow_what_the_shell_runs(text, keys, submit, before, lines, rest):
-    assert actions.typed_lines(text, keys, submit, before) == (lines, rest)
+    raw, left = actions.typed_lines(text, keys, submit, before)
+    assert [actions.clean_line(line) for line in raw] == lines and left == rest
+
+
+def test_ctrl_c_through_pipes_does_not_clear_the_line():
+    assert actions.typed_lines("\x03", None, True, "rm -rf d ", ctrl_c_clears=False)[0] == ["rm -rf d \x03"]
+    assert actions.clean_line("rm -rf d \x03") == ("rm -rf d ", True)
 
 
 async def test_stdin_and_remote_args_are_part_of_the_command(client, winhand_home, tmp_path):
@@ -547,3 +557,149 @@ def test_ask_waits_less_than_a_client_does(tmp_path):
     )
     first, second = guard.load(path).rules
     assert first.timeout_s == guard.ASK_TIMEOUT_S == 40 and second.timeout_s == guard.ASK_TIMEOUT_MAX_S == 50
+
+
+async def test_lines_edited_with_cursor_keys_meet_every_input_rule(client, winhand_home):
+    write_rules(winhand_home / "guards.toml", NO_BATCH_DELETE)
+    fake = [sys.executable, "-u", FAKE_APP]
+    sid = (
+        await client.call_tool(
+            "session_start",
+            {"profile": "shell", "command": fake, "prompts": [r"^fake> ?$"], "startup_wait_s": 10},
+        )
+    ).structured_content["session"]["id"]
+    try:
+        reordered = await client.call_tool(
+            "session_send", {"id": sid, "text": "-rf /tmp/x\x01echo ", "submit": True}, raise_on_error=False
+        )
+        assert reordered.is_error and "editing keys" in text_of(reordered) and "Ctrl+C" in text_of(reordered)
+        continued = await client.call_tool(
+            "session_send", {"id": sid, "text": "echo rm \\\n-rf /tmp/x\n"}, raise_on_error=False
+        )
+        assert continued.is_error
+        ok = await client.call_tool("session_send", {"id": sid, "text": "echo plain", "submit": True})
+        assert "plain" in ok.structured_content["output"]
+    finally:
+        await client.call_tool("session_stop", {"id": sid, "force": True})
+
+
+async def test_stopping_a_shell_runs_what_is_typed_and_is_judged(client, winhand_home):
+    write_rules(winhand_home / "guards.toml", NO_BATCH_DELETE)
+    fake = [sys.executable, "-u", FAKE_APP]
+    start = {"profile": "shell", "command": fake, "prompts": [r"^fake> ?$"], "startup_wait_s": 10}
+    sid = (await client.call_tool("session_start", start)).structured_content["session"]["id"]
+    typed = await client.call_tool("session_send", {"id": sid, "text": "echo rm -rf /tmp/x ", "wait_s": 0})
+    assert not typed.is_error
+    stop = await client.call_tool("session_stop", {"id": sid}, raise_on_error=False)
+    assert stop.is_error and "force=true" in text_of(stop)
+    assert not (await client.call_tool("session_stop", {"id": sid, "force": True})).is_error
+
+    chosen = (
+        await client.call_tool("session_start", {**start, "exit_command": "echo rm -rf /tmp/y"})
+    ).structured_content["session"]["id"]
+    stop = await client.call_tool("session_stop", {"id": chosen}, raise_on_error=False)
+    assert stop.is_error
+    await client.call_tool("session_stop", {"id": chosen, "force": True})
+
+
+async def test_input_from_parallel_calls_is_judged_in_order(client, winhand_home):
+    import asyncio
+
+    write_rules(winhand_home / "guards.toml", NO_BATCH_DELETE)
+    fake = [sys.executable, "-u", FAKE_APP]
+    sid = (
+        await client.call_tool(
+            "session_start",
+            {"profile": "shell", "command": fake, "prompts": [r"^fake> ?$"], "startup_wait_s": 10},
+        )
+    ).structured_content["session"]["id"]
+    try:
+        typing = asyncio.create_task(
+            client.call_tool("session_send", {"id": sid, "text": "echo rm -rf /tmp/x", "wait_s": 1})
+        )
+        await asyncio.sleep(0.2)
+        enter = await client.call_tool("session_send", {"id": sid, "keys": ["Enter"]}, raise_on_error=False)
+        assert not (await typing).is_error
+        assert enter.is_error and "rm -rf /tmp/x" in text_of(enter)
+        interrupt = await client.call_tool("session_send", {"id": sid, "keys": ["Ctrl+C"], "wait_s": 0})
+        assert not interrupt.is_error
+    finally:
+        await client.call_tool("session_stop", {"id": sid, "force": True})
+
+
+async def test_copy_into_a_folder_is_judged_on_the_file_it_writes(client, winhand_home, tmp_path):
+    write_rules(
+        winhand_home / "guards.toml",
+        """\
+        [[guard]]
+        on = "write"
+        path = ["**/locked/**"]
+        decision = "deny"
+        """,
+    )
+    (tmp_path / "locked").mkdir()
+    src = tmp_path / "a.txt"
+    src.write_text("x")
+    for op in ("copy", "move"):
+        result = await client.call_tool(
+            "fs_op", {"action": op, "path": str(src), "to": str(tmp_path / "locked")}, raise_on_error=False
+        )
+        assert result.is_error and not (tmp_path / "locked" / "a.txt").exists(), op
+    assert src.exists()
+
+
+async def test_searching_a_folder_leaves_out_read_protected_files(client, winhand_home, tmp_path):
+    write_rules(
+        winhand_home / "guards.toml",
+        """\
+        [[guard]]
+        on = "read"
+        path = ["**/.env", "**/secrets/**"]
+        decision = "deny"
+        """,
+    )
+    (tmp_path / ".env").write_text("TOKEN=s3cret\n")
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "key.txt").write_text("TOKEN=k3y-value\n")
+    (tmp_path / "app.py").write_text("TOKEN = os.environ['TOKEN']\n")
+    for extra in ({}, {"glob": ".env"}, {"files_only": True}, {"context": 1}):
+        result = await client.call_tool("fs_search", {"pattern": "TOKEN", "path": str(tmp_path), **extra})
+        text = text_of(result)
+        assert "s3cret" not in text and "k3y-value" not in text, extra
+        if not extra.get("glob"):
+            assert "app.py" in text
+    assert "left out" in result.structured_content["guard_hidden"]
+
+
+async def test_renaming_a_protected_file_with_a_patch_is_a_read(client, winhand_home, tmp_path):
+    write_rules(
+        winhand_home / "guards.toml",
+        """\
+        [[guard]]
+        on = "read"
+        path = ["**/.env"]
+        decision = "deny"
+        """,
+    )
+    (tmp_path / ".env").write_text("TOKEN=1\n")
+    patch = "diff --git a/.env b/notes.txt\nsimilarity index 100%\nrename from .env\nrename to notes.txt\n"
+    result = await client.call_tool(
+        "fs_apply_patch", {"root": str(tmp_path), "patch": patch}, raise_on_error=False
+    )
+    assert result.is_error and (tmp_path / ".env").exists() and not (tmp_path / "notes.txt").exists()
+
+
+def test_secret_files_are_judged_where_they_are_saved(tmp_path, monkeypatch):
+    monkeypatch.setenv("WH_SECRETS", str(tmp_path))
+    (save,) = actions.describe("secret_prompt", {"message": "t", "save_to": "$WH_SECRETS/.env"})
+    assert save.paths == (str(tmp_path / ".env"),)
+
+
+async def test_malformed_arguments_get_the_tools_own_answer(client):
+    result = await client.call_tool("run", {"command": "echo", "args": 5}, raise_on_error=False)
+    assert result.is_error and "Internal" not in text_of(result)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path spellings")
+def test_device_path_spellings_are_judged_as_the_file():
+    assert guard.variants(r"\\.\C:\data\.env")[0] == r"C:\data\.env"

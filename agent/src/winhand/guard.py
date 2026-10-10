@@ -188,9 +188,9 @@ def variants(path: str) -> list[str]:
     """Spellings of one path a rule must see: as given (without a \\\\?\\ prefix or an NTFS
     stream suffix such as `::$DATA`) and with links, junctions and short names resolved."""
     p = path
-    if p.startswith("\\\\?\\UNC\\"):
+    if p.startswith(("\\\\?\\UNC\\", "\\\\.\\UNC\\")):
         p = "\\\\" + p[8:]
-    elif p.startswith("\\\\?\\"):
+    elif p.startswith(("\\\\?\\", "\\\\.\\")):
         p = p[4:]
     if os.name == "nt":
         head, tail = os.path.split(p)
@@ -271,7 +271,7 @@ def matches(rule: Rule, action: Action) -> bool:
         return False
     if rule.base is not None and not any(_under(a, rule.base) for a in _anchors(action)):
         return False
-    if rule.match is not None and not (action.text and rule.match.search(action.text)):
+    if rule.match is not None and not action.opaque and not (action.text and rule.match.search(action.text)):
         return False
     if rule.path and not any(
         _glob_match(v, g, rule.base) for p in action.paths for v in variants(p) for g in rule.path
@@ -340,6 +340,10 @@ def refusal(verdict: Verdict, answer: str | None = None) -> str:
     if answer:
         for rule, action in verdict.ask:
             lines.append(f"- {action.label()}: needs the person's OK ({_where(rule)}); {answer}")
+    if any(a.tool == "session_stop" for _, a in verdict.deny + verdict.ask):
+        lines.append("session_stop(force=true) ends the session without typing into it.")
+    if any(a.opaque for _, a in verdict.deny + verdict.ask):
+        lines.append("Clear the line with keys=['Ctrl+C'], then type the command plainly and submit it.")
     lines.append(_OWNER)
     return "\n".join(lines)
 
@@ -386,6 +390,58 @@ def _with_notes(result, verdict: Verdict):
     )
 
 
+_SEARCH_LINE = re.compile(r"^(.+?)([:-])(\d+)\2")
+
+
+def _search_path(line: str, files_only: bool) -> str | None:
+    if files_only:
+        return line
+    m = _SEARCH_LINE.match(line)
+    return m.group(1) if m else None
+
+
+def _filter_search(result, args: dict):
+    """fs_search on a folder reads every file below it: drop what the read rules keep from the AI."""
+    import json
+
+    from fastmcp.tools.base import ToolResult
+
+    data = getattr(result, "structured_content", None)
+    if not isinstance(data, dict) or not isinstance(data.get("matches"), list) or not data.get("root"):
+        return result
+    root = data["root"]
+    if not os.path.isdir(root):
+        return result  # one file: judged as a read before the search ran
+    kept, hidden, verdicts = [], set(), {}
+    for line in data["matches"]:
+        rel = _search_path(str(line), bool(args.get("files_only")))
+        if rel is not None:
+            full = os.path.normpath(os.path.join(root, rel))
+            if full not in verdicts:
+                verdicts[full] = judge([Action("read", "fs_search", (full,))]).decision
+            if verdicts[full] in ("deny", "ask"):
+                hidden.add(rel)
+                continue
+        kept.append(line)
+    if not hidden:
+        return result
+    data = {
+        **data,
+        "matches": kept,
+        "count": len(kept),
+        "guard_hidden": f"{len(hidden)} file(s) left out by this machine's read rules: {', '.join(sorted(hidden)[:10])}",
+    }
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return ToolResult(
+        content=[TextContent(type="text", text=text)],
+        structured_content=data,
+        meta=getattr(result, "meta", None),
+    )
+
+
+_INPUT_TOOLS = ("session_send", "session_stop", "session_prompt_user")
+
+
 class GuardActions(Middleware):
     """Judges every call that reads or changes the machine against the owner's rules."""
 
@@ -394,17 +450,55 @@ class GuardActions(Middleware):
         self._confirm = confirm or _confirm  # tests replace the dialog
         # per shell session: what was typed there and not run yet (judged with the next Enter)
         self._typed: dict[str, str] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         message = context.message
         args = message.arguments or {}
-        actions = describe(message.name, args, self.sessions, self._typed)
-        result = await self._judged(context, call_next, actions)
-        if message.name == "session_send" and not getattr(result, "is_error", False):
-            _, rest = session_input(args, self.sessions, self._typed)
-            if rest is not None:
-                self._typed[args.get("id")] = rest
-        return result
+        if message.name not in _INPUT_TOOLS:
+            result = await self._judged(context, call_next, self._describe(message.name, args))
+            if message.name == "fs_search" and not getattr(result, "is_error", False):
+                result = await asyncio.to_thread(_filter_search, result, args)
+            return result
+        sid = args.get("id")
+        if (
+            message.name == "session_send"
+            and not args.get("text")
+            and not args.get("submit")
+            and all(
+                str(k).strip().lower() in ("ctrl+c", "^c", "c-c", "control+c")
+                for k in args.get("keys") or ["x"]
+            )
+        ):
+            # an interrupt can run nothing: never queue it behind a call that is still waiting
+            self._remember(message.name, args)
+            return await call_next(context)
+        # input into one session is judged and sent in order, so a line typed by one call and
+        # ended by another is always judged whole
+        lock = self._locks.setdefault(str(sid), asyncio.Lock())
+        async with lock:
+            result = await self._judged(context, call_next, self._describe(message.name, args))
+            if not getattr(result, "is_error", False):
+                self._remember(message.name, args)
+            return result
+
+    def _describe(self, tool: str, args: dict) -> list[Action]:
+        try:
+            return describe(tool, args, self.sessions, self._typed)
+        except Exception:  # malformed arguments: the tool's own validation answers, and nothing runs
+            return []
+
+    def _remember(self, tool: str, args: dict) -> None:
+        sid = args.get("id")
+        if tool == "session_stop":
+            self._typed.pop(sid, None)
+            return
+        try:
+            _, rest = session_input(args, self.sessions, self._typed, tool)
+        except Exception:
+            return
+        if rest is not None:
+            self._typed[sid] = rest
 
     async def _judged(self, context: MiddlewareContext, call_next, actions: list[Action]):
         from fastmcp.tools.base import ToolResult

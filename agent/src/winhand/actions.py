@@ -19,6 +19,10 @@ KINDS = ("command", "input", "write", "edit", "delete", "move", "read")
 _SHELLS = {"pwsh", "powershell", "cmd", "bash", "sh", "zsh", "ssh"}
 _LINE_END = re.compile(r"(\r\n|\r|\n)")
 _CSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O.)")
+# anything that moves the cursor, recalls history or edits the line in place: after one of these
+# the typed characters no longer spell the line that runs
+_EDITING = re.compile(r"[\x00-\x08\x0b-\x1f]")
+_CONTINUED = ("\\", "`")  # bash and PowerShell carry a line ending in these on to the next
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,8 @@ class Action:
     text: str | None = None
     cwd: str | None = None
     host: str | None = None
+    # a typed line edited with cursor keys: its final text is unknown, so every `match` applies
+    opaque: bool = False
 
     def label(self) -> str:
         """One line for a dialog or an error: `run → command: git push`, `fs_write → write: C:\\a.txt`."""
@@ -37,6 +43,7 @@ class Action:
             where = f" (on {self.host})" if self.host else ""
             what = f"{self.kind}{where}: {first[0] if first else '(interactive)'}"
             what += " ..." if len(first) > 1 else ""
+            what += " (typed with editing keys, so its final text cannot be known)" if self.opaque else ""
         else:
             what = f"{self.kind}: {' -> '.join(self.paths)}"
         return f"{self.tool} → {what}"
@@ -88,7 +95,9 @@ def _session_command(args: dict) -> str:
     return _join([*argv, *extra])
 
 
-def _patch_paths(args: dict) -> tuple[str, ...]:
+def _patch_actions(tool: str, args: dict) -> list[Action]:
+    """An edit of every file the patch touches, and a read of every file it renames: renaming a
+    file hands out its content as much as copying it."""
     root = _abs(args.get("root") or ".") or os.getcwd()
     try:
         text = args.get("patch")
@@ -97,15 +106,30 @@ def _patch_paths(args: dict) -> tuple[str, ...]:
         patches = patching.parse(text or "")
         n = args.get("strip")
         n = n if n is not None else patching.choose_strip(patches, root)
-        paths = []
+        paths: list[str] = []
+        renamed: list[str] = []
+
+        def target(side: str | None) -> str | None:
+            rel = patching._strip(side, n) if side else None
+            return os.path.normpath(os.path.join(root, rel)) if rel else None
+
         for p in patches:
-            for side in (p.old_path, p.new_path):
-                rel = patching._strip(side, n) if side else None
-                if rel and (target := os.path.normpath(os.path.join(root, rel))) not in paths:
-                    paths.append(target)
-        return tuple(paths) or (root,)
+            old, new = target(p.old_path), target(p.new_path)
+            paths += [t for t in (old, new) if t and t not in paths]
+            if old and new and old != new:
+                renamed.append(old)
+        out = [Action("edit", tool, tuple(paths) or (root,))]
+        return out + ([Action("read", tool, tuple(renamed))] if renamed else [])
     except Exception:  # a patch that cannot be read is judged by its folder; the tool reports why
-        return (root,)
+        return [Action("edit", tool, (root,))]
+
+
+def _destination(source: str | None, to: str | None) -> str | None:
+    """Where fs_op copy/move writes: into `to` when it is an existing folder, as fs.fs_op does."""
+    dest = _abs(to)
+    if dest and source and os.path.isdir(dest):
+        return os.path.join(dest, os.path.basename(str(source).rstrip("\\/")))
+    return dest
 
 
 def describe(
@@ -131,18 +155,18 @@ def describe(
         return one("command", text=text, host=a.get("host"))
     if tool == "session_start":
         return one("command", text=_session_command(a), cwd=_abs(a.get("cwd")))
-    if tool == "session_send":
-        return session_input(a, sessions, typed)[0]
+    if tool in ("session_send", "session_stop", "session_prompt_user"):
+        return session_input(a, sessions, typed, tool)[0]
     if tool in ("fs_write", "fs_write_bytes"):
         return one("write", a.get("path"))
     if tool == "fs_upload_url":
         return one("write", a.get("path"), expand_vars=True)
     if tool == "secret_prompt" and a.get("save_to"):
-        return one("write", a.get("save_to"))
+        return one("write", a.get("save_to"), expand_vars=True)
     if tool == "fs_edit":
         return one("edit", a.get("path"))
     if tool == "fs_apply_patch":
-        return [Action("edit", tool, _patch_paths(a))]
+        return _patch_actions(tool, a)
     if tool in ("fs_read", "fs_send"):
         return one("read", a.get("path"))
     if tool == "fs_download_url":
@@ -152,23 +176,26 @@ def describe(
     if tool == "fs_op":
         op = (a.get("action") or "").lower()
         if op == "copy":
-            return one("read", a.get("path")) + one("write", a.get("to"))
+            return one("read", a.get("path")) + one("write", _destination(a.get("path"), a.get("to")))
         if op == "mkdir":
             return one("write", a.get("path"))
         if op == "delete":
             return one("delete", a.get("path"))
-        if op == "move":  # moving a file elsewhere hands out its content as much as copying it
-            return one("move", a.get("path"), a.get("to")) + one("read", a.get("path"))
+        if op == "move":  # moving a file creates it at the destination and hands out its content
+            dest = _destination(a.get("path"), a.get("to"))
+            return one("move", a.get("path"), dest) + one("read", a.get("path")) + one("write", dest)
     return []
 
 
 def typed_lines(
-    text: str | None, keys: list[str] | None, submit: bool, before: str = ""
+    text: str | None, keys: list[str] | None, submit: bool, before: str = "", ctrl_c_clears: bool = True
 ) -> tuple[list[str], str]:
-    """What a shell runs from one session_send: every line ended by a line break in the text, an
-    Enter key or submit (the first one starting with what was typed `before`), and the unfinished
-    rest that stays typed. Ctrl+C drops the line being typed, Backspace its last character; other
-    editing keys are kept as typed, so a line is judged with at least everything that was typed."""
+    """What a shell runs from one session_send, as typed: every line ended by a line break in the
+    text, an Enter key or submit (the first one starting with what was typed `before`), and the
+    unfinished rest that stays typed. A line ending in a continuation character (`\\` or a
+    backtick) runs together with the next one. Backspace drops the last character and Ctrl+C the
+    whole line (in a terminal; through plain pipes it is just a byte); everything else is kept as
+    typed, editing keys included (see clean_line)."""
     chunks = [text or ""]
     for name in keys or []:
         try:
@@ -179,34 +206,64 @@ def typed_lines(
         chunks.append("\r")
     done: list[str] = []
     current = before
-    for chunk in chunks:
-        if chunk == "\x03":
+    for piece in _LINE_END.split("".join(chunks)):
+        if _LINE_END.fullmatch(piece):
+            if current.rstrip().endswith(_CONTINUED):
+                current = current.rstrip()[:-1] + " "
+                continue
+            done.append(current)
             current = ""
             continue
-        if chunk in ("\x7f", "\x08"):
-            current = current[:-1]
-            continue
-        for piece in _LINE_END.split(chunk):
-            if _LINE_END.fullmatch(piece):
-                done.append(current)
+        for ch in piece:
+            if ch in ("\x7f", "\x08"):
+                current = current[:-1]
+            elif ch == "\x03" and ctrl_c_clears:
                 current = ""
             else:
-                current += piece
-    return [_CSI.sub("", line).replace("\t", "") for line in done], current
+                current += ch
+    return done, current
 
 
-def session_input(a: dict, sessions, typed: dict[str, str] | None = None) -> tuple[list[Action], str | None]:
-    """(actions, what stays typed afterwards) for a session_send; (no actions, None) for a session
-    whose input is not shell commands."""
+def clean_line(raw: str) -> tuple[str, bool]:
+    """(the text to judge, whether editing keys make the real line unknowable): cursor keys,
+    history recall and Tab completion all change what runs in ways the typed text does not show."""
+    plain = _CSI.sub("", raw)
+    opaque = plain != raw or bool(_EDITING.search(plain)) or "\t" in plain
+    return _EDITING.sub("", plain).replace("\t", ""), opaque
+
+
+def session_input(
+    a: dict, sessions, typed: dict[str, str] | None = None, tool: str = "session_send"
+) -> tuple[list[Action], str | None]:
+    """(actions, what stays typed afterwards) for input into a session; (no actions, None) when the
+    session's input is not shell commands. session_stop types the exit command and Enter after
+    whatever is still typed; session_prompt_user types the person's secret after it."""
     if sessions is None:
         return [], None
     try:
-        spec = sessions.get(a.get("id")).spec
-    except (KeyError, TypeError):
+        session = sessions.get(a.get("id"))
+        spec = session.spec
+    except (KeyError, TypeError, AttributeError):
         return [], None
     if not is_shell(spec):
         return [], None
     before = (typed or {}).get(a.get("id"), "")
-    lines, rest = typed_lines(a.get("text"), a.get("keys"), bool(a.get("submit")), before)
+    pty = getattr(spec, "transport", "pty") == "pty"
+    if tool == "session_stop":
+        exit_line = getattr(spec, "exit_command", None)
+        if a.get("force") or not exit_line or not getattr(session, "alive", True):
+            return [], ""
+        lines, rest = typed_lines(exit_line, None, True, before, pty)
+    elif tool == "session_prompt_user":
+        if not before.strip():
+            return [], ("" if a.get("submit", True) else before)
+        lines, rest = typed_lines("«secret»", None, bool(a.get("submit", True)), before, pty)
+    else:
+        lines, rest = typed_lines(a.get("text"), a.get("keys"), bool(a.get("submit")), before, pty)
     cwd = _abs(getattr(spec, "cwd", None))
-    return [Action("input", "session_send", text=line, cwd=cwd) for line in lines if line.strip()], rest
+    out = []
+    for raw in lines:
+        text, opaque = clean_line(raw)
+        if text.strip() or opaque:
+            out.append(Action("input", tool, text=text, cwd=cwd, opaque=opaque))
+    return out, rest
