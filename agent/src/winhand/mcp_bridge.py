@@ -32,6 +32,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
 import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -50,6 +51,7 @@ CRASH_WINDOW_S = 60.0
 # one that cannot answer a ping is stuck (its event loop is blocked), not just busy.
 CHECK_AFTER_S = 30.0
 PING_TIMEOUT_S = 10.0
+CANCEL_NOTIFY_TIMEOUT_S = 1.0
 # Stuck this long, every client has long given up on the calls it holds: restart it.
 RESTART_AFTER_S = 120.0
 DEFAULT_INIT = {
@@ -312,10 +314,12 @@ class Service:
                 message = f"{self.entry.name} refused to initialize: {answer['error'].get('message')}"
                 self._set_state("error", message)
                 raise ServiceError(message)
+            await asyncio.to_thread(process.send, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+            if self.process is not process or not process.alive():
+                raise ServiceError(f"{self.entry.name} was stopped during initialization")
             self.init_result = answer["result"]
-            self.process.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
             self._set_state("running")
-            log.info("mcp server %s started (pid %s)", self.entry.name, self.process.pid)
+            log.info("mcp server %s started (pid %s)", self.entry.name, process.pid)
 
     async def _internal(self, method: str, params: dict, timeout: float) -> dict:
         uid = next(self._ids)
@@ -669,18 +673,33 @@ class Service:
             with contextlib.suppress(ValueError):
                 session.streams.remove(stream)
             # the client went away before all answers came: tell the server to stop working on them
+            process = self.process
+            cancelled = []
             for uid in list(stream.due):
                 p = self.pending.pop(uid, None)
-                if p is not None and self.process and self.process.alive():
+                if p is not None:
                     self._finish_activity(p, error="the client disconnected")
+                    cancelled.append(uid)
+            stream.due.clear()
+
+            def notify_cancelled() -> None:
+                for uid in cancelled:
                     with contextlib.suppress(OSError, ValueError):
-                        self.process.send(
+                        process.send(
                             {
                                 "jsonrpc": "2.0",
                                 "method": "notifications/cancelled",
                                 "params": {"requestId": uid, "reason": "client disconnected"},
                             }
                         )
+
+            if cancelled and process and process.alive():
+                # StreamingResponse cancels this task through an AnyIO scope. Finish every
+                # bookkeeping entry before yielding, and don't block the loop on a full pipe.
+                with anyio.move_on_after(CANCEL_NOTIFY_TIMEOUT_S, shield=True) as scope:
+                    await anyio.to_thread.run_sync(notify_cancelled, abandon_on_cancel=True)
+                if scope.cancel_called:
+                    log.warning("timed out notifying local MCP server of cancelled requests")
 
     def _expire_sessions(self) -> None:
         cutoff = time.time() - SESSION_TTL_S
