@@ -135,7 +135,10 @@ MCP 看不到三个时机：**用户发消息**、**回答结束**、**上下文
 
 ## 实施顺序
 
-1. **P0**（已实现，change `workspace-guard-context`，见 README“本机规则与守卫”）：GUIDE 压到 4096 字符以内；守卫中间件和动作描述；`guards.toml`；`context()` 支持通用标准（`AGENTS.md`、`SKILL.md`）。
+1. **P0**（已实现并归档：`docs/comet/archive/2026-10-11-workspace-guard-context/`，现行规格在 `docs/comet/specs/`，用法见 README“本机规则与守卫”）：GUIDE 压到 4096 字符以内；守卫中间件和动作描述；`guards.toml`；`context()` 支持通用标准（`AGENTS.md`、`SKILL.md`）。
+   P0 遗留，留给后续 change：
+   - 技能很多时，`context()` 会超出约 6 万字符的上限，而且技能列表不截断；
+   - 脱敏占位符比原值长，可能让结果超出预算。
 2. **P1**：Claude Code 和 Codex 适配（规矩、技能、hooks、信任）；交互式会话的输入过守卫。
 3. **P2**：生命周期桥，以及各客户端的配置生成。
 4. **P3**：resources 和 prompts 出口；跟随本机 MCP 配置；可选导出到 GitHub。
