@@ -1005,3 +1005,42 @@ def test_a_call_looks_each_rule_location_up_once(tmp_path, monkeypatch):
         seen.clear()
         guard.judge(actions.describe(tool, args))
         assert len(seen) == len(set(seen)), tool
+
+
+async def test_queued_input_is_judged_by_the_rules_in_force_when_its_turn_comes(
+    client, winhand_home, monkeypatch
+):
+    import asyncio
+
+    rules = winhand_home / "guards.toml"
+    ask = '[[guard]]\non = "input"\nmatch = "ASKME"\ndecision = "ask"\n'
+    write_rules(rules, ask)
+
+    def slow_yes(title, message, timeout_s=40):
+        time.sleep(1.0)
+        return True
+
+    monkeypatch.setattr(secret_prompt, "ask_confirm", slow_yes)
+    fake = [sys.executable, "-u", FAKE_APP]
+    sid = (
+        await client.call_tool(
+            "session_start",
+            {"profile": "shell", "command": fake, "prompts": [r"^fake> ?$"], "startup_wait_s": 10},
+        )
+    ).structured_content["session"]["id"]
+    try:
+        first = asyncio.create_task(
+            client.call_tool("session_send", {"id": sid, "text": "echo ASKME", "submit": True})
+        )
+        await asyncio.sleep(0.3)
+        queued = asyncio.create_task(
+            client.call_tool(
+                "session_send", {"id": sid, "text": "echo DANGER-B", "submit": True}, raise_on_error=False
+            )
+        )
+        await asyncio.sleep(0.3)
+        write_rules(rules, ask + '\n[[guard]]\non = "input"\nmatch = "DANGER"\ndecision = "deny"\n')
+        assert not (await first).is_error
+        assert (await queued).is_error, "the rule added while it waited applies"
+    finally:
+        await client.call_tool("session_stop", {"id": sid, "force": True})

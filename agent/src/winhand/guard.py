@@ -525,7 +525,10 @@ class GuardActions(Middleware):
         if await asyncio.to_thread(self._input_rules_apply, args.get("id"), cache):
             # judged and sent in order, so a line typed by one call and ended by another is
             # always judged whole
-            async with self._locks.setdefault(sid, asyncio.Lock()):
+            lock = self._locks.setdefault(sid, asyncio.Lock())
+            if lock.locked():
+                cache = {}  # its turn comes later: judge it by the rules in force then
+            async with lock:
                 actions = self._describe(message.name, args)
                 result = await self._sent(
                     message.name, args, self._judged(context, call_next, actions, cache)
