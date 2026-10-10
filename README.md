@@ -203,17 +203,17 @@ Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructio
 | `command` | `run`（含 `stdin` 送进去的内容）、`job_start`、`session_start`、`remote_run`（含参数，`host` 为远程主机） |
 | `input` | shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里真正被执行的每一行，见下文。gdb、串口等会话不检查 |
 | `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`secret_prompt` 的 `save_to`、`fs_op` 的 copy/move 目标（目标是已有文件夹时，按放进去的那个文件判断）和 mkdir |
-| `edit` | `fs_edit`、`fs_apply_patch`（补丁涉及的每个文件） |
+| `edit` | `fs_edit`、`fs_apply_patch`（补丁涉及的每个文件）。编辑需要看到内容，所以它们同时算对这些文件的 `read`；补丁文件本身也算 `read` |
 | `delete` / `move` | `fs_op` |
-| `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_search`、`fs_op` 的 copy 和 move 来源、`fs_apply_patch` 重命名的来源 |
+| `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_search`、`fs_op` 的 copy 和 move 来源，以及上面 `edit` 的目标 |
 
 `fs_search` 搜索文件夹时，读取规则拒绝或要求确认的文件不会出现在结果里，结果中的 `guard_hidden` 写明略去了几个文件。
 
 **shell 会话里的一行**：winhand 记住每个 shell 会话里“已输入、还没执行”的内容。之后换行、Enter 键、`submit`、`session_stop`（会输入退出命令并回车）或 `session_prompt_user`（会输入口令并回车）让这一行执行时，守卫判断的是整行。
-- 以 `\` 或反引号结尾的行，和下一行合起来判断；
-- Backspace 删掉最后一个字符；Ctrl+C 清掉这一行（仅限终端会话，管道会话里它只是一个字符）；
-- 光标移动、历史记录、Tab 补全这类编辑键会让最终执行的内容无法从输入推断。用过它们的行，任何带 `match` 的 `input` 规则都视为命中；
-- 同一会话的输入按顺序判断和发送，单独的 Ctrl+C 不排队。
+- **续行**：可能续行的行（以 `\`、反引号、`^`、`|` 等结尾，或引号、括号没闭合），既单独判断，也和后面的行连起来判断，连起来时分别试“直接相连”和“加一个空格”两种拼法；
+- **删除和清行**：Backspace 删掉最后一个字符；Ctrl+C 清掉这一行（仅限终端会话，管道会话里它只是一个字符）；
+- **无法推断的行**：光标移动、历史记录和历史展开（bash 的 `!!`、`^a^b`）、Tab 补全会让最终执行的内容无法从输入推断。工具出错、按键名写错、口令是否送达不确定、同一会话的输入互相重叠时，winhand 也不再知道已输入了什么。这样的行，任何带 `match` 的 `input` 规则都视为命中，拒绝信息会提示先用 Ctrl+C 清行；
+- **排队**：存在 `input` 规则时，同一 shell 会话的输入按顺序判断和发送。没有 `input` 规则的会话、单独的 Ctrl+C 和 `session_stop(force=true)` 不排队。
 
 规则写在 `~/.winhand/guards.toml`（全局），或项目目录下的 `.winhand/guards.toml`（只管该目录及子目录）。winhand 不自带任何规则，下面是示例：
 
@@ -240,6 +240,12 @@ on = "edit"
 path = ["**/*.c", "**/*.h"]
 decision = "note"         # 照常执行，结果里附上这句提醒
 reason = "改完记得跑单元测试"
+
+[[guard]]
+on = ["write", "edit", "delete", "move"]
+path = ["**/.winhand/guards.toml"]
+decision = "ask"          # 规则文件本身也值得保护
+reason = "要改守卫规则"
 ```
 
 - **字段**：
@@ -253,6 +259,7 @@ reason = "改完记得跑单元测试"
 - **拒绝**：工具不执行，以工具错误返回，写明规则文件、第几条和理由。这次调用仍出现在 `history` 和桌面端时间线里。
 - **请人确认**：在电脑上弹出置顶的确认框，写明工具、动作和理由。默认按钮是“否”，正在别处打字时误按回车也不会放行。没人应答、点“否”或弹不出窗口，都不执行。
 - **规则文件写错**：解析失败、字段不认识、正则写错时，这个文件管辖的动作一律拒绝，错误里写明文件和位置；改好后下一次调用即恢复。
+- **文件夹**：`secrets/**` 这样的模式同时覆盖文件夹本身，复制或移动整个文件夹也会被拦。
 - **路径**：按工具自己的方式解析路径（`fs_*` 不展开环境变量，一次性链接工具会展开），并同时按真实路径判断：符号链接、目录联接、8.3 短名、`\\?\` 前缀、`::$DATA` 这类写法不会绕过路径规则。
 
 参数格式不对的调用不经守卫判断，直接由工具自己报错，什么也不会执行。

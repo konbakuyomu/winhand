@@ -52,6 +52,7 @@ def test_describe_maps_tools_to_actions(tmp_path):
     run = actions.describe("run", {"command": "git", "args": ["push"], "cwd": d})
     assert run == [actions.Action("command", "run", (), "git push", d)]
     assert actions.describe("run", {"script": "a\nb", "shell": "pwsh"})[0].text == "a\nb"
+    assert actions.describe("run", {"script": "rm $1 $2", "args": ["-rf", "/"]})[0].text == "rm $1 $2 -rf /"
     assert actions.describe("remote_run", {"host": "pi", "script": "ls"})[0].host == "pi"
     gdb = actions.describe("session_start", {"profile": "gdb", "args": ["fw.elf"]})[0]
     assert gdb.kind == "command" and gdb.text.endswith("-q -nx fw.elf")
@@ -86,11 +87,16 @@ def test_describe_patch_lists_every_file(tmp_path):
         +int b;
         """
     )
-    (edit,) = actions.describe("fs_apply_patch", {"root": str(tmp_path), "patch": patch})
-    assert edit.kind == "edit"
+    edit, read = actions.describe("fs_apply_patch", {"root": str(tmp_path), "patch": patch})
+    assert (edit.kind, read.kind) == ("edit", "read") and edit.paths == read.paths
     assert set(edit.paths) == {str(tmp_path / "src" / "a.c"), str(tmp_path / "src" / "new.c")}
-    (fallback,) = actions.describe("fs_apply_patch", {"root": str(tmp_path), "patch_file": "/nope.diff"})
-    assert fallback.paths == (str(tmp_path),)
+    nope = os.path.abspath("/nope.diff")
+    fallback = actions.describe("fs_apply_patch", {"root": str(tmp_path), "patch_file": nope})
+    assert [(a.kind, a.paths) for a in fallback] == [
+        ("edit", (str(tmp_path),)),
+        ("read", (str(tmp_path),)),
+        ("read", (nope,)),
+    ]
 
 
 def test_shell_sessions_are_recognised():
@@ -427,23 +433,46 @@ def test_the_confirm_dialog_defaults_to_no(monkeypatch, capsys):
         ("x", ["Ctrl+C"], False, "rm -rf", [], ""),
         ("abc", ["Backspace"], True, "", [("ab", False)], ""),
         ("rmx\x7f -rf d", None, True, "", [("rm -rf d", False)], ""),
+        ("rm\x08x", None, True, "", [("rmx", True)], ""),
         ("Remove-It", ["Tab", "Enter"], False, "", [("Remove-It", True)], ""),
         ("a\nb", None, False, "", [("a", False)], "b"),
         ("ls", ["Up", "Enter"], False, "", [("ls", True)], ""),
         ("-rf d\x01rm ", None, True, "", [("-rf drm ", True)], ""),
         ("ls", ["Ctrl+M"], False, "", [("ls", False)], ""),
-        ("rm \\\n-rf d\n", None, False, "", [("rm  -rf d", False)], ""),
-        ("Remove-Item `\n-Recurse d", None, True, "", [("Remove-Item  -Recurse d", False)], ""),
+        ("rm -rf d", ["Bogus", "Enter"], False, "", [], "rm -rf d"),
+        (None, ["Enter"], False, actions.UNKNOWN, [("", True)], ""),
     ],
 )
 def test_typed_lines_follow_what_the_shell_runs(text, keys, submit, before, lines, rest):
-    raw, left = actions.typed_lines(text, keys, submit, before)
-    assert [actions.clean_line(line) for line in raw] == lines and left == rest
+    judged, after = actions.typed_lines(text, keys, submit, actions.LineState(before))
+    assert judged == lines and after.line == rest
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("rm \\\n-rf d\n", "rm -rf d"),  # sh: backslash-newline vanishes
+        ("rm -\\\nrf d\n", "rm -rf d"),  # ... even inside a word
+        ("r^\nd /s /q d\n", "rd /s /q d"),  # cmd caret
+        ("Remove-Item `\n-Recurse d\n", "Remove-Item -Recurse d"),  # PowerShell backtick
+        ("Get-ChildItem |\nRemove-Item -Recurse\n", "Get-ChildItem | Remove-Item -Recurse"),
+        ("echo 'a\nrm -rf d'\n", "echo 'a rm -rf d'"),  # open quote
+    ],
+)
+def test_continued_lines_are_judged_joined_both_ways(text, expected):
+    judged, after = actions.typed_lines(text, None, False)
+    assert expected in [t for t, _ in judged] and after == actions.LineState()
 
 
 def test_ctrl_c_through_pipes_does_not_clear_the_line():
-    assert actions.typed_lines("\x03", None, True, "rm -rf d ", ctrl_c_clears=False)[0] == ["rm -rf d \x03"]
-    assert actions.clean_line("rm -rf d \x03") == ("rm -rf d ", True)
+    judged, _ = actions.typed_lines("\x03", None, True, actions.LineState("rm -rf d "), ctrl_c_clears=False)
+    assert judged == [("rm -rf d ", True)]
+
+
+def test_history_expansion_is_opaque_in_posix_shells():
+    assert actions.clean_line("!!", posix=True)[1] and actions.clean_line("^x^r", posix=True)[1]
+    assert actions.clean_line("sudo !-2:s/x/r/", posix=True)[1]
+    assert not actions.clean_line("if (!$x) { ls }")[1] and not actions.clean_line("a != b", posix=True)[1]
 
 
 async def test_stdin_and_remote_args_are_part_of_the_command(client, winhand_home, tmp_path):
@@ -703,3 +732,169 @@ async def test_malformed_arguments_get_the_tools_own_answer(client):
 @pytest.mark.skipif(os.name != "nt", reason="Windows path spellings")
 def test_device_path_spellings_are_judged_as_the_file():
     assert guard.variants(r"\\.\C:\data\.env")[0] == r"C:\data\.env"
+
+
+async def test_a_cancelled_or_impossible_prompt_keeps_the_typed_line(client, winhand_home, monkeypatch):
+    import winhand.server as server_module
+
+    write_rules(winhand_home / "guards.toml", NO_BATCH_DELETE)
+    fake = [sys.executable, "-u", FAKE_APP]
+    sid = (
+        await client.call_tool(
+            "session_start",
+            {"profile": "shell", "command": fake, "prompts": [r"^fake> ?$"], "startup_wait_s": 10},
+        )
+    ).structured_content["session"]["id"]
+    try:
+        await client.call_tool("session_send", {"id": sid, "text": "echo rm -", "wait_s": 0})
+        for answer in (None, secret_prompt.PromptUnavailable("no display")):
+
+            def ask(title, message, timeout_s=300, answer=answer):
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+
+            monkeypatch.setattr(server_module, "ask_secret", ask)
+            prompted = await client.call_tool("session_prompt_user", {"id": sid, "message": "otp"})
+            assert prompted.structured_content.get("sent") is not True
+        finish = await client.call_tool(
+            "session_send", {"id": sid, "text": "rf /tmp/x", "submit": True}, raise_on_error=False
+        )
+        assert finish.is_error and "echo rm -rf /tmp/x" in text_of(finish)
+    finally:
+        await client.call_tool("session_stop", {"id": sid, "force": True})
+
+
+async def test_input_the_guard_cannot_follow_makes_the_line_unknown(client, winhand_home):
+    write_rules(winhand_home / "guards.toml", NO_BATCH_DELETE)
+    fake = [sys.executable, "-u", FAKE_APP]
+    sid = (
+        await client.call_tool(
+            "session_start",
+            {"profile": "shell", "command": fake, "prompts": [r"^fake> ?$"], "startup_wait_s": 10},
+        )
+    ).structured_content["session"]["id"]
+    try:
+        bad = await client.call_tool(
+            "session_send",
+            {"id": sid, "text": "echo rm -rf /tmp/x", "keys": ["Bogus", "Ctrl+C"], "wait_s": 0},
+        )
+        assert "error" in bad.structured_content
+        enter = await client.call_tool("session_send", {"id": sid, "keys": ["Enter"]}, raise_on_error=False)
+        assert enter.is_error and "Ctrl+C" in text_of(enter)
+        await client.call_tool("session_send", {"id": sid, "keys": ["Ctrl+C"], "wait_s": 0})
+        ok = await client.call_tool("session_send", {"id": sid, "text": "echo fine", "submit": True})
+        assert "fine" in ok.structured_content["output"]
+    finally:
+        await client.call_tool("session_stop", {"id": sid, "force": True})
+
+
+async def test_without_input_rules_nothing_waits(client, winhand_home):
+    import asyncio
+    import time
+
+    fake = [sys.executable, "-u", FAKE_APP]
+    sid = (
+        await client.call_tool(
+            "session_start",
+            {"profile": "shell", "command": fake, "prompts": [r"^fake> ?$"], "startup_wait_s": 10},
+        )
+    ).structured_content["session"]["id"]
+    try:
+        slow = asyncio.create_task(
+            client.call_tool("session_send", {"id": sid, "text": "sleep 2", "submit": True, "wait_s": 4})
+        )
+        await asyncio.sleep(0.2)
+        began = time.monotonic()
+        await client.call_tool("session_send", {"id": sid, "text": "x", "wait_s": 0})
+        assert time.monotonic() - began < 1.0
+        await slow
+        write_rules(winhand_home / "guards.toml", NO_BATCH_DELETE)
+        enter = await client.call_tool("session_send", {"id": sid, "keys": ["Enter"]}, raise_on_error=False)
+        assert enter.is_error, "input that overlapped other input leaves the line unknown"
+        slow = asyncio.create_task(
+            client.call_tool("session_send", {"id": sid, "text": "\x03sleep 2", "submit": True, "wait_s": 4})
+        )
+        await asyncio.sleep(0.2)
+        began = time.monotonic()
+        await client.call_tool("session_stop", {"id": sid, "force": True})
+        assert time.monotonic() - began < 2.0, "force=true never waits"
+        await slow
+    finally:
+        await client.call_tool("session_stop", {"id": sid, "force": True})
+
+
+async def test_search_results_are_attributed_to_files_with_dashes_and_digits(client, winhand_home, tmp_path):
+    write_rules(
+        winhand_home / "guards.toml",
+        """\
+        [[guard]]
+        on = "read"
+        path = ["**/*.pem"]
+        decision = "deny"
+        """,
+    )
+    (tmp_path / "certs" / "2024-10-10").mkdir(parents=True)
+    (tmp_path / "certs" / "2024-10-10" / "server.pem").write_text("PEMSECRET1\n")
+    (tmp_path / "my-1-key.pem").write_text("PEMSECRET2\n")
+    (tmp_path / "notes-2-x.txt").write_text("PEM is a format\n")
+    for extra in ({}, {"context": 1}):
+        result = await client.call_tool("fs_search", {"pattern": "PEM", "path": str(tmp_path), **extra})
+        text = text_of(result)
+        assert "PEMSECRET" not in text and "notes-2-x.txt" in text, extra
+
+
+async def test_patches_and_edits_of_read_protected_files_are_reads(client, winhand_home, tmp_path):
+    write_rules(
+        winhand_home / "guards.toml",
+        """\
+        [[guard]]
+        on = "read"
+        path = ["**/.env"]
+        decision = "deny"
+        """,
+    )
+    (tmp_path / ".env").write_text("API_TOKEN=tok-123\nOTHER=1\n")
+    bogus = "--- a/.env\n+++ b/.env\n@@ -1,1 +1,1 @@\n-nothing like this\n+x\n"
+    patched = await client.call_tool(
+        "fs_apply_patch", {"root": str(tmp_path), "patch": bogus}, raise_on_error=False
+    )
+    assert patched.is_error and "tok-123" not in text_of(patched)
+    edited = await client.call_tool(
+        "fs_edit", {"path": str(tmp_path / ".env"), "old": "OTHER=1", "new": "OTHER=2"}, raise_on_error=False
+    )
+    assert edited.is_error
+
+
+async def test_copying_odd_spellings_and_whole_folders_is_judged(client, winhand_home, tmp_path):
+    write_rules(
+        winhand_home / "guards.toml",
+        """\
+        [[guard]]
+        on = "write"
+        path = ["**/locked/**"]
+        decision = "deny"
+
+        [[guard]]
+        on = "read"
+        path = ["**/secrets/**"]
+        decision = "deny"
+        """,
+    )
+    (tmp_path / "locked").mkdir()
+    (tmp_path / "srcdir").mkdir()
+    (tmp_path / "srcdir" / "a.txt").write_text("x")
+    dotted = await client.call_tool(
+        "fs_op",
+        {"action": "copy", "path": str(tmp_path / "srcdir") + os.sep + ".", "to": str(tmp_path / "locked")},
+        raise_on_error=False,
+    )
+    assert dotted.is_error and not (tmp_path / "locked" / "srcdir").exists()
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "k.txt").write_text("K")
+    whole = await client.call_tool(
+        "fs_op",
+        {"action": "copy", "path": str(tmp_path / "secrets"), "to": str(tmp_path / "out")},
+        raise_on_error=False,
+    )
+    assert whole.is_error and not (tmp_path / "out").exists()

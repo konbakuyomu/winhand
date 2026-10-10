@@ -30,7 +30,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mcp.types import TextContent
 
-from .actions import KINDS, Action, describe, session_input
+from .actions import KINDS, UNKNOWN_STATE, Action, LineState, describe, is_shell, session_input
 
 FILE_NAME = "guards.toml"
 PROJECT_DIR = ".winhand"
@@ -255,6 +255,8 @@ def _anchors(action: Action) -> list[str]:
 
 def _glob_match(path: str, pattern: str, base: str | None) -> bool:
     pattern = pattern.replace("\\", "/")
+    if pattern.endswith("/**") and _glob_match(path, pattern[:-3], base):
+        return True  # "secrets/**" covers the folder itself: copying the folder hands it all out
     if _PurePath(pattern).is_absolute() or re.match(r"^[A-Za-z]:/", pattern):
         return _PurePath(path).full_match(pattern)
     if base is not None:
@@ -390,14 +392,21 @@ def _with_notes(result, verdict: Verdict):
     )
 
 
-_SEARCH_LINE = re.compile(r"^(.+?)([:-])(\d+)\2")
+_SEARCH_SPLIT = re.compile(r"[:-](?=\d+[:-])")
 
 
-def _search_path(line: str, files_only: bool) -> str | None:
+def _search_files(root: str, line: str, files_only: bool) -> list[str]:
+    """The files a result line may come from. ripgrep writes `path:line:text` (`path-line-text`
+    for context lines), and a path can itself contain `-12-`: every prefix ending at such a
+    separator that is a file below root is a candidate."""
     if files_only:
-        return line
-    m = _SEARCH_LINE.match(line)
-    return m.group(1) if m else None
+        return [os.path.normpath(os.path.join(root, line))]
+    out = []
+    for m in _SEARCH_SPLIT.finditer(line):
+        full = os.path.normpath(os.path.join(root, line[: m.start()]))
+        if full not in out and os.path.isfile(full):
+            out.append(full)
+    return out
 
 
 def _filter_search(result, args: dict):
@@ -414,14 +423,14 @@ def _filter_search(result, args: dict):
         return result  # one file: judged as a read before the search ran
     kept, hidden, verdicts = [], set(), {}
     for line in data["matches"]:
-        rel = _search_path(str(line), bool(args.get("files_only")))
-        if rel is not None:
-            full = os.path.normpath(os.path.join(root, rel))
+        files = _search_files(root, str(line), bool(args.get("files_only")))
+        for full in files:
             if full not in verdicts:
                 verdicts[full] = judge([Action("read", "fs_search", (full,))]).decision
-            if verdicts[full] in ("deny", "ask"):
-                hidden.add(rel)
-                continue
+        refused = [f for f in files if verdicts[f] in ("deny", "ask")]
+        if refused:
+            hidden.update(os.path.relpath(f, root) for f in refused)
+            continue
         kept.append(line)
     if not hidden:
         return result
@@ -442,6 +451,21 @@ def _filter_search(result, args: dict):
 _INPUT_TOOLS = ("session_send", "session_stop", "session_prompt_user")
 
 
+def _interrupt_only(args: dict) -> bool:
+    keys = [str(k).strip().lower() for k in args.get("keys") or []]
+    return (
+        bool(keys)
+        and not args.get("text")
+        and not args.get("submit")
+        and all(k in ("ctrl+c", "^c", "c-c", "control+c") for k in keys)
+    )
+
+
+def _data(result) -> dict:
+    data = getattr(result, "structured_content", None)
+    return data if isinstance(data, dict) else {}
+
+
 class GuardActions(Middleware):
     """Judges every call that reads or changes the machine against the owner's rules."""
 
@@ -449,8 +473,10 @@ class GuardActions(Middleware):
         self.sessions = sessions
         self._confirm = confirm or _confirm  # tests replace the dialog
         # per shell session: what was typed there and not run yet (judged with the next Enter)
-        self._typed: dict[str, str] = {}
+        self._typed: dict[str, LineState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._inflight: dict[str, int] = {}
+        self._overlap: set[str] = set()
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         message = context.message
@@ -460,27 +486,44 @@ class GuardActions(Middleware):
             if message.name == "fs_search" and not getattr(result, "is_error", False):
                 result = await asyncio.to_thread(_filter_search, result, args)
             return result
-        sid = args.get("id")
-        if (
-            message.name == "session_send"
-            and not args.get("text")
-            and not args.get("submit")
-            and all(
-                str(k).strip().lower() in ("ctrl+c", "^c", "c-c", "control+c")
-                for k in args.get("keys") or ["x"]
-            )
-        ):
-            # an interrupt can run nothing: never queue it behind a call that is still waiting
-            self._remember(message.name, args)
-            return await call_next(context)
-        # input into one session is judged and sent in order, so a line typed by one call and
-        # ended by another is always judged whole
-        lock = self._locks.setdefault(str(sid), asyncio.Lock())
-        async with lock:
-            result = await self._judged(context, call_next, self._describe(message.name, args))
-            if not getattr(result, "is_error", False):
-                self._remember(message.name, args)
+        sid = str(args.get("id"))
+        if (message.name == "session_stop" and args.get("force")) or _interrupt_only(args):
+            # these can run nothing typed: never queue them behind a call that is still waiting
+            result = await call_next(context)
+            self._remember(message.name, args, result)
             return result
+        if await asyncio.to_thread(self._input_rules_apply, args.get("id")):
+            # judged and sent in order, so a line typed by one call and ended by another is
+            # always judged whole
+            async with self._locks.setdefault(sid, asyncio.Lock()):
+                result = await self._judged(context, call_next, self._describe(message.name, args))
+                self._remember(message.name, args, result)
+                return result
+        # no input rules: nothing waits, but input that overlaps other input to the same session
+        # leaves the typed line unknown, so rules added later never judge a stale line
+        self._inflight[sid] = self._inflight.get(sid, 0) + 1
+        if self._inflight[sid] > 1:
+            self._overlap.add(sid)
+        try:
+            result = await self._judged(context, call_next, self._describe(message.name, args))
+        finally:
+            self._inflight[sid] -= 1
+        self._remember(message.name, args, result)
+        if sid in self._overlap and message.name != "session_stop":
+            self._typed[args.get("id")] = UNKNOWN_STATE
+        if not self._inflight[sid]:
+            self._overlap.discard(sid)
+        return result
+
+    def _input_rules_apply(self, sid) -> bool:
+        try:
+            spec = self.sessions.get(sid).spec
+        except (KeyError, TypeError, AttributeError):
+            return False
+        if not is_shell(spec):
+            return False
+        anchors = [spec.cwd] if getattr(spec, "cwd", None) else []
+        return any(f.error or any("input" in r.on for r in f.rules) for f in files_for(anchors))
 
     def _describe(self, tool: str, args: dict) -> list[Action]:
         try:
@@ -488,17 +531,32 @@ class GuardActions(Middleware):
         except Exception:  # malformed arguments: the tool's own validation answers, and nothing runs
             return []
 
-    def _remember(self, tool: str, args: dict) -> None:
+    def _remember(self, tool: str, args: dict, result) -> None:
+        """What stays typed after the call, by what actually went out to the program."""
         sid = args.get("id")
         if tool == "session_stop":
-            self._typed.pop(sid, None)
+            if not getattr(result, "is_error", False):
+                self._typed.pop(sid, None)
             return
+        if getattr(result, "is_error", False):
+            return  # refused, or rejected before anything was sent
         try:
-            _, rest = session_input(args, self.sessions, self._typed, tool)
+            _, after = session_input(args, self.sessions, self._typed, tool)
         except Exception:
+            after = UNKNOWN_STATE
+        if after is None:
             return
-        if rest is not None:
-            self._typed[sid] = rest
+        data = _data(result)
+        if tool == "session_prompt_user":
+            if data.get("sent") is True:
+                self._typed[sid] = after
+            elif "sent" in data and data["sent"] is None:  # delivery uncertain
+                self._typed[sid] = UNKNOWN_STATE
+            return  # cancelled, or no dialog could open: nothing was typed
+        if "error" in data:  # the tool may have sent part of it (text before a bad key name)
+            self._typed[sid] = UNKNOWN_STATE
+            return
+        self._typed[sid] = after
 
     async def _judged(self, context: MiddlewareContext, call_next, actions: list[Action]):
         from fastmcp.tools.base import ToolResult
