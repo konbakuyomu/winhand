@@ -15,6 +15,13 @@ headers = { Authorization = "Bearer ..." }
 [relay]
 url = "wss://mcp.example.com/agent"
 device_token = "..."
+
+[redact]                           # masked in every tool result (see redact.py)
+values = ["my-secret-domain.example"]
+patterns = ['sk-[A-Za-z0-9]{20,}']
+ssh_hosts = true                   # every HostName in ~/.ssh/config (and its Include files)
+files = ['%LOCALAPPDATA%\\vps-fleet\\secrets\\*.env']   # values of KEY=VALUE lines
+ipv4 = false                       # every IPv4 address except loopback
 ```
 """
 
@@ -92,6 +99,8 @@ class Config:
     relay_url: str | None = None
     device_token: str | None = None
     raw: dict = field(default_factory=dict)
+    # [redact]: values masked in everything handed back to the model (see redact.py)
+    redact: dict = field(default_factory=dict)
 
 
 def load(path: Path | None = None) -> Config:
@@ -109,8 +118,13 @@ def load(path: Path | None = None) -> Config:
         if isinstance(entry, dict) and name not in known:
             servers.append(entry_from_dict(name, entry))
     relay = raw.get("relay", {})
+    redact = raw.get("redact") if isinstance(raw.get("redact"), dict) else {}
     return Config(
-        servers=servers, relay_url=relay.get("url"), device_token=relay.get("device_token"), raw=raw
+        servers=servers,
+        relay_url=relay.get("url"),
+        device_token=relay.get("device_token"),
+        raw=raw,
+        redact=dict(redact),
     )
 
 
@@ -148,6 +162,11 @@ def save(cfg: Config, path: Path | None = None) -> Path:
             lines.append(f"url = {_toml_value(cfg.relay_url)}")
         if cfg.device_token:
             lines.append(f"device_token = {_toml_value(cfg.device_token)}")
+        lines.append("")
+    if cfg.redact:
+        lines.append("[redact]")
+        for key, value in cfg.redact.items():
+            lines.append(f"{_key(key)} = {_toml_value(value)}")
         lines.append("")
     for s in cfg.servers:
         lines.append(f"[mcp_servers.{_key(s.name)}]")

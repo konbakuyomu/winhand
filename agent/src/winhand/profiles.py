@@ -42,6 +42,8 @@ _SPEC_KEYS = {
     "autoreply",
     "ready",
     "description",
+    "restart_on_exit",
+    "restart_delay_s",
 }
 
 

@@ -20,6 +20,8 @@ from typing import Any
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
+from .redact import mask
+
 PREVIEW_CHARS = 240
 _SECRET_KEYS = {"env", "token", "password", "secret"}
 
@@ -153,7 +155,7 @@ class ToolActivity(Middleware):
             "t": started,
             "kind": "tool",
             "title": message.name,
-            "args": preview(message.arguments or {}),
+            "args": mask(preview(message.arguments or {})),
             "status": "running",
         }
         self.hub.publish(entry, persist=False)

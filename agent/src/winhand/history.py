@@ -16,6 +16,7 @@ from typing import Any
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from .activity import _reports_error, preview, summarize
+from .redact import mask
 
 _SKIP = {"history"}
 
@@ -41,7 +42,7 @@ class RecentCalls(Middleware):
         entry: dict[str, Any] = {
             "n": next(self._numbers),
             "tool": message.name,
-            "args": preview(message.arguments or {}, 160),
+            "args": mask(preview(message.arguments or {}, 160)),
             "started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started)),
             "status": "running",
         }

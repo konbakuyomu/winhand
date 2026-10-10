@@ -492,6 +492,9 @@ def run(
     temp_file: Path | None = None
     nested_direct = False
     try:
+        from .redact import refuse_placeholders
+
+        refuse_placeholders(command, script, stdin, *(args or []))
         if script is not None:
             if command:
                 return {"error": "give either command or script, not both"}

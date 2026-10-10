@@ -13,11 +13,25 @@ from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from . import __version__, coalesce, fs, media, patching, proc, profiles, tools_desktop, transfer, winenv
+from . import (
+    __version__,
+    coalesce,
+    fs,
+    media,
+    patching,
+    proc,
+    profiles,
+    remote,
+    secret_store,
+    tools_desktop,
+    transfer,
+    winenv,
+)
 from .config import Config
 from .config import load as load_config
 from .history import RecentCalls
 from .proc import split_command
+from .redact import RedactOutput
 from .secret_prompt import PromptUnavailable, ask_secret
 from .session import SessionManager, SessionSpec, TransportError, wait_for
 from .session.session import TRANSPORTS
@@ -39,7 +53,9 @@ Quick rules
   `run` answers within ~45 s; a command still going then comes back with `still_running` and an id:
   it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code.
   Never sleep or poll in a loop to wait: job_status(wait_s=40, patterns=[...]) does it.
-- Scripts for another machine over SSH: run(command='ssh', args=[host, 'bash -s'], stdin=script).
+- Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
+  config and says whether a failure was the connection, host key, key or the script.
+  An interactive login: session_start(profile='ssh', vars={'host': ...}).
 - Anything interactive, long-running or stateful (shells, REPLs, debuggers, gdbserver, installers,
   serial/telnet consoles, full-screen TUIs) -> a session:
     session_start -> session_send / session_wait -> session_read / session_screen -> session_stop
@@ -47,6 +63,9 @@ Quick rules
     running | awaiting_input | needs_user | idle | blocked | exited
   `needs_user` means a password/one-time code/browser sign-in: never invent it. Give URLs to the user,
   or call session_prompt_user so they type a secret into a masked dialog on the machine.
+- A token or password that must be stored on the machine: secret_prompt(message, save_to=...) lets the
+  person type it into a masked dialog; you never see it. «redacted:…» in results marks masked values:
+  never write such text back to a file.
 - session_wait ORs its conditions across several sessions at once (e.g. gdb prompt OR serial "PANIC").
   A timeout is not a failure: call it again to keep waiting; already-returned output is not repeated.
   One wait at a time is enough: identical parallel waits share one answer.
@@ -55,7 +74,7 @@ Quick rules
 - Full-screen programs (menuconfig, htop, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
   then session_screen; `highlighted` shows the selected row.
 - Profiles (profile_list) know prompts, exit commands and quirks of common tools: gdb, pyocd-gdbserver,
-  pyocd-commander, openocd, jlink, rtthread-msh, serial, telnet, menuconfig, python, shell.
+  pyocd-commander, openocd, jlink, rtthread-msh, serial, telnet, ssh, menuconfig, python, shell.
 - Files: fs_read (numbered; tail=N for logs) / fs_edit (exact replace, several edits at once) /
   fs_write / fs_search (content) / fs_find (names) / fs_list (sort='mtime', newer_than='2h') /
   fs_stat (hash='sha256') / fs_op (copy, move, delete to the Recycle Bin, mkdir) /
@@ -112,6 +131,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
     local_servers = [s.name for s in cfg.servers if s.enabled]
     recent = RecentCalls()
     mcp.add_middleware(recent)
+    mcp.add_middleware(RedactOutput())  # inside RecentCalls: history only ever sees masked results
 
     async def _progress(ctx: Context | None):
         if ctx is None:
@@ -214,6 +234,24 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         )
 
     @mcp.tool
+    async def remote_run(
+        host: Annotated[str, Field(description="An alias from this machine's ~/.ssh/config, or user@host")],
+        script: Annotated[str, Field(description="The script to run there (sent through stdin)")],
+        shell: Annotated[
+            str, Field(description="Remote interpreter: bash (default), sh, zsh, python3 ...")
+        ] = "bash",
+        args: Annotated[list[str] | None, Field(description="Arguments for the script ($1, $2 ...)")] = None,
+        env: Annotated[dict[str, str] | None, Field(description="Exported before the script runs")] = None,
+        cwd: Annotated[str | None, Field(description="Remote folder to run in")] = None,
+        timeout_s: float = 120,
+    ) -> dict:
+        """Run a script on another machine over SSH from this one, with this machine's keys and ssh
+        config (aliases, ProxyJump). Non-interactive (BatchMode), with keep-alives. Answers like `run`
+        (still_running + job_status for long ones); on failure `ssh_error` says whether it was the
+        connection, the host key, the key, or the script itself."""
+        return await asyncio.to_thread(remote.remote_run, host, script, shell, args, env, cwd, timeout_s)
+
+    @mcp.tool
     async def proc_list(
         name: Annotated[str | None, Field(description="Filter by name/command line substring")] = None,
         limit: int = 100,
@@ -266,6 +304,15 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             list[str] | None, Field(description="Regexes for this program's input prompt")
         ] = None,
         exit_command: str | None = None,
+        restart_on_exit: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                le=100,
+                description="Start the program again (up to this many times) when it exits by itself, "
+                "e.g. a `ssh host tail -F log` watcher after the connection drops",
+            ),
+        ] = None,
         cols: int | None = None,
         rows: int | None = None,
         startup_wait_s: Annotated[
@@ -292,6 +339,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             tcp_port=tcp_port,
             encoding=encoding,
             exit_command=exit_command,
+            restart_on_exit=restart_on_exit,
             cols=cols,
             rows=rows,
         )
@@ -560,12 +608,42 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         )
         return {"id": id, "sent": True, **result["sessions"][id]}
 
+    @mcp.tool
+    async def secret_prompt(
+        message: Annotated[
+            str, Field(description="What to ask for, e.g. 'Cloudflare API token (Zone DNS edit)'")
+        ],
+        save_to: Annotated[
+            str | None, Field(description="File to store it in (only this user can read it)")
+        ] = None,
+        key: Annotated[
+            str | None, Field(description="With save_to: store as KEY=value in that .env file (others kept)")
+        ] = None,
+        credential: Annotated[
+            str | None, Field(description="Or: a Windows Credential Manager entry name to store it under")
+        ] = None,
+        validate: Annotated[
+            str | None, Field(description="Regex the value must match (format check; asks again if not)")
+        ] = None,
+    ) -> dict:
+        """Ask the person at the machine to type a secret (masked dialog) and store it there without it
+        ever reaching you: you get back only where it was saved. It is also masked in later results.
+        Use this whenever a token or password must exist on the machine."""
+
+        def work():
+            try:
+                return secret_store.prompt_and_save(message, save_to, key, credential, validate)
+            except (secret_store.SecretError, PromptUnavailable, fs.FsError, OSError) as exc:
+                return {"error": str(exc)}
+
+        return await asyncio.to_thread(work)
+
     # ----------------------------------------------------------------- files
 
     def _fs(fn, *a, **kw):
         try:
             return fn(*a, **kw)
-        except (fs.FsError, OSError, UnicodeError) as exc:
+        except (fs.FsError, OSError, UnicodeError, ValueError) as exc:
             return {"error": str(exc)}
 
     @mcp.tool

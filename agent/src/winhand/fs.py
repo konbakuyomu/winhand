@@ -234,6 +234,9 @@ def fs_write(
     append: bool = False,
     expected_sha256: str | None = None,
 ) -> dict:
+    from .redact import refuse_placeholders
+
+    refuse_placeholders(content)
     full = _p(path)
     _check_expected(path, expected_sha256)
     note = None
@@ -299,6 +302,9 @@ def fs_edit(
         if old is None or new is None:
             raise FsError("give old and new (or edits=[{old, new}, ...])")
         ops = [(old, new, replace_all)]
+    from .redact import refuse_placeholders
+
+    refuse_placeholders(*(o for op in ops for o in op[:2]))
     text, encoding, data = _read_text_bytes(path)
     if expected_sha256 is not None and hashlib.sha256(data).hexdigest() != expected_sha256.strip().lower():
         raise FsError(f"{path} changed since you read it; read it again before editing")
