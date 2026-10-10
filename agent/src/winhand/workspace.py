@@ -28,6 +28,11 @@ BUDGET_CHARS = fs.READ_MAX_CHARS
 DESCRIPTION_CHARS = 300
 
 
+def _encoded(text: str) -> int:
+    """Characters `text` takes inside a JSON string."""
+    return len(json.dumps(text, ensure_ascii=False)) - 2
+
+
 def _expand(path: str) -> str:
     return os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
 
@@ -178,6 +183,8 @@ def context(cfg: Config, path: str | None = None) -> dict:
         else "Pass path=<the folder you work in> to also get that project's AGENTS.md, skills and guard rules."
     )
 
+    # the budget is what the result will be once it is JSON: backslashes, quotes and line
+    # breaks take two characters there
     budget = BUDGET_CHARS - len(json.dumps(out, ensure_ascii=False))
     for file, scope in _rule_files(cfg, root, start):
         try:
@@ -187,16 +194,17 @@ def context(cfg: Config, path: str | None = None) -> dict:
             continue
         lines = text.splitlines()
         item: dict = {"path": file, "scope": scope, "lines": len(lines)}
-        if len(text) + 200 <= budget:
+        if _encoded(text) + 200 <= budget:
             item["content"] = text
-            budget -= len(text) + 200
+            budget -= _encoded(text) + 200
         else:
             shown, used = [], 0
             for line in lines:
-                if used + len(line) + 1 > budget - 400:
+                cost = _encoded(line) + 2
+                if used + cost > budget - 400:
                     break
                 shown.append(line)
-                used += len(line) + 1
+                used += cost
             if shown:
                 item["content"] = "\n".join(shown)
             item["truncated"] = (

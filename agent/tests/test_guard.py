@@ -958,3 +958,50 @@ def test_search_filtering_costs_little_without_rules_and_finds_nested_ones(tmp_p
     assert filtered["count"] == len(lines) - 1 and "pkg/m3/f1.py" in filtered["guard_hidden"].replace(
         "\\", "/"
     )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra rights on Windows")
+async def test_searching_through_a_linked_file_respects_the_rules_where_it_lives(
+    client, tmp_path, monkeypatch
+):
+    from winhand import fs as fs_module
+
+    monkeypatch.setattr(fs_module.shutil, "which", lambda name: None)  # the Python engine follows links
+    vault, work = tmp_path / "vault", tmp_path / "work"
+    write_rules(
+        vault / ".winhand" / "guards.toml",
+        """\
+        [[guard]]
+        on = "read"
+        path = ["**/*.key"]
+        decision = "deny"
+        """,
+    )
+    (vault / "prod.key").write_text("TOKEN=VAULTSECRET\n")
+    work.mkdir()
+    (work / "linked.txt").symlink_to(vault / "prod.key")
+    (work / "plain.txt").write_text("TOKEN=fine\n")
+    result = await client.call_tool("fs_search", {"pattern": "TOKEN", "path": str(work)})
+    text = text_of(result)
+    assert result.structured_content["engine"] == "python"
+    assert (
+        "VAULTSECRET" not in text
+        and "plain.txt" in text
+        and "linked.txt" in result.structured_content["guard_hidden"]
+    )
+
+
+def test_a_call_looks_each_rule_location_up_once(tmp_path, monkeypatch):
+    seen = []
+    real = guard.load
+
+    def counting(path, base=None):
+        seen.append(str(path))
+        return real(path, base)
+
+    monkeypatch.setattr(guard, "load", counting)
+    target = str(tmp_path / "a" / "b.c")
+    for tool, args in (("fs_edit", {"path": target, "old": "x", "new": "y"}), ("fs_read", {"path": target})):
+        seen.clear()
+        guard.judge(actions.describe(tool, args))
+        assert len(seen) == len(set(seen)), tool

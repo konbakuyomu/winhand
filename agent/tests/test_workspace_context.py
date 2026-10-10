@@ -174,3 +174,13 @@ async def test_stdio_clients_get_the_context_hint_only_when_asked():
     assert "context(" not in plain and "context(" in asked and "context(" in remote
     assert "context(" not in as_text, 'stdio_hint = "false" means false'
     assert all(len(t) <= 4096 for t in (plain, asked, remote))
+
+
+def test_the_budget_counts_what_json_makes_of_the_text(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text(
+        "\n".join('path C:\\a\\b\\c "q"' for _ in range(6000)), encoding="utf-8"
+    )
+    out = workspace.context(Config(context={"rules": [], "skills": []}), str(tmp_path))
+    size = len(__import__("json").dumps(out, ensure_ascii=False))
+    assert "truncated" in out["rules"][0] and size <= workspace.BUDGET_CHARS + 1_000

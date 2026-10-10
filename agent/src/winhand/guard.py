@@ -230,8 +230,14 @@ def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
     out: list[RuleFile] = []
     seen: set[str] = set()
     glob_file = str(global_path())
-    first = load(glob_file)
-    seen.add(_norm(glob_file))
+    glob_key = _norm(glob_file)
+    if cache is not None and glob_key in cache:
+        first = cache[glob_key]
+    else:
+        first = load(glob_file)
+        if cache is not None:
+            cache[glob_key] = first
+    seen.add(glob_key)
     if first is not None:
         out.append(first)
     for anchor in anchors:
@@ -299,6 +305,7 @@ class Verdict:
 
 def judge(actions: list[Action], cache: dict | None = None) -> Verdict:
     verdict = Verdict()
+    cache = {} if cache is None else cache  # one call looks each rule-file location up once
     for action in actions:
         for rule_file in files_for(_anchors(action), cache):
             if rule_file.error:
@@ -436,14 +443,18 @@ def _filter_search(result, args: dict):
             folders[folder] = any(f.error or any("read" in r.on for r in f.rules) for f in found)
         return folders[folder]
 
+    def reachable(full: str) -> bool:
+        folders_of = [os.path.dirname(full)]
+        if os.path.islink(full):  # a linked file is read where it really lives
+            folders_of.append(os.path.dirname(os.path.realpath(full)))
+        return any(read_rules_apply(f) for f in folders_of)
+
     for line in data["matches"]:
         files = _search_files(root, str(line), bool(args.get("files_only")))
         for full in files:
             if full not in verdicts:
                 verdicts[full] = (
-                    judge([Action("read", "fs_search", (full,))], cache).decision
-                    if read_rules_apply(os.path.dirname(full))
-                    else None
+                    judge([Action("read", "fs_search", (full,))], cache).decision if reachable(full) else None
                 )
         refused = [f for f in files if verdicts[f] in ("deny", "ask")]
         if refused:
@@ -510,12 +521,15 @@ class GuardActions(Middleware):
             result = await self._sent(message.name, args, call_next(context))
             self._remember(message.name, args, result)
             return result
-        if await asyncio.to_thread(self._input_rules_apply, args.get("id")):
+        cache: dict = {}  # one lookup per rule-file location for the whole call
+        if await asyncio.to_thread(self._input_rules_apply, args.get("id"), cache):
             # judged and sent in order, so a line typed by one call and ended by another is
             # always judged whole
             async with self._locks.setdefault(sid, asyncio.Lock()):
                 actions = self._describe(message.name, args)
-                result = await self._sent(message.name, args, self._judged(context, call_next, actions))
+                result = await self._sent(
+                    message.name, args, self._judged(context, call_next, actions, cache)
+                )
                 self._remember(message.name, args, result)
                 return result
         # no input rules: nothing waits, but input that overlaps other input to the same session
@@ -525,7 +539,7 @@ class GuardActions(Middleware):
             self._overlap.add(sid)
         try:
             actions = self._describe(message.name, args)
-            result = await self._sent(message.name, args, self._judged(context, call_next, actions))
+            result = await self._sent(message.name, args, self._judged(context, call_next, actions, cache))
         finally:
             self._inflight[sid] -= 1
         self._remember(message.name, args, result)
@@ -545,7 +559,7 @@ class GuardActions(Middleware):
                 self._typed[args.get("id")] = UNKNOWN_STATE
             raise
 
-    def _input_rules_apply(self, sid) -> bool:
+    def _input_rules_apply(self, sid, cache: dict | None = None) -> bool:
         try:
             spec = self.sessions.get(sid).spec
         except (KeyError, TypeError, AttributeError):
@@ -553,7 +567,7 @@ class GuardActions(Middleware):
         if not is_shell(spec):
             return False
         anchors = [spec.cwd] if getattr(spec, "cwd", None) else []
-        return any(f.error or any("input" in r.on for r in f.rules) for f in files_for(anchors))
+        return any(f.error or any("input" in r.on for r in f.rules) for f in files_for(anchors, cache))
 
     def _describe(self, tool: str, args: dict) -> list[Action]:
         try:
@@ -588,12 +602,14 @@ class GuardActions(Middleware):
             return
         self._typed[sid] = after
 
-    async def _judged(self, context: MiddlewareContext, call_next, actions: list[Action]):
+    async def _judged(
+        self, context: MiddlewareContext, call_next, actions: list[Action], cache: dict | None = None
+    ):
         from fastmcp.tools.base import ToolResult
 
         if not actions:
             return await call_next(context)
-        verdict = await asyncio.to_thread(judge, actions)
+        verdict = await asyncio.to_thread(judge, actions, cache)
         if verdict.decision == "deny":
             return ToolResult(content=[TextContent(type="text", text=refusal(verdict))], is_error=True)
         if verdict.decision == "ask":
