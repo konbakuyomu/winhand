@@ -318,6 +318,9 @@ def apply(
     if patch_file is not None:
         patch, _ = fs.read_text(patch_file)
     assert patch is not None
+    from .redact import refuse_placeholders
+
+    refuse_placeholders(patch)
     root_full = os.path.abspath(os.path.expanduser(root))
     if not os.path.isdir(root_full):
         raise PatchError(f"root is not a folder: {root}")

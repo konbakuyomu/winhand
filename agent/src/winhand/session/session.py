@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import os
 import re
@@ -76,6 +77,9 @@ class SessionSpec:
     exit_command: str | None = None
     autoreply: list[dict] = field(default_factory=list)
     ready: dict = field(default_factory=dict)
+    # start the program again when it exits by itself (e.g. `ssh host tail -f log` after a drop)
+    restart_on_exit: int = 0
+    restart_delay_s: float = 2.0
 
 
 def _log_dir() -> Path:
@@ -149,6 +153,37 @@ class Session:
     # --------------------------------------------------------------- reading
 
     def _pump(self) -> None:
+        restarts = 0
+        while True:
+            self._read_until_end()
+            code = self.transport.exit_code()
+            if self._stopping.is_set() or restarts >= self.spec.restart_on_exit:
+                break
+            restarts += 1
+            delay = min(self.spec.restart_delay_s * 2 ** (restarts - 1), 60.0)
+            self._event("restarting", exit_code=code, attempt=restarts, delay_s=delay)
+            if self._stopping.wait(delay):
+                break
+            try:
+                transport = self._open_transport(self.spec)
+            except Exception as exc:
+                self._event("restart_failed", error=str(exc))
+                break
+            old, self.transport = self.transport, transport
+            with contextlib.suppress(Exception):
+                old.close(force=True)
+            with self._output_lock:
+                self._append_output(
+                    f"\r\n[winhand] restarted after exit code {code} ({restarts}/{self.spec.restart_on_exit})\r\n"
+                )
+            if self._stopping.is_set():
+                break
+        with self._output_lock:
+            self._append_output(self._secret_filter.finish())
+        self._ended.set()
+        self._event("ended", exit_code=self.transport.exit_code(), restarts=restarts)
+
+    def _read_until_end(self) -> None:
         while True:
             try:
                 chunk = self.transport.read()
@@ -156,18 +191,14 @@ class Session:
                 self._event("reader_error", error=str(exc))
                 chunk = None
             if chunk is None:
-                break
+                return
             if chunk:
                 self._on_output(chunk)
             elif not self.transport.alive():
                 # ConPTY keeps buffered output after the process exits; stopping at the
                 # first empty read would drop the tail (often the error you need).
                 self._drain()
-                break
-        with self._output_lock:
-            self._append_output(self._secret_filter.finish())
-        self._ended.set()
-        self._event("ended", exit_code=self.transport.exit_code())
+                return
 
     def _drain(self, quiet_s: float = 2.0, cap_s: float = 30.0) -> None:
         deadline = time.monotonic() + cap_s

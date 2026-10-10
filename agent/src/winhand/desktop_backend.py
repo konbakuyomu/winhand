@@ -73,7 +73,8 @@ class Backend:
         self.sessions = SessionManager()
         self.cfg = config.load()
         self.mcp = build_server(self.cfg, self.sessions)
-        self.mcp.add_middleware(ToolActivity(self.hub))
+        # outermost, so the timeline and audit log see results after redaction
+        self.mcp.middleware.insert(0, ToolActivity(self.hub))
         self.services = Services(self.cfg.servers, self.hub)
         self.services.listeners.append(lambda _snapshot: self.emit("mcp", self.mcp_state()))
         transfer.listeners.append(self._on_transfer)

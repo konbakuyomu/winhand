@@ -212,6 +212,29 @@ def test_atomic_write_keeps_crlf_and_replaces_in_place(weird_dir):
     assert sorted(x.name for x in weird_dir.iterdir()) == ["keep.ini"]
 
 
+def test_secret_file_is_readable_only_by_this_user(weird_dir):
+    from winhand import secret_store
+
+    out = secret_store.save_to_file(str(weird_dir / "token.env"), "s3cret-value", key="TOKEN")
+    assert out["saved"]
+    # icacls prints in the console code page (cp936 on Chinese Windows), not UTF-8
+    acl = proc._decode(subprocess.run(["icacls", str(weird_dir / "token.env")], capture_output=True).stdout)
+    assert "(I)" not in acl and os.environ["USERNAME"].lower() in acl.lower(), acl
+
+
+def test_secret_goes_into_the_credential_manager():
+    import ctypes
+    import uuid
+
+    from winhand import secret_store
+
+    target = f"winhand-test-{uuid.uuid4().hex[:8]}"
+    out = secret_store.save_to_credential_manager(target, "value-123")
+    assert out == {"saved": True, "credential": target, "chars": 9}
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    assert advapi32.CredDeleteW(ctypes.c_wchar_p(target), 1, 0), ctypes.get_last_error()
+
+
 # ------------------------------------------------------------ prompts
 
 

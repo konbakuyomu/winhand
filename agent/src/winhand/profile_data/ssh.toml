@@ -1,0 +1,9 @@
+description = "An interactive SSH login with this machine's ssh config and keys (host = an alias from ~/.ssh/config or user@host). For one remote script, remote_run is simpler."
+transport = "pty"
+command = ["ssh", "-tt", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "{host}"]
+vars = { host = "" }
+exit_command = "exit"
+prompts = ['[$#] ?$']
+needs_user = ['(?i)passphrase for key', '(?i)password:\s*$', '(?i)verification code']
+confirm = ['(?i)are you sure you want to continue connecting']
+notes = "A host-key question is a confirm: check the fingerprint with the person first. To watch a log, start ssh with args=['tail', '-F', '/var/log/x'] and restart_on_exit=5 so a dropped connection comes back by itself."

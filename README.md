@@ -121,7 +121,8 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 分组 | 工具 |
 |---|---|
 | 会话 | `session_start` `session_send` `session_wait` `session_read` `session_screen` `session_list` `session_stop` `session_resize` `session_prompt_user` `profile_list` |
-| 一次性命令和进程 | `run`（约 45 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`proc_list` `proc_kill` `sys_info` |
+| 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值 |
+| 一次性命令和进程 | `run`（约 45 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`remote_run`（经本机的 ssh 配置在另一台机器上跑脚本）`proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
 | 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
@@ -135,6 +136,29 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 截图和图片按大小预算编码（PNG，过大时改用 JPEG 并逐步缩小），保证能通过客户端的结果大小限制；原始分辨率的截图同时保存在本机（结果里的 `original_file`），需要看清细节时用 `fs_read` 加 `region` 放大那一块。
 
 `ui` 的操作只执行一次，之后回读控件状态；`verified=true` 表示可观察状态符合预期，`false` 表示未达到，`null` 表示无法确认。填写内容、切换勾选、选择、展开和聚焦可以按控件支持的状态核验；普通按钮被点击不代表它触发的工作已经完成，还应检查结果窗口。`verify_wait_s` 默认 3 秒，最多 10 秒，用于等待回读状态改变。
+
+`remote_run(host, script)` 用这台电脑的 ssh 配置和密钥（包括别名和 ProxyJump）在另一台机器上执行脚本：
+
+- 以非交互方式运行（BatchMode），带保活；脚本从 stdin 送过去，CRLF 会转成 LF。
+- `env`、`cwd`、`args` 都会正确转义。
+- 失败时 `ssh_error` 会说明原因：连不上、主机指纹不对、密钥被拒，还是脚本本身返回了非零退出码。
+
+需要交互登录时用 `session_start(profile="ssh", vars={"host": ...})`。如果要盯日志，加上 `restart_on_exit`，连接断了会自动重新连上。
+
+### 输出脱敏
+
+在 `~/.winhand/config.toml` 里加一个 `[redact]` 段，所有工具结果在离开电脑之前都会把命中的值换成 `«redacted:种类»`：
+
+```toml
+[redact]
+values = ["我的域名.example"]
+patterns = ['sk-[A-Za-z0-9]{20,}']
+ssh_hosts = true      # ~/.ssh/config（含 Include）里所有 HostName
+files = ['%LOCALAPPDATA%\vps-fleet\secrets\*.env']   # 这些文件里 KEY=VALUE 的值
+ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
+```
+
+`secret_prompt` 收下的值也会自动遮挡。为了防止把占位符写回文件、冲掉真实值，`fs_write`、`fs_edit`、`fs_apply_patch` 和 `run` 会拒绝含有 `«redacted:` 的内容。本机其他 MCP 服务（`/mcp/<名称>`）不经过脱敏。
 
 短暂断网后，agent 会重连，本机仍存活的会话继续运行。连接恢复时先用 `history` 看刚才的调用是否已经执行（带 run id 和退出码），再用 `session_list` 找原会话，再用 `session_read(since=上次实际收到的 cursor)` 补读；游标未知时可从 `since=0` 开始。丢失回复不能证明操作失败，不要直接重发原命令。agent 进程重启属于另一种情况：交互会话不会自动恢复；需要跨 agent 重启继续的非交互工作用 `job_start`，之后以 `job_status` 查询。
 
