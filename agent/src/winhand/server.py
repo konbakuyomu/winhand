@@ -13,7 +13,7 @@ from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from . import __version__, coalesce, fs, media, proc, profiles, tools_desktop, winenv
+from . import __version__, coalesce, fs, media, patching, proc, profiles, tools_desktop, transfer, winenv
 from .config import Config
 from .config import load as load_config
 from .history import RecentCalls
@@ -58,12 +58,16 @@ Quick rules
   pyocd-commander, openocd, jlink, rtthread-msh, serial, telnet, menuconfig, python, shell.
 - Files: fs_read (numbered; tail=N for logs) / fs_edit (exact replace, several edits at once) /
   fs_write / fs_search (content) / fs_find (names) / fs_list (sort='mtime', newer_than='2h') /
-  fs_stat (hash='sha256') / fs_op (copy, move, delete to the Recycle Bin, mkdir).
+  fs_stat (hash='sha256') / fs_op (copy, move, delete to the Recycle Bin, mkdir) /
+  fs_apply_patch (a unified diff onto a work tree: encoding, CRLF and -p handled, all or nothing).
   Prefer these over shell commands for files. fs_read returns sha256: pass it as expected_sha256
   to fs_write/fs_edit when someone else may change the file meanwhile.
   fs_read also shows images and reads PDF (scans as page images), Word, PowerPoint and Excel.
   fs_send hands any file to you as-is; fs_write_bytes writes binary content here;
   fs_pick lets the person choose files in a dialog (their way to "upload" to you).
+  Moving more than a few KB between your own sandbox/shell and this machine: fs_upload_url /
+  fs_download_url give a one-time link for curl, so the bytes never pass through the conversation
+  (never paste base64 in parts).
 - The desktop like a person: screenshot (desktop, monitor, region or a window) -> input
   (click/type/keys/scroll/drag in the screenshot's pixels) or, more reliably, ui (inspect a
   window's controls, then invoke/set_value/toggle by name; also classic Win32/WinForms/Delphi
@@ -744,13 +748,40 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         return await asyncio.to_thread(_fs, fs.fs_op, action, path, to, overwrite, recursive, permanent)
 
     @mcp.tool
+    async def fs_apply_patch(
+        root: Annotated[
+            str, Field(description="Folder the patch paths are relative to (the repo/work tree)")
+        ],
+        patch: Annotated[str | None, Field(description="Unified diff text (diff -u or git diff)")] = None,
+        patch_file: Annotated[
+            str | None,
+            Field(description="Or: a .diff/.patch file on this machine (e.g. sent with fs_upload_url)"),
+        ] = None,
+        strip: Annotated[
+            int | None, Field(ge=0, le=5, description="Path components to strip (-p); default: worked out")
+        ] = None,
+        dry_run: Annotated[bool, Field(description="Only check that every hunk fits; write nothing")] = False,
+        partial: Annotated[
+            bool,
+            Field(description="Write the files that apply even if others fail (default: all or nothing)"),
+        ] = False,
+    ) -> dict:
+        """Apply a unified diff to files here, without git or patch. Keeps each file's encoding and
+        CRLF/LF, finds hunks that moved, works out -p, creates/deletes/renames files, and writes
+        nothing unless every hunk fits. The answer lists each file and hunk (line, offset, or why not)."""
+        return await asyncio.to_thread(_fs, patching.apply, patch, root, patch_file, strip, dry_run, partial)
+
+    @mcp.tool
     def history(
         limit: Annotated[int, Field(ge=1, le=100)] = 20,
         tool: Annotated[str | None, Field(description="Only calls of this tool, e.g. run")] = None,
     ) -> dict:
         """The most recent tool calls this machine handled (newest first): status, summary, exit code
         and run id. After a connection error, check here whether your call ran before resending it."""
-        return {"calls": recent.list(limit, tool), "winhand": __version__}
+        out = {"calls": recent.list(limit, tool), "winhand": __version__}
+        if transfer.recent:
+            out["transfers"] = list(transfer.recent)[::-1][:10]
+        return out
 
     tools_desktop.register(mcp)
 

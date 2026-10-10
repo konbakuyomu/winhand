@@ -22,7 +22,7 @@ from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import coalesce, desktop, jobs, media, proc, winenv
+from . import coalesce, desktop, jobs, media, proc, transfer, winenv
 from .secret_prompt import PromptUnavailable, ask_pick
 
 UIA_SCRIPT = Path(__file__).parent / "scripts" / "uia.ps1"
@@ -69,7 +69,14 @@ def media_result(facts: dict, *blocks) -> ToolResult:
 def _errors(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
-    except (desktop.DesktopError, media.MediaError, jobs.JobError, OSError, ValueError) as exc:
+    except (
+        desktop.DesktopError,
+        media.MediaError,
+        jobs.JobError,
+        transfer.TransferError,
+        OSError,
+        ValueError,
+    ) as exc:
         return {"error": str(exc)}
 
 
@@ -218,19 +225,63 @@ def register(mcp: FastMCP) -> None:
         path: str,
         data_base64: Annotated[str, Field(description="File content, base64-encoded")],
         append: Annotated[bool, Field(description="Append (send big files in several parts)")] = False,
+        offset: Annotated[
+            int | None,
+            Field(
+                ge=0, description="Write at this byte offset, cutting the file there first (resume a part)"
+            ),
+        ] = None,
+        sha256: Annotated[
+            str | None, Field(description="Expected sha256 of the whole file after this write (last part)")
+        ] = None,
     ) -> dict:
-        """Write binary content (base64) to a file on this machine, e.g. an image, archive or program."""
+        """Write binary content (base64) to a file on this machine, e.g. an image, archive or program.
+        Returns the file's size and sha256 so a transfer in parts can be checked and resumed.
+        For anything over a few KB prefer fs_upload_url: the bytes then skip the conversation."""
 
         def work():
             data = base64.b64decode(data_base64, validate=True)
             full = winenv.long_path(path)
             os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
-            with open(full, "ab" if append else "wb") as fh:
-                fh.write(data)
+            if offset is not None:
+                if offset > (os.path.getsize(full) if os.path.exists(full) else 0):
+                    raise ValueError(f"offset {offset} is past the end of {path}; resume at its current size")
+                with open(full, "r+b" if os.path.exists(full) else "wb") as fh:
+                    fh.truncate(offset)
+                    fh.seek(offset)
+                    fh.write(data)
+            else:
+                with open(full, "ab" if append else "wb") as fh:
+                    fh.write(data)
             digest = hashlib.sha256(Path(full).read_bytes()).hexdigest()
-            return {"path": path, "written": len(data), "size": os.path.getsize(full), "sha256": digest}
+            out = {"path": path, "written": len(data), "size": os.path.getsize(full), "sha256": digest}
+            if sha256 and digest != sha256.strip().lower():
+                out["error"] = "sha256 mismatch: the file is not what you sent; resend from a known offset"
+            return out
 
         return await asyncio.to_thread(_errors, work)
+
+    @mcp.tool
+    async def fs_upload_url(
+        path: Annotated[str, Field(description="Absolute path on this machine to create")],
+        sha256: Annotated[str | None, Field(description="Expected sha256; a mismatch is refused")] = None,
+        max_mb: Annotated[float, Field(gt=0, le=95)] = transfer.DEFAULT_MAX_MB,
+        ttl_s: Annotated[float, Field(ge=30, le=1800)] = transfer.DEFAULT_TTL_S,
+        overwrite: bool = False,
+    ) -> dict:
+        """A one-time link to upload one file from your own shell or sandbox straight to `path` on
+        this machine (curl -T file URL), so its bytes never pass through the conversation. Use it
+        for anything bigger than a few KB: patches, archives, builds. Single use, expires."""
+        return await asyncio.to_thread(_errors, transfer.issue_upload, path, sha256, max_mb, ttl_s, overwrite)
+
+    @mcp.tool
+    async def fs_download_url(
+        path: Annotated[str, Field(description="Absolute path of a file on this machine")],
+        ttl_s: Annotated[float, Field(ge=30, le=1800)] = transfer.DEFAULT_TTL_S,
+    ) -> dict:
+        """A one-time link to download one file from this machine into your own shell or sandbox
+        (curl -o name URL), for files too big for fs_send. Single use, expires."""
+        return await asyncio.to_thread(_errors, transfer.issue_download, path, ttl_s)
 
     @mcp.tool
     async def fs_pick(

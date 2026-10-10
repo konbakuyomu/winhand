@@ -310,6 +310,9 @@ async def run_tunnel(
         from .server import build_server
 
         mcp = build_server()
+    from . import transfer
+
+    transfer.set_relay(url)  # one-time file links point at the relay's public origin
     port = _free_port()
     from .mcp_bridge import compose_app
 

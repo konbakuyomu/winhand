@@ -832,19 +832,18 @@ class Services:
 
 
 def compose_app(mcp_app, services: Services | None):
-    """winhand's own MCP app at /mcp plus one endpoint per local server at /mcp/<name>."""
+    """winhand's own MCP app at /mcp, one endpoint per local server at /mcp/<name>, and the
+    one-time file links at /transfer/<token> (see transfer.py)."""
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
 
-    if services is None:
-        return mcp_app
-    return Starlette(
-        routes=[
-            Route("/mcp/{name}", services.endpoint, methods=["GET", "POST", "DELETE"]),
-            Mount("/", app=mcp_app),
-        ],
-        lifespan=mcp_app.lifespan,
-    )
+    from . import transfer
+
+    routes = [Route("/transfer/{token}", transfer.endpoint, methods=["GET", "PUT", "POST"])]
+    if services is not None:
+        routes.append(Route("/mcp/{name}", services.endpoint, methods=["GET", "POST", "DELETE"]))
+    routes.append(Mount("/", app=mcp_app))
+    return Starlette(routes=routes, lifespan=mcp_app.lifespan)
 
 
 # ---------------------------------------------------------------- testing a configuration

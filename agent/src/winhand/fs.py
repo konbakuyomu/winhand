@@ -122,6 +122,15 @@ def _replace_file_windows(target: str, replacement: str) -> bool:
     return bool(kernel32.ReplaceFileW(target, replacement, None, 0x2, None, None))  # IGNORE_MERGE_ERRORS
 
 
+def replace_with(temp: str, full: str) -> None:
+    """Move `temp` over `full`; on Windows the existing file's ACL and attributes are kept."""
+    if winenv.IS_WINDOWS and os.path.isfile(full) and _replace_file_windows(full, temp):
+        return
+    if not winenv.IS_WINDOWS and os.path.isfile(full):
+        shutil.copymode(full, temp)
+    os.replace(temp, full)
+
+
 def write_bytes_atomic(path: str, data: bytes, create_dirs: bool = True) -> str | None:
     """Write via a temporary file and a rename, so a crash never leaves half a file.
     Falls back to writing in place when another program holds the file open.
@@ -140,16 +149,12 @@ def write_bytes_atomic(path: str, data: bytes, create_dirs: bool = True) -> str 
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        if not winenv.IS_WINDOWS and os.path.isfile(full):
-            shutil.copymode(full, temp)  # keep an executable script executable
     except OSError:
         with open(full, "wb") as fh:  # e.g. no right to create files in the folder
             fh.write(data)
         return "written in place (could not create a temporary file next to it)"
     try:
-        if winenv.IS_WINDOWS and os.path.isfile(full) and _replace_file_windows(full, temp):
-            return None
-        os.replace(temp, full)
+        replace_with(temp, full)
         return None
     except OSError:
         with open(full, "wb") as fh:

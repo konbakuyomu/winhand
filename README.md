@@ -101,6 +101,18 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 - 设备令牌只保存在 Worker secret 里。
 - OAuth token 由中转校验，不会转发给电脑。
 - 授权页有防 CSRF 的一次性 handle 和绑定 cookie，并禁止被嵌入 iframe。
+- 电脑短暂掉线（winhand 重启或升级、网络切换）时，请求会先等它重连，默认最多 20 秒（变量 `AGENT_GRACE_S`），之后才报错。报错是带同一请求 id 的 JSON-RPC 错误，写明离线多久和可能原因，客户端会原样交给模型。
+- 一次性文件链接 `https://mcp.你的域名/t/<令牌>` 不走 OAuth，靠令牌本身授权：
+  - 令牌是 256 位随机数，只能用一次，默认 10 分钟内有效，最长 30 分钟；
+  - 目标路径和大小上限在签发时就固定了，上传可以要求 sha256 一致；
+  - 电脑上只在内存里保存令牌的哈希，winhand 重启后所有链接作废；
+  - 同一 IP 反复用无效令牌会被暂时拒绝。
+
+### 一次性文件链接（大文件、补丁）
+
+`fs_upload_url` / `fs_download_url` 发出一次性链接，模型在自己的沙箱里用 `curl -T 文件 链接` 上传、`curl -o 名字 链接` 下载，文件内容不经过对话。这样传 100 KB 的补丁只要几秒，不必再分段写 base64。传上来的补丁可以直接交给 `fs_apply_patch(root, patch_file=...)`：它会自动判断 `-p`，保留每个文件原来的编码和 CRLF，所有 hunk 都对得上才写入。
+
+要在 Claude Code 云端会话里用这个功能，得在云环境的网络设置里放行中转域名：打开会话标题栏的云环境菜单 → Edit → Network access，在 Allowed domains 里加上 `mcp.你的域名`，Allow package managers 保持勾选。中转更新后要重新执行 `npx wrangler deploy`。
 
 端到端测试（CI 中自动运行）：`relay/test/e2e.py` 在 `wrangler dev` 上模拟 claude.ai，走完注册 → 授权 → 换 token → 经隧道调用 MCP 工具的整个流程。
 
@@ -112,7 +124,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 一次性命令和进程 | `run`（约 45 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
 | 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
-| 文件交接 | `fs_send` `fs_write_bytes` `fs_pick`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
+| 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
 | 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
 

@@ -11,7 +11,7 @@ const protocol = stripTypeScriptTypes(source('protocol.ts')).replace(/^export /g
 const bridge = stripTypeScriptTypes(source('bridge.ts'))
   .replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, '').replace(/^export /gm, '');
 
-function harness() {
+function harness(env = {}) {
   const timers = new Map();
   let nextTimer = 1;
   class Socket {
@@ -34,6 +34,13 @@ function harness() {
     getWebSockets() { return this.sockets; },
     acceptWebSocket(ws) { this.sockets.push(ws); },
     setWebSocketAutoResponse(pair) { this.autoResponse = pair; },
+    stored: new Map(),
+    storage: {
+      async get(key) { return ctx.stored.get(key); },
+      async put(key, value) { ctx.stored.set(key, value); },
+      async delete(key) { return ctx.stored.delete(key); },
+    },
+    waitUntil(promise) { promise.catch(() => {}); },
   };
   function WorkerResponse(body, options) {
     if (options?.status === 101) return { status: 101, webSocket: options.webSocket };
@@ -45,20 +52,24 @@ function harness() {
     WebSocket: Socket,
     WebSocketPair: class { constructor() { this[0] = new Socket(); this[1] = new Socket(); } },
     WebSocketRequestResponsePair: class { constructor(request, response) { Object.assign(this, {request, response}); } },
-    Response: WorkerResponse, Headers, URL, Request, TransformStream, Uint8Array, crypto: webcrypto, atob, btoa,
+    Response: WorkerResponse, Headers, URL, Request, TransformStream, Uint8Array, TextDecoder, crypto: webcrypto, atob, btoa,
     setTimeout(fn, ms) { const id = nextTimer++; timers.set(id, {fn, ms}); return id; },
     clearTimeout(id) { timers.delete(id); },
   };
   vm.createContext(sandbox);
   vm.runInContext(protocol + '\n' + bridge + '\nglobalThis.BridgeClass = Bridge;', sandbox);
-  const object = new sandbox.BridgeClass(ctx, {});
-  return {ctx, object, Socket, timers, recreate: () => new sandbox.BridgeClass(ctx, {})};
+  const object = new sandbox.BridgeClass(ctx, env);
+  return {ctx, object, Socket, timers, recreate: () => new sandbox.BridgeClass(ctx, env)};
 }
+
+// The request reaches the socket after the body is read and the agent is found.
+const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
 
 const request = (options = {}) => new Request('https://offline.invalid/mcp', {method: 'POST', ...options});
 const message = (object, ws, frame) => object.webSocketMessage(ws, JSON.stringify(frame));
 
 async function complete(h, socket, pending, content = 'ok') {
+  await settle();
   const id = socket.sent.findLast(f => f.type === 'req').id;
   await message(h.object, socket, { type: 'head', id, status: 200, headers: [] });
   const response = await pending;
@@ -124,6 +135,7 @@ test('a response from another connection cannot satisfy a current request', asyn
   const h = harness(), old = new h.Socket(), current = new h.Socket();
   h.ctx.sockets = [current];
   const response = h.object.fetch(request());
+  await settle();
   const id = current.sent[0].id;
   await message(h.object, old, {type: 'head', id, status: 200, headers: []});
   assert.equal(h.object.pending.get(id).started, false);
@@ -168,6 +180,7 @@ test('SSE abort cancels its captured socket even if another socket is selected',
   h.ctx.sockets = [original];
   const abort = new AbortController();
   const pending = h.object.fetch(request({signal: abort.signal}));
+  await settle();
   const id = original.sent.findLast(f => f.type === 'req').id;
   await message(h.object, original, {type: 'head', id, status: 200, headers: [['content-type', 'text/event-stream']]});
   const response = await pending;
@@ -184,9 +197,55 @@ test('SSE abort cancels its captured socket even if another socket is selected',
 test('head timeout remains per request, with no socket close', async () => {
   const h = harness(), socket = new h.Socket(); h.ctx.sockets = [socket];
   const response = h.object.fetch(request());
+  await settle();
   const timer = [...h.timers.values()][0];
   assert.equal(timer.ms, 120_000);
   timer.fn();
   assert.equal((await response).status, 504);
   assert.equal(socket.closes.length, 0);
+});
+
+const rpc = (id) => request({body: JSON.stringify({jsonrpc: '2.0', id, method: 'tools/call', params: {}})});
+
+test('a call made while the PC is away waits for it to reconnect', async () => {
+  const h = harness();
+  const response = h.object.fetch(rpc(7));
+  await settle();
+  const grace = [...h.timers.values()][0];
+  assert.equal(grace.ms, 20_000);
+  await h.object.fetch(new Request('https://offline.invalid/connect', {headers: {Upgrade: 'websocket'}}));
+  const socket = h.ctx.sockets[0];
+  await message(h.object, socket, {type: 'hello', hostname: 'pc'});
+  assert.equal(socket.attachment.active, true);
+  assert.equal(socket.attachment.hostname, 'pc');
+  await complete(h, socket, response);
+});
+
+test('a call that outlasts the grace period gets a JSON-RPC error and the offline time', async () => {
+  const h = harness({AGENT_GRACE_S: '5'}), socket = new h.Socket();
+  h.ctx.sockets = [socket];
+  await h.object.webSocketClose(socket, 1006, 'gone');
+  socket.readyState = 3;
+  const since = h.ctx.stored.get('offlineSince');
+  assert.equal(typeof since, 'number');
+  const response = h.object.fetch(rpc(7));
+  await settle();
+  const grace = [...h.timers.values()][0];
+  assert.equal(grace.ms, 5_000);
+  grace.fn();
+  const answer = await response;
+  assert.equal(answer.status, 200);
+  const body = await answer.json();
+  assert.equal(body.id, 7);
+  assert.match(body.error.message, /offline since .* waited 5 s/);
+  const status = await (await h.object.fetch(new Request('https://offline.invalid/status'))).json();
+  assert.equal(status.offlineSince, since);
+});
+
+test('a replaced connection closing does not mark the PC offline', async () => {
+  const h = await replacement();
+  await h.object.webSocketClose(h.old, 4000, 'replaced by a new agent connection');
+  assert.equal(h.ctx.stored.has('offlineSince'), false);
+  await h.object.webSocketClose(h.current, 1006, 'gone');
+  assert.equal(typeof h.ctx.stored.get('offlineSince'), 'number');
 });
