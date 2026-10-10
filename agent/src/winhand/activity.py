@@ -51,6 +51,8 @@ def summarize(result: Any) -> str:
         if data.get("error"):
             return str(data["error"])[:PREVIEW_CHARS]
         parts = []
+        if data.get("still_running"):
+            parts.append(f"still_running id={data.get('id')}")
         for key in ("state", "exit_code", "condition", "path"):
             if key in data and data[key] is not None:
                 parts.append(f"{key}={data[key]}")
