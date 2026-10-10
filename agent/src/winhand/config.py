@@ -22,7 +22,14 @@ patterns = ['sk-[A-Za-z0-9]{20,}']
 ssh_hosts = true                   # every HostName in ~/.ssh/config (and its Include files)
 files = ['%LOCALAPPDATA%\\vps-fleet\\secrets\\*.env']   # values of KEY=VALUE lines
 ipv4 = false                       # every IPv4 address except loopback
+
+[context]                          # what context() reads (see workspace.py); all optional
+rules = ['~/.codex/AGENTS.md', '~/.claude/CLAUDE.md']   # global rule files ([] = none)
+skills = ['~/.agents/skills', '~/.claude/skills', '~/.codex/skills']
+stdio_hint = false                 # also point stdio clients at context() in the instructions
 ```
+
+Guard rules live in their own file, ~/.winhand/guards.toml (see guard.py).
 """
 
 from __future__ import annotations
@@ -103,6 +110,8 @@ class Config:
     raw: dict = field(default_factory=dict)
     # [redact]: values masked in everything handed back to the model (see redact.py)
     redact: dict = field(default_factory=dict)
+    # [context]: where context() looks for rules and skills, and the stdio hint (see workspace.py)
+    context: dict = field(default_factory=dict)
 
 
 def load(path: Path | None = None) -> Config:
@@ -121,12 +130,14 @@ def load(path: Path | None = None) -> Config:
             servers.append(entry_from_dict(name, entry))
     relay = raw.get("relay", {})
     redact = raw.get("redact") if isinstance(raw.get("redact"), dict) else {}
+    context = raw.get("context") if isinstance(raw.get("context"), dict) else {}
     return Config(
         servers=servers,
         relay_url=relay.get("url"),
         device_token=relay.get("device_token"),
         raw=raw,
         redact=dict(redact),
+        context=dict(context),
     )
 
 
@@ -168,6 +179,11 @@ def save(cfg: Config, path: Path | None = None) -> Path:
     if cfg.redact:
         lines.append("[redact]")
         for key, value in cfg.redact.items():
+            lines.append(f"{_key(key)} = {_toml_value(value)}")
+        lines.append("")
+    if cfg.context:
+        lines.append("[context]")
+        for key, value in cfg.context.items():
             lines.append(f"{_key(key)} = {_toml_value(value)}")
         lines.append("")
     for s in cfg.servers:

@@ -127,6 +127,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
+| 本机规则 | `context`：这台电脑写给 AI 的规矩（全局规则文件、项目根到当前目录的 AGENTS.md）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务，见[本机规则与守卫](#本机规则与守卫) |
 | 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
 
 `run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义；只给 `command` 时整行交给 PowerShell 执行。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
@@ -165,6 +166,85 @@ ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 `secret_prompt` 收下的值也会自动遮挡。为了防止把占位符写回文件、冲掉真实值，`fs_write`、`fs_edit`、`fs_apply_patch` 和 `run` 会拒绝含有 `«redacted:` 的内容。本机其他 MCP 服务（`/mcp/<名称>`）不经过脱敏。
 
 短暂断网后，agent 会重连，本机仍存活的会话继续运行。连接恢复时先用 `history` 看刚才的调用是否已经执行（带 run id 和退出码），再用 `session_list` 找原会话，再用 `session_read(since=上次实际收到的 cursor)` 补读；游标未知时可从 `since=0` 开始。丢失回复不能证明操作失败，不要直接重发原命令。agent 进程重启属于另一种情况：交互会话不会自动恢复；需要跨 agent 重启继续的非交互工作用 `job_start`，之后以 `job_status` 查询。
+
+## 本机规则与守卫
+
+任何客户端连上 winhand，都能读到这台电脑写好的规矩和技能，并受这台电脑上的规则约束。这一层与客户端无关，只用标准 MCP；没写规则时什么都不拦。
+
+### context：规矩和技能
+
+`context(path)` 返回以下内容：
+
+- **全局规则文件**：默认读已存在的 `~/.codex/AGENTS.md` 和 `~/.claude/CLAUDE.md`；
+- **项目规矩**：项目根（最近的 `.git` 所在目录）到 `path` 沿途的每份 `AGENTS.md`；
+- **技能列表**：名称、描述、SKILL.md 路径。默认扫 `~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`，以及项目里的 `.agents/skills`、`.claude/skills`，同名时项目优先；
+- 对该目录生效的守卫规则；
+- 本机 MCP 服务。
+
+文件都是现读的，改完规矩下一次调用就生效。模型按技能描述挑中后，用 `fs_read` 读 SKILL.md，脚本用 `run` 在这台电脑上执行。输出经过脱敏，超出约 6 万字符时截断，并给出用 `fs_read` 接着读的方法。
+
+instructions 会提醒模型：开始在某个目录工作前，以及上下文被压缩后，调用 `context`。经中转和 `winhand http` 连接的客户端会看到这句提醒；本机 stdio 客户端默认不显示，因为它们自己会读规则。读哪些文件可以在 `config.toml` 里改：
+
+```toml
+[context]
+rules = ['~/.codex/AGENTS.md', '~/.claude/CLAUDE.md']   # [] = 不读全局规则文件
+skills = ['~/.agents/skills', '~/.claude/skills', '~/.codex/skills']
+stdio_hint = false    # true：本机 stdio 客户端也显示 context 提醒
+```
+
+Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructions 只放要点，完整指南由 `help()` 返回。
+
+### 守卫：动作前先看规则
+
+会读写这台电脑的调用，执行前都会被描述成一个“动作”，按规则裁决。经 `call()` 转发的调用也一样。
+
+| 动作 | 来自 |
+|---|---|
+| `command` | `run`、`job_start`、`session_start`、`remote_run`（`host` 为远程主机） |
+| `input` | 在 shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里执行的每一行；gdb、串口等会话不检查 |
+| `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`fs_op` 的 copy 目标和 mkdir |
+| `edit` | `fs_edit`、`fs_apply_patch`（补丁涉及的每个文件） |
+| `delete` / `move` | `fs_op` |
+| `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_op` 的 copy 来源 |
+
+规则写在 `~/.winhand/guards.toml`（全局），或项目目录下的 `.winhand/guards.toml`（只管该目录及子目录）。winhand 不自带任何规则，下面是示例：
+
+```toml
+[[guard]]
+on = ["command", "input"]
+match = '(?i)(\brm\s+-\w*r\w*f|Remove-Item\b.*-Recurse|\brd\s+/s|\brmdir\s+/s|\bdel\s+/s)'
+decision = "deny"
+reason = "禁止批量删除：一次只删一个明确路径的文件，或请用户手动删除"
+
+[[guard]]
+on = "read"
+path = ["**/.env", "**/.env.*", "**/secrets/**"]
+decision = "deny"
+
+[[guard]]
+on = "delete"
+decision = "ask"          # 在电脑上弹窗确认
+reason = "删除前先问我"
+timeout_s = 120
+
+[[guard]]
+on = "edit"
+path = ["**/*.c", "**/*.h"]
+decision = "note"         # 照常执行，结果里附上这句提醒
+reason = "改完记得跑单元测试"
+```
+
+- **字段**：
+  - `on`：动作类型；
+  - `match`：在命令行或输入的这一行里搜索的正则；
+  - `path`：glob 列表，支持 `**`，Windows 上不区分大小写。项目文件里的相对模式以该项目目录为基准；全局文件里的相对模式匹配任意位置（`*.pem` 等于 `**/*.pem`）；
+  - `decision`：`deny`、`ask` 或 `note`；
+  - `reason`：拒绝、确认或提醒时显示的说明；
+  - `timeout_s`：ask 等待确认的秒数，默认 120。
+- **裁决**：deny 优先于 ask，ask 优先于 note。没有 allow，所以项目规则只能增加限制，不能放宽全局规则。
+- **拒绝**：工具不执行，以工具错误返回，写明规则文件、第几条和理由。这次调用仍出现在 `history` 和桌面端时间线里。
+- **请人确认**：在电脑上弹出确认框。没人应答、点“否”或弹不出窗口，都不执行。
+- **规则文件写错**：解析失败、字段不认识、正则写错时，这个文件管辖的动作一律拒绝，错误里写明文件和位置；改好后下一次调用即恢复。
 
 ## 本机的其他 MCP 服务
 

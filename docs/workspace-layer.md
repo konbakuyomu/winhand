@@ -135,7 +135,7 @@ MCP 看不到三个时机：**用户发消息**、**回答结束**、**上下文
 
 ## 实施顺序
 
-1. **P0**：GUIDE 压到 4096 字符以内；守卫中间件和动作描述；`guards.toml`；`context()` 支持通用标准（`AGENTS.md`、`SKILL.md`）。
+1. **P0**（已实现，change `workspace-guard-context`，见 README“本机规则与守卫”）：GUIDE 压到 4096 字符以内；守卫中间件和动作描述；`guards.toml`；`context()` 支持通用标准（`AGENTS.md`、`SKILL.md`）。
 2. **P1**：Claude Code 和 Codex 适配（规矩、技能、hooks、信任）；交互式会话的输入过守卫。
 3. **P2**：生命周期桥，以及各客户端的配置生成。
 4. **P3**：resources 和 prompts 出口；跟随本机 MCP 配置；可选导出到 GitHub。

@@ -127,14 +127,15 @@ Scenario: (A7) call 转发同样受约束
 ### R9 交互式会话的输入
 
 - `session_send` 带 `submit=true` 时，发送的文字视为一整行，产生 `input` 动作：`text` 为这一行，`cwd` 为会话的工作目录。
+- 文字中含换行时，每个以换行结束的行同样会被执行，因此各自产生一个 `input` 动作；不带 `submit` 时，最后一段没有换行的文字只是输入、不会执行，不检查。
 - 只对 shell 类会话生效。判定条件：profile 为 `shell` 或 `ssh`，或程序名（去掉路径和扩展名）是 pwsh、powershell、cmd、bash、sh、zsh 之一。
 - 其他会话（gdb、串口、python 等）以及只发按键的调用不产生动作。
 - 被拒绝时这一行不发给程序，会话状态不变。
 
 Scenario: (A8) shell 会话里的命令也受约束
 - 设置：一条 `on = "input"` 的规则，`match` 能匹配 `rm -rf`；
-- 操作：在 shell 类会话中 `session_send(text="rm -rf /tmp/x", submit=true)`；在非 shell 会话中发送同样的文字；
-- 结果：前者被拒绝，程序没有收到这一行；后者照常发送。
+- 操作：在 shell 类会话中 `session_send(text="rm -rf /tmp/x", submit=true)`，再发送不带 `submit`、但以换行结尾的 `"rm -rf /tmp/y\n"`；在非 shell 会话中发送同样的文字；
+- 结果：shell 会话里两次都被拒绝，程序没有收到这些行；非 shell 会话照常发送。
 
 ### R10 规则文件出错
 

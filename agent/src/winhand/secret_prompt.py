@@ -2,7 +2,8 @@
 
 - a masked prompt for a secret: whatever is typed goes straight into the session and is never
   returned to the model;
-- a file/folder picker, so the person chooses what to hand over ("upload") to the AI.
+- a file/folder picker, so the person chooses what to hand over ("upload") to the AI;
+- a yes/no question, when a guard rule wants the person's OK before an action (guard.py).
 
 Each dialog runs in a short-lived child process (tkinter), the frozen winhand.exe included.
 """
@@ -40,6 +41,14 @@ def dialog_main(payload: str) -> int:
             value = filedialog.askopenfilename(**options) or None
         sys.stdout.write(json.dumps({"value": value}, ensure_ascii=False))
         return 0
+    if isinstance(request, dict) and request.get("kind") == "confirm":
+        from tkinter import messagebox
+
+        value = messagebox.askyesno(
+            request.get("title") or "winhand", request.get("message") or "", icon="warning", parent=root
+        )
+        sys.stdout.write(json.dumps({"value": bool(value)}))
+        return 0
     title, message = request
     value = simpledialog.askstring(title, message, show="*", parent=root)
     sys.stdout.write(json.dumps({"value": value}))
@@ -70,6 +79,13 @@ def ask_pick(title: str, mode: str = "file", initial: str | None = None, timeout
         {"kind": "pick", "title": title, "mode": mode, "initial": initial}, ensure_ascii=False
     )
     return _run_dialog(payload, timeout_s)
+
+
+def ask_confirm(title: str, message: str, timeout_s: float = 120) -> bool:
+    """True if the person clicked Yes, False for No; PromptUnavailable if nobody answered in time
+    or no dialog can be shown here."""
+    payload = json.dumps({"kind": "confirm", "title": title, "message": message}, ensure_ascii=False)
+    return bool(_run_dialog(payload, timeout_s))
 
 
 def _run_dialog(payload: str, timeout_s: float):

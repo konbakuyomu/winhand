@@ -26,9 +26,11 @@ from . import (
     tools_desktop,
     transfer,
     winenv,
+    workspace,
 )
 from .config import Config
 from .config import load as load_config
+from .guard import GuardActions
 from .history import RecentCalls
 from .proc import split_command
 from .redact import RedactOutput
@@ -38,7 +40,7 @@ from .session.session import TRANSPORTS
 from .session.wait import MAX_WAIT_S
 from .tools_desktop import media_result
 
-GUIDE = """\
+GUIDE_FULL = """\
 winhand drives the Windows machine it runs on.
 
 Quick rules
@@ -107,7 +109,63 @@ Quick rules
   started): call(tool, arguments) reaches every current tool; help() lists them.
 - Local MCP servers (pyocd-debug, usb-camera ...) are not tools here: each one configured in the
   winhand app is its own MCP endpoint at <relay>/mcp/<name>, added as a separate connector.
+- The machine's owner may have written rules and skills for agents: before working in a folder, and
+  again after the conversation is compacted, call context(path=<that folder>) and follow what it
+  returns. Calls that read or change the machine are checked against the owner's guard rules
+  (~/.winhand/guards.toml, <project>/.winhand/guards.toml): a refusal, or a call held until the person
+  at the machine says yes, is the owner's wish; do not work around it.
 """
+
+# What a client shows the model when it connects. Claude Code keeps only the first 4096 characters
+# of a server's instructions, so this is the essentials; help() returns GUIDE_FULL.
+GUIDE = """\
+winhand drives the Windows machine it runs on. help() has the full guide: read it once.
+
+- One-shot command that finishes by itself -> `run`:
+    run(command='git', args=['log', '-3'])   program + args, no shell, no quoting problems
+    run(script='...', shell='pwsh')           multi-line script (pwsh | powershell | cmd | python | bash
+                                              | wsl) written to a file: $vars, quotes, Chinese arrive as is
+    run(command='...')                        one command line for PowerShell
+  Never nest `powershell -Command "..."` in a command line; use script= or args=. `run` answers within
+  ~45 s; if still going you get `still_running` + an id, and job_status(id, since=cursor, wait_s=40)
+  waits for the rest. Never sleep or poll in a loop.
+- Interactive, long-running or stateful programs (shells, REPLs, gdb, gdbserver, installers, serial or
+  telnet consoles, full-screen TUIs) -> a session: session_start -> session_send / session_wait ->
+  session_read / session_screen -> session_stop. profile_list knows common tools (gdb, pyocd, openocd,
+  jlink, serial, ssh, menuconfig ...).
+- Session results carry `state` + `reason` + `next`: running | awaiting_input | needs_user | idle |
+  blocked | exited. `needs_user` is a password, code or browser sign-in: never invent it; give URLs to
+  the person or call session_prompt_user. session_wait waits on several sessions at once; a timeout is
+  not a failure, call it again (already returned output is not repeated).
+- A token or password that must be stored here: secret_prompt(message, save_to=...) asks the person in
+  a masked dialog; you never see it. «redacted:…» marks masked values: never write them back to a file.
+- Files: fs_read / fs_edit / fs_write / fs_search / fs_find / fs_list / fs_stat / fs_op / fs_apply_patch;
+  prefer them to shell commands. Moving more than a few KB between your sandbox and this machine:
+  fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
+- Full-screen programs (menuconfig, htop, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
+  then session_screen; `highlighted` shows the selected row.
+- The desktop: take a screenshot yourself instead of asking the person for one; operate programs with ui
+  (controls by name) or input (mouse and keys).
+- job_start runs PowerShell in the background, independent of winhand (long work, anything that
+  restarts winhand, elevated=true for admin tasks); follow it with job_status(id, wait_s=40).
+- Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the
+  usual suspects with fixes. A tool missing from your list: call(tool, arguments) reaches it.
+- After a connection error, call history() before resending anything.
+"""
+
+GUIDE_CONTEXT = """\
+- The machine's owner may have written rules and skills for agents: before working in a folder, and
+  again after the conversation is compacted, call context(path=<that folder>) and follow what it
+  returns. A call refused, or held until the person at the machine says yes, by the owner's guard
+  rules is their wish: do not work around it.
+"""
+
+
+def instructions(cfg: Config, local_stdio: bool = False) -> str:
+    """The instructions for this entry point: stdio clients on this machine read their own rules,
+    so they get the context() hint only when [context] stdio_hint is set."""
+    hint = not local_stdio or bool((cfg.context or {}).get("stdio_hint"))
+    return GUIDE + GUIDE_CONTEXT if hint else GUIDE
 
 
 def _text(value: str) -> TextContent:
@@ -130,14 +188,18 @@ def _spec_from_args(transport: str, command: list[str] | str | None, **kw: Any) 
     return SessionSpec(transport=transport, argv=argv, **{k: v for k, v in kw.items() if v is not None})
 
 
-def build_server(cfg: Config | None = None, manager: SessionManager | None = None) -> FastMCP:
+def build_server(
+    cfg: Config | None = None, manager: SessionManager | None = None, *, local_stdio: bool = False
+) -> FastMCP:
     cfg = cfg if cfg is not None else load_config()
     sessions = manager or SessionManager()
-    mcp = FastMCP("winhand", instructions=GUIDE, version=__version__)
+    mcp = FastMCP("winhand", instructions=instructions(cfg, local_stdio), version=__version__)
     local_servers = [s.name for s in cfg.servers if s.enabled]
     recent = RecentCalls()
     mcp.add_middleware(recent)
     mcp.add_middleware(RedactOutput())  # inside RecentCalls: history only ever sees masked results
+    # innermost: a refusal is masked and recorded like any result; call() runs through it again
+    mcp.add_middleware(GuardActions(sessions))
 
     async def _progress(ctx: Context | None):
         if ctx is None:
@@ -158,7 +220,7 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         """How to use winhand well (read once at the start)."""
         names = sorted(t.name for t in await mcp.list_tools())
         return (
-            GUIDE
+            GUIDE_FULL
             + f"\nTools on this machine (winhand {__version__}): {', '.join(names)}\n"
             + "If one of them is missing from your own tool list (your client loaded the list when the "
             "conversation started, before winhand was updated), reach it with call(tool, arguments).\n"
@@ -198,6 +260,21 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             "note": "each is its own MCP endpoint at <relay>/mcp/<name>; add it as a separate connector",
         }
         return info
+
+    @mcp.tool
+    async def context(
+        path: Annotated[
+            str | None,
+            Field(
+                description="The folder (or a file in it) you are about to work in; omit for the machine-wide part"
+            ),
+        ] = None,
+    ) -> dict:
+        """This machine's rules and skills for agents: the owner's global rule files, every AGENTS.md
+        from the project root down to `path`, the skills here (read a SKILL.md with fs_read when one
+        fits), the guard rules in force and the local MCP servers. Call it before working in a folder
+        and again after the conversation is compacted."""
+        return await asyncio.to_thread(workspace.context, cfg, path)
 
     # ------------------------------------------------------------ processes
 
