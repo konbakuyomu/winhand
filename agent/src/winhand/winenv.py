@@ -24,7 +24,13 @@ _QUIET_DEFAULTS = {
     "PAGER": "cat",
     "MANPAGER": "cat",
     "LESS": "-FRX",
+    # output arrives as it is printed, so a command still running at the 45 s answer shows progress
+    "PYTHONUNBUFFERED": "1",
 }
+# Only when no terminal renders the output: colour codes are noise in text handed to a model.
+_PLAIN_DEFAULTS = {"NO_COLOR": "1"}
+# Ask localised tools (dotnet, MSBuild, Visual Studio) for English messages.
+ENGLISH = {"DOTNET_CLI_UI_LANGUAGE": "en", "VSLANG": "1033", "LANGUAGE": "en"}
 
 
 def build_env(extra: dict[str, str] | None = None, *, terminal: bool = False) -> dict[str, str]:
@@ -52,6 +58,9 @@ def build_env(extra: dict[str, str] | None = None, *, terminal: bool = False) ->
         env.setdefault("TERM", "xterm-256color")
     for key, value in _QUIET_DEFAULTS.items():
         env.setdefault(key, value)
+    if not terminal:
+        for key, value in _PLAIN_DEFAULTS.items():
+            env.setdefault(key, value)
     if extra:
         env.update({str(k): str(v) for k, v in extra.items()})
     return env

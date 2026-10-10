@@ -109,18 +109,22 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 分组 | 工具 |
 |---|---|
 | 会话 | `session_start` `session_send` `session_wait` `session_read` `session_screen` `session_list` `session_stop` `session_resize` `session_prompt_user` `profile_list` |
-| 一次性命令和进程 | `run`（约 45 秒内一定回复；没跑完的命令继续运行，用 `job_status` 取后续输出）`proc_list` `proc_kill` `sys_info` |
-| 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_search` `fs_stat` |
+| 一次性命令和进程 | `run`（约 45 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`proc_list` `proc_kill` `sys_info` |
+| 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
 | 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
-| 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用） |
+| 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
+
+`run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义；只给 `command` 时整行交给 PowerShell 执行。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
+
+`job_status` 的 `wait_s`（最多 40 秒）和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容。`fs_op` 删除默认进回收站。
 
 截图和图片按大小预算编码（PNG，过大时改用 JPEG 并逐步缩小），保证能通过客户端的结果大小限制；原始分辨率的截图同时保存在本机（结果里的 `original_file`），需要看清细节时用 `fs_read` 加 `region` 放大那一块。
 
 `ui` 的操作只执行一次，之后回读控件状态；`verified=true` 表示可观察状态符合预期，`false` 表示未达到，`null` 表示无法确认。填写内容、切换勾选、选择、展开和聚焦可以按控件支持的状态核验；普通按钮被点击不代表它触发的工作已经完成，还应检查结果窗口。`verify_wait_s` 默认 3 秒，最多 10 秒，用于等待回读状态改变。
 
-短暂断网后，agent 会重连，本机仍存活的会话继续运行。连接恢复时先用 `session_list` 找原会话，再用 `session_read(since=上次实际收到的 cursor)` 补读；游标未知时可从 `since=0` 开始。丢失回复不能证明操作失败，不要直接重发原命令。agent 进程重启属于另一种情况：交互会话不会自动恢复；需要跨 agent 重启继续的非交互工作用 `job_start`，之后以 `job_status` 查询。
+短暂断网后，agent 会重连，本机仍存活的会话继续运行。连接恢复时先用 `history` 看刚才的调用是否已经执行（带 run id 和退出码），再用 `session_list` 找原会话，再用 `session_read(since=上次实际收到的 cursor)` 补读；游标未知时可从 `since=0` 开始。丢失回复不能证明操作失败，不要直接重发原命令。agent 进程重启属于另一种情况：交互会话不会自动恢复；需要跨 agent 重启继续的非交互工作用 `job_start`，之后以 `job_status` 查询。
 
 ## 本机的其他 MCP 服务
 

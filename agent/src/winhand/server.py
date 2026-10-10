@@ -11,11 +11,12 @@ from typing import Annotated, Any
 from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from . import __version__, fs, media, proc, profiles, tools_desktop, winenv
+from . import __version__, coalesce, fs, media, proc, profiles, tools_desktop, winenv
 from .config import Config
 from .config import load as load_config
+from .history import RecentCalls
 from .proc import split_command
 from .secret_prompt import PromptUnavailable, ask_secret
 from .session import SessionManager, SessionSpec, TransportError, wait_for
@@ -27,9 +28,18 @@ GUIDE = """\
 winhand drives the Windows machine it runs on.
 
 Quick rules
-- One-shot command that finishes by itself -> `run` (no shell quoting issues when you pass `args`).
+- One-shot command that finishes by itself -> `run`:
+    run(command='git', args=['log', '-3'])        program + args, no shell, no quoting problems
+    run(script='...', shell='pwsh')                a multi-line script (pwsh | powershell | cmd |
+                                                   python | bash | wsl), written to a file, so $vars,
+                                                   quotes and Chinese text arrive exactly as written
+    run(command='...')                             one command line for PowerShell
+  Never put `powershell -Command "..."` inside a command line: the outer PowerShell expands its
+  $variables first. Use script= or args= instead. Output comes back as clean UTF-8 text.
   `run` answers within ~45 s; a command still going then comes back with `still_running` and an id:
-  it keeps running, and job_status(id) returns the rest and its exit code.
+  it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code.
+  Never sleep or poll in a loop to wait: job_status(wait_s=40, patterns=[...]) does it.
+- Scripts for another machine over SSH: run(command='ssh', args=[host, 'bash -s'], stdin=script).
 - Anything interactive, long-running or stateful (shells, REPLs, debuggers, gdbserver, installers,
   serial/telnet consoles, full-screen TUIs) -> a session:
     session_start -> session_send / session_wait -> session_read / session_screen -> session_stop
@@ -39,13 +49,18 @@ Quick rules
   or call session_prompt_user so they type a secret into a masked dialog on the machine.
 - session_wait ORs its conditions across several sessions at once (e.g. gdb prompt OR serial "PANIC").
   A timeout is not a failure: call it again to keep waiting; already-returned output is not repeated.
-- After a connection error, check session_list and session_read(since=the last cursor you received)
-  before resending anything. The original command may still be running; a lost reply is not failure.
+  One wait at a time is enough: identical parallel waits share one answer.
+- After a connection error, call history() before resending anything: it shows whether your call
+  ran, its run id and exit code. For sessions also session_read(since=the last cursor you received).
 - Full-screen programs (menuconfig, htop, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
   then session_screen; `highlighted` shows the selected row.
 - Profiles (profile_list) know prompts, exit commands and quirks of common tools: gdb, pyocd-gdbserver,
   pyocd-commander, openocd, jlink, rtthread-msh, serial, telnet, menuconfig, python, shell.
-- Files: fs_read (numbered) / fs_edit (exact replace) / fs_write / fs_search / fs_list / fs_stat.
+- Files: fs_read (numbered; tail=N for logs) / fs_edit (exact replace, several edits at once) /
+  fs_write / fs_search (content) / fs_find (names) / fs_list (sort='mtime', newer_than='2h') /
+  fs_stat (hash='sha256') / fs_op (copy, move, delete to the Recycle Bin, mkdir).
+  Prefer these over shell commands for files. fs_read returns sha256: pass it as expected_sha256
+  to fs_write/fs_edit when someone else may change the file meanwhile.
   fs_read also shows images and reads PDF (scans as page images), Word, PowerPoint and Excel.
   fs_send hands any file to you as-is; fs_write_bytes writes binary content here;
   fs_pick lets the person choose files in a dialog (their way to "upload" to you).
@@ -58,7 +73,7 @@ Quick rules
   inspecting the result. A button being invoked does not prove its task finished; do not blindly retry.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
-  follow it with job_status.
+  follow it with job_status(id, wait_s=40).
 - A tool named here but missing from your tool list (winhand was updated after the conversation
   started): call(tool, arguments) reaches every current tool; help() lists them.
 - Local MCP servers (pyocd-debug, usb-camera ...) are not tools here: each one configured in the
@@ -73,6 +88,12 @@ def _text(value: str) -> TextContent:
 Ids = Annotated[list[str] | str, Field(description="Session id, or a list of ids to watch together")]
 
 
+class Edit(BaseModel):
+    old: str
+    new: str
+    replace_all: bool = False
+
+
 def _spec_from_args(transport: str, command: list[str] | str | None, **kw: Any) -> SessionSpec:
     if transport not in TRANSPORTS:
         raise ValueError(f"transport must be one of {TRANSPORTS}")
@@ -85,6 +106,8 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
     sessions = manager or SessionManager()
     mcp = FastMCP("winhand", instructions=GUIDE, version=__version__)
     local_servers = [s.name for s in cfg.servers if s.enabled]
+    recent = RecentCalls()
+    mcp.add_middleware(recent)
 
     async def _progress(ctx: Context | None):
         if ctx is None:
@@ -143,8 +166,11 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
     @mcp.tool
     async def run(
         command: Annotated[
-            str, Field(description="Program name (with `args`) or a full shell command line (without `args`)")
-        ],
+            str | None,
+            Field(
+                description="Program name (with `args`) or one command line for PowerShell (without `args`)"
+            ),
+        ] = None,
         args: Annotated[
             list[str] | None, Field(description="Arguments passed verbatim, no shell involved")
         ] = None,
@@ -155,12 +181,33 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         ] = 120,
         env: dict[str, str] | None = None,
         stdin: Annotated[str | None, Field(description="Text piped to stdin")] = None,
+        script: Annotated[
+            str | None,
+            Field(
+                description="A multi-line script to run instead of `command`: written to a file and run "
+                "by `shell`, so quotes, $variables and non-ASCII text need no escaping"
+            ),
+        ] = None,
+        shell: Annotated[
+            str | None,
+            Field(
+                description="For script: pwsh (default) | powershell | cmd | python | bash (Git Bash) | wsl"
+            ),
+        ] = None,
+        raw: Annotated[bool, Field(description="Keep ANSI colour codes in the output")] = False,
+        lang: Annotated[
+            str | None, Field(description="'en': ask dotnet/MSBuild/Visual Studio for English messages")
+        ] = None,
     ) -> dict:
-        """Run a command to completion and return exit code, stdout and stderr. Answers within about
-        45 s: if the command is still going then, the answer has `still_running` and an id, the
-        command keeps running, and job_status(id) returns the rest.
+        """Run a command or script to completion and return exit code, stdout and stderr. Answers
+        within about 45 s: if it is still going then, the answer has `still_running` and an id, it
+        keeps running, and job_status(id, wait_s=40) waits for the rest.
         Use a session instead for anything interactive or that must keep running."""
-        return await asyncio.to_thread(proc.run, command, args, cwd, timeout_s, env, stdin)
+        return await asyncio.to_thread(
+            lambda: proc.run(
+                command, args, cwd, timeout_s, env, stdin, script=script, shell=shell, raw=raw, lang=lang
+            )
+        )
 
     @mcp.tool
     async def proc_list(
@@ -220,9 +267,16 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         startup_wait_s: Annotated[
             float, Field(description="How long to wait for the program to settle")
         ] = 15,
+        lang: Annotated[
+            str | None, Field(description="'en': ask dotnet/MSBuild/Visual Studio for English messages")
+        ] = None,
     ) -> dict:
         """Start an interactive session (process in a real terminal, plain pipes, serial port or TCP socket),
         wait until it settles and return its first output and state."""
+        if lang:
+            if lang.lower() != "en":
+                return {"error": "lang supports 'en'"}
+            env = {**winenv.ENGLISH, **(env or {})}
         overrides = dict(
             transport=None if profile else transport,
             cwd=cwd,
@@ -374,22 +428,31 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         with no condition it waits for a prompt, a request for the user, or exit. `needs_user` and exit
         always end the wait. Returns which session/condition fired plus each session's new output and state."""
         id_list = [ids] if isinstance(ids, str) else list(ids)
-        try:
-            return await wait_for(
-                sessions,
-                id_list,
-                patterns=patterns,
-                ignore_case=ignore_case,
-                states=states,
-                quiet_ms=quiet_ms,
-                screen_stable_ms=screen_stable_ms,
-                min_chars=min_chars,
-                timeout_s=timeout_s,
-                include_screen=include_screen,
-                progress=await _progress(ctx),
-            )
-        except (KeyError, ValueError) as exc:
-            return {"error": str(exc)}
+        key = coalesce.freeze(
+            ("session_wait", id_list, patterns, ignore_case, states, quiet_ms, screen_stable_ms, min_chars)
+            + (timeout_s, include_screen)
+        )
+        progress = await _progress(ctx)
+
+        async def wait() -> dict:
+            try:
+                return await wait_for(
+                    sessions,
+                    id_list,
+                    patterns=patterns,
+                    ignore_case=ignore_case,
+                    states=states,
+                    quiet_ms=quiet_ms,
+                    screen_stable_ms=screen_stable_ms,
+                    min_chars=min_chars,
+                    timeout_s=timeout_s,
+                    include_screen=include_screen,
+                    progress=progress,
+                )
+            except (KeyError, ValueError) as exc:
+                return {"error": str(exc)}
+
+        return await coalesce.shared(key, wait)
 
     @mcp.tool
     def session_read(
@@ -512,10 +575,15 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
             list[int] | None,
             Field(description="Image: only [left, top, width, height] of it, in the file's pixels (zoom in)"),
         ] = None,
+        tail: Annotated[int | None, Field(ge=1, description="Text: only the last N lines (logs)")] = None,
+        max_chars: Annotated[
+            int, Field(ge=1000, description="Text: stop adding lines past this many characters")
+        ] = fs.READ_MAX_CHARS,
     ):
-        """Read any file. Text: numbered lines (UTF-8/GBK/BOM detected). Images: returned as a
-        picture you can see. PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx): extracted text;
-        PDF pages without text (scans) come back as page images. Other binaries: use fs_send."""
+        """Read any file. Text: numbered lines (UTF-8/GBK/BOM detected) plus the file's sha256;
+        also logs another program is still writing. Images: returned as a picture you can see.
+        PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx): extracted text; PDF pages without
+        text (scans) come back as page images. Other binaries: use fs_send."""
         kind = media.kind_of(path)
         full = winenv.long_path(path)
         if kind in ("image", "document") and not os.path.isfile(full):
@@ -541,29 +609,86 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
                 "error": f"{Path(path).suffix} is the old binary Office format; open and save it as "
                 ".docx/.xlsx/.pptx (or convert with LibreOffice via run) to read it"
             }
-        return await asyncio.to_thread(_fs, fs.fs_read, path, offset, limit)
+        return await asyncio.to_thread(_fs, fs.fs_read, path, offset, limit, tail, max_chars)
 
     @mcp.tool
-    async def fs_write(path: str, content: str, encoding: str = "utf-8") -> dict:
-        """Create or overwrite a file (parent folders are created)."""
-        return await asyncio.to_thread(_fs, fs.fs_write, path, content, encoding)
+    async def fs_write(
+        path: str,
+        content: str,
+        encoding: str = "utf-8",
+        append: Annotated[bool, Field(description="Add to the end instead of replacing the file")] = False,
+        expected_sha256: Annotated[
+            str | None,
+            Field(
+                description="Only write if the file still has this sha256 (from fs_read); '' = must not exist"
+            ),
+        ] = None,
+    ) -> dict:
+        """Create or overwrite a file (parent folders are created). Replacing is atomic: a reader
+        never sees half a file. Returns the new sha256."""
+        return await asyncio.to_thread(
+            _fs, fs.fs_write, path, content, encoding, True, append, expected_sha256
+        )
 
     @mcp.tool
     async def fs_edit(
         path: str,
-        old: Annotated[str, Field(description="Exact text to replace (must be unique unless replace_all)")],
-        new: str,
+        old: Annotated[
+            str | None, Field(description="Exact text to replace (must be unique unless replace_all)")
+        ] = None,
+        new: str | None = None,
         replace_all: bool = False,
+        edits: Annotated[
+            list[Edit] | None,
+            Field(
+                description="Several replacements at once, applied in order: all succeed or none is written"
+            ),
+        ] = None,
+        expected_sha256: Annotated[
+            str | None, Field(description="Only edit if the file still has this sha256 (from fs_read)")
+        ] = None,
     ) -> dict:
-        """Replace an exact snippet in a file; keeps the file's encoding and CRLF/LF line endings."""
-        return await asyncio.to_thread(_fs, fs.fs_edit, path, old, new, replace_all)
+        """Replace exact snippets in a file; keeps the file's encoding and CRLF/LF line endings."""
+        ops = [e.model_dump() for e in edits] if edits else None
+        return await asyncio.to_thread(_fs, fs.fs_edit, path, old, new, replace_all, ops, expected_sha256)
 
     @mcp.tool
     async def fs_list(
-        path: str = ".", depth: int = 1, pattern: str | None = None, show_hidden: bool = False
+        path: str = ".",
+        depth: int = 1,
+        pattern: str | None = None,
+        show_hidden: bool = False,
+        sort: Annotated[
+            str, Field(description="name | mtime (newest first) | size (largest first)")
+        ] = "name",
+        newer_than: Annotated[
+            str | None, Field(description="Only entries changed since: '2h', '3d' or '2026-10-05 13:30'")
+        ] = None,
+        kind: Annotated[str, Field(description="all | file | dir")] = "all",
+        limit: int = 500,
     ) -> dict:
-        """List a directory (optionally recursive to `depth`, filtered by glob `pattern`)."""
-        return await asyncio.to_thread(_fs, fs.fs_list, path, depth, pattern, show_hidden)
+        """List a directory (optionally recursive to `depth`, filtered by glob `pattern`), with sizes
+        and modification times."""
+        return await asyncio.to_thread(
+            _fs, fs.fs_list, path, depth, pattern, show_hidden, limit, sort, newer_than, kind
+        )
+
+    @mcp.tool
+    async def fs_find(
+        name: Annotated[
+            str, Field(description="Glob (*.py, report-*.xlsx) or, without wildcards, text the name contains")
+        ],
+        path: str = ".",
+        max_depth: int | None = None,
+        kind: Annotated[str, Field(description="all | file | dir")] = "all",
+        newer_than: Annotated[
+            str | None, Field(description="Only entries changed since: '2h', '3d' or '2026-10-05 13:30'")
+        ] = None,
+        max_results: int = 200,
+    ) -> dict:
+        """Find files and folders by name below `path` (case-insensitive). Answers within ~35 s,
+        with what it found so far if the tree is huge (then narrow path or max_depth)."""
+        return await asyncio.to_thread(_fs, fs.fs_find, name, path, max_depth, kind, newer_than, max_results)
 
     @mcp.tool
     async def fs_search(
@@ -573,16 +698,59 @@ def build_server(cfg: Config | None = None, manager: SessionManager | None = Non
         ignore_case: bool = False,
         literal: bool = False,
         max_results: int = 200,
+        context: Annotated[int, Field(ge=0, le=20, description="Lines of context around each match")] = 0,
+        files_only: Annotated[bool, Field(description="Only list the files that match")] = False,
+        encoding: Annotated[
+            str | None, Field(description="Force the files' encoding, e.g. gbk (default: auto)")
+        ] = None,
     ) -> dict:
-        """Search file contents (ripgrep when available); returns path:line:text."""
+        """Search file contents (ripgrep when available); returns path:line:text. Answers within
+        ~35 s, with the matches found so far on very large trees."""
         return await asyncio.to_thread(
-            _fs, fs.fs_search, pattern, path, glob, ignore_case, literal, max_results
+            _fs,
+            fs.fs_search,
+            pattern,
+            path,
+            glob,
+            ignore_case,
+            literal,
+            max_results,
+            context,
+            files_only,
+            encoding,
         )
 
     @mcp.tool
-    async def fs_stat(path: str) -> dict:
-        """Existence, type, size and modification time of a path."""
-        return await asyncio.to_thread(_fs, fs.fs_stat, path)
+    async def fs_stat(
+        path: str,
+        hash: Annotated[str | None, Field(description="Also return the file's sha256 | md5 | sha1")] = None,
+    ) -> dict:
+        """Existence, type, size and modification time of a path (and optionally its hash)."""
+        return await asyncio.to_thread(_fs, fs.fs_stat, path, hash)
+
+    @mcp.tool
+    async def fs_op(
+        action: Annotated[str, Field(description="copy | move | delete | mkdir")],
+        path: str,
+        to: Annotated[str | None, Field(description="For copy/move: destination file or folder")] = None,
+        overwrite: bool = False,
+        recursive: Annotated[bool, Field(description="For delete: also a folder that is not empty")] = False,
+        permanent: Annotated[
+            bool, Field(description="For delete: skip the Recycle Bin (default: it goes there)")
+        ] = False,
+    ) -> dict:
+        """Copy, move, delete or create files and folders without a shell. Deleting moves to the
+        Recycle Bin unless permanent=true; drive roots, the home folder and Windows are refused."""
+        return await asyncio.to_thread(_fs, fs.fs_op, action, path, to, overwrite, recursive, permanent)
+
+    @mcp.tool
+    def history(
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
+        tool: Annotated[str | None, Field(description="Only calls of this tool, e.g. run")] = None,
+    ) -> dict:
+        """The most recent tool calls this machine handled (newest first): status, summary, exit code
+        and run id. After a connection error, check here whether your call ran before resending it."""
+        return {"calls": recent.list(limit, tool), "winhand": __version__}
 
     tools_desktop.register(mcp)
 
