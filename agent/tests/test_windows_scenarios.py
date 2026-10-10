@@ -217,7 +217,8 @@ def test_secret_file_is_readable_only_by_this_user(weird_dir):
 
     out = secret_store.save_to_file(str(weird_dir / "token.env"), "s3cret-value", key="TOKEN")
     assert out["saved"]
-    acl = subprocess.run(["icacls", str(weird_dir / "token.env")], capture_output=True, text=True).stdout
+    # icacls prints in the console code page (cp936 on Chinese Windows), not UTF-8
+    acl = proc._decode(subprocess.run(["icacls", str(weird_dir / "token.env")], capture_output=True).stdout)
     assert "(I)" not in acl and os.environ["USERNAME"].lower() in acl.lower(), acl
 
 

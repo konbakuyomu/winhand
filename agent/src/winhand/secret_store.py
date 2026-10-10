@@ -14,7 +14,7 @@ import re
 import subprocess
 import sys
 
-from . import fs, redact, winenv
+from . import fs, proc, redact, winenv
 from .secret_prompt import ask_secret
 
 IS_WINDOWS = sys.platform == "win32"
@@ -39,9 +39,8 @@ def _restrict(path: str) -> None:
             timeout=30,
         )
         if done.returncode != 0:
-            message = done.stdout.decode("utf-8", errors="replace") + done.stderr.decode(
-                "utf-8", errors="replace"
-            )
+            # icacls prints in the console code page (cp936 on Chinese Windows)
+            message = proc._decode(done.stdout + done.stderr)
             raise SecretError(f"saved, but could not restrict who may read it: {message.strip()[-300:]}")
     else:
         os.chmod(full, 0o600)
