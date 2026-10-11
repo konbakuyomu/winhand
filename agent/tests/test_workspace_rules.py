@@ -21,15 +21,13 @@ def home(tmp_path, monkeypatch):
     folder.mkdir()
     for var in ("HOME", "USERPROFILE"):
         monkeypatch.setenv(var, str(folder))
-    for var in ("CODEX_HOME", "CLAUDE_CONFIG_DIR"):
-        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(workspace, "managed_claude_md", lambda: str(tmp_path / "managed" / "CLAUDE.md"))
     return folder
 
 
 def write(path, text: str = ""):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")  # the same bytes on Windows
     return path
 
 
@@ -396,3 +394,122 @@ def test_a_long_rule_in_a_folder_with_braces_is_cut_cleanly(tmp_path, home):
     write(root / "AGENTS.md", "\n".join("w" * 100 for _ in range(1000)))
     (rule,) = ctx(root, rules=[])["rules"]
     assert rule["truncated"].startswith("showing ") and "{name}" in rule["truncated"]
+
+
+# ------------------------------------------------------------------ round 2: what the Verifier found
+
+
+def symlink(link, target) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(target, link, target_is_directory=os.path.isdir(target))
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are not allowed here")
+
+
+def test_many_files_stay_inside_the_budget(tmp_path, home):
+    root = project(tmp_path)
+    for i in range(200):
+        write(root / "src" / "deep" / "folder" / f"file_{i:03d}.py", "\n".join(f"x = {n}" for n in range(50)))
+    write(root / "CLAUDE.md", "\n".join(f"@src/deep/folder/file_{i:03d}.py" for i in range(200)))
+    for i in range(500):
+        write(root / ".claude" / "rules" / f"scoped_{i:03d}.md", f"---\npaths: lib/{i}/**\n---\nrule {i}")
+    out = ctx(root, formats=["claude-code"])
+    assert len(json.dumps(out, ensure_ascii=False)) <= workspace.BUDGET_CHARS
+    claude = out["rules"][0]
+    assert (
+        len(claude["imports"]) == workspace.MAX_LISTED
+        and claude["imports_more"] == 200 - workspace.MAX_LISTED
+    )
+    omitted = out["rules_omitted"]
+    assert omitted["count"] + len(out["rules"]) == 201 and omitted["paths"]
+    assert len(out["rules_not_applied"]) < 500 and "more are not listed" in out["rules_not_applied_note"]
+
+
+def test_links_out_of_the_project_need_approval(tmp_path, home):
+    root = project(tmp_path)
+    secret = write(home / ".ssh" / "id_rsa", "PRIVATE KEY")
+    other = write(home / "private.md", "PRIVATE NOTES")
+    notes = home / "notes"
+    write(notes / "n.md", "my notes")
+    symlink(root / "CLAUDE.md", secret)
+    symlink(root / "sub" / "AGENTS.md", other)
+    symlink(root / ".claude" / "rules", notes)
+    out = ctx(root / "sub")
+    assert not any(s in json.dumps(out) for s in ("PRIVATE KEY", "PRIVATE NOTES", "my notes"))
+    skipped = {os.path.relpath(r["path"], root): r["skipped"] for r in out["rules"]}
+    assert set(skipped) == {"CLAUDE.md", os.path.join("sub", "AGENTS.md"), os.path.join(".claude", "rules")}
+    assert all("outside the project" in why for why in skipped.values())
+
+    approved = ctx(root / "sub", external_imports=True)
+    assert [r.get("content") for r in approved["rules"]] == ["PRIVATE KEY", "my notes", "PRIVATE NOTES"]
+
+
+def test_network_paths_are_not_touched(tmp_path, home, monkeypatch):
+    root = project(tmp_path)
+    write(root / "CLAUDE.md", "@//fileserver/share/rules.md")
+    real_isfile = os.path.isfile
+
+    def isfile(path):
+        assert not str(path).replace("\\", "/").startswith("//"), f"looked at {path}"
+        return real_isfile(path)
+
+    monkeypatch.setattr(os.path, "isfile", isfile)
+    out = ctx(root, formats=["claude-code"])
+    (skipped,) = out["rules"][0]["imports_skipped"]
+    assert "outside the project" in skipped["reason"]
+
+
+def test_agents_md_fallback_ignores_the_users_own_claude_md(tmp_path, home, monkeypatch):
+    write(home / ".claude" / "CLAUDE.md", "user")
+    root = home / "code" / "repo"
+    (root / ".git").mkdir(parents=True)
+    write(root / "AGENTS.md", "agents")
+    out = ctx(root, formats=["claude-code"])
+    assert [(r["content"], r["scope"]) for r in out["rules"]] == [("user", "global"), ("agents", "project")]
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
+    out = ctx(root, formats=["claude-code"])
+    assert [r["content"] for r in out["rules"]] == ["agents"], "~/.claude/CLAUDE.md is no folder's rule file"
+
+
+def test_imports_of_agents_md_are_followed_with_both_formats(tmp_path, home):
+    root = project(tmp_path)
+    write(root / "CLAUDE.md", "@AGENTS.md @AGENTS.md @./AGENTS.md.")
+    write(root / "AGENTS.md", "see @docs/arch.md")
+    write(root / "docs" / "arch.md", "architecture")
+    out = ctx(root)
+    assert [(os.path.relpath(r["path"], root), r["format"]) for r in out["rules"]] == [
+        ("AGENTS.md", "codex"),
+        ("CLAUDE.md", "claude-code"),
+        (os.path.join("docs", "arch.md"), "claude-code"),
+    ]
+    assert out["rules"][1]["imports"] == [str(root / "AGENTS.md")]
+
+
+def test_repo_odds_and_ends(tmp_path, home, monkeypatch):
+    assert workspace.repo_key("github-work:Org/Repo.git") == "org/repo"
+    assert workspace.repo_key("C:\\code\\repo") == "code/repo"
+    checkout(tmp_path / "clones" / "repo", "github-work:org/repo.git", 1_000_000_000)
+    monkeypatch.setenv("MYDIR", str(tmp_path / "elsewhere"))
+    cfg = Config(context={"skills": [], "repo_roots": [str(tmp_path / "clones")]})
+    out = workspace.context(cfg, path="$MYDIR/x", repo="org/repo")
+    assert out["path"] == str(tmp_path / "elsewhere" / "x")
+
+
+def test_paths_with_comments():
+    assert workspace.rule_paths("---\npaths: src/**  # only src\n---\n") == ["src/**"]
+    assert workspace.rule_paths("---\npaths:\n  # sources\n  - 'src/**' # c\n\n  - lib/*\n---\n") == [
+        "src/**",
+        "lib/*",
+    ]
+    assert workspace.rule_paths("---\npaths: 'a#b/**'\n---\n") == ["a#b/**"]
+
+
+def test_too_many_rule_files_are_named(tmp_path, home):
+    root = project(tmp_path)
+    for i in range(workspace.MAX_RULE_FILES + 5):
+        write(root / ".claude" / "rules" / f"r{i:04d}.md", "")
+    out = ctx(root, formats=["claude-code"])
+    notes = [r for r in out["rules"] if r["path"] == str(root / ".claude" / "rules")]
+    assert len(notes) == 1 and "more than" in notes[0]["skipped"]

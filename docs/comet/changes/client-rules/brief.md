@@ -90,7 +90,7 @@
 
 # Non-goals
 
-- hooks、信任机制、`guards.toml` 交给外部命令判断、项目自带 profile：change `client-hooks`。
+- hooks、信任机制、`guards.toml` 交给外部命令判断：change `client-hooks`。项目自带的 profile 以后单独设计。
 - Claude Code 在读到子目录文件时才加载的、path 以下的子目录 CLAUDE.md：`context()` 只给到 path 为止的这条链。
 - Claude Code 的 `claudeMdExcludes`、“Project instructions”选项（`claude-md-and-agents-md` 等）、`--add-dir`；Codex 的 `project_doc_fallback_filenames`、`project_root_markers`、32 KiB 截断。只按默认设置读，按 winhand 自己的预算截断。
 - Claude Code 插件里的技能和规则；resources / prompts 出口（P3）；生命周期桥（P2）。
@@ -161,7 +161,9 @@
   - 只想要 Claude Code 默认行为时，设 `formats = ["claude-code"]`。
 - D4：仓库映射只查 Codex 项目记录、Claude Code 项目记录和 `[context] repo_roots`，不全盘扫描。理由：快、可预期；记录里没有的仓库，配置一行 `repo_roots` 即可找到。
 - D5：外部引用默认沿用 Claude Code 的批准状态，所有读取都过守卫的 `read` 规则。理由：仓库可能来自别人，否则一行 `@~/.ssh/id_rsa` 就能把私钥交给模型。
-- 决定 D3–D5 由 Claude 代定：用户把推进交给 Claude（“那你继续帮我推进吧，我不会写这些，交给你了”），汇报时会说明，用户可以随时改。
+- D6：项目里的规则文件或 `.claude/rules` 文件夹是指向项目外的符号链接时，与外部引用同样处理：未经批准不读。理由：与 D5 相同，链接和 `@import` 一样能把项目外的文件带进来。（第 1 轮验收发现）
+- D7：项目根上面还有 `.git` 时（例如整个主目录是 dotfiles 仓库），项目范围随之变大，这与 Codex、Claude Code 对项目根的定义一致，不另作限制。（第 1 轮验收指出，作为已知限制）
+- 决定 D3–D7 由 Claude 代定：用户把推进交给 Claude（“那你继续帮我推进吧，我不会写这些，交给你了”），汇报时会说明，用户可以随时改。
 
 # Open questions
 

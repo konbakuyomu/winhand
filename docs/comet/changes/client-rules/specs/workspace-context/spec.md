@@ -34,15 +34,17 @@
      - 其他系统：`/etc/claude-code/CLAUDE.md`。
   2. `~/.claude/CLAUDE.md`（`scope=global`）。
   3. `~/.claude/rules/` 下所有 `*.md`，递归，按相对路径排序（`scope=global`）。按 R4 判断是否生效。
-- 目录部分（`scope=project`）：从文件系统根到 path 所在目录，每一级依次取存在的 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`，按从上到下的顺序。
+- 目录部分（`scope=project`）：从文件系统根到 path 所在目录，每一级依次取存在的 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`，按从上到下的顺序。用户自己的 `~/.claude/CLAUDE.md` 是全局文件，不算作主目录这一级的 `.claude/CLAUDE.md`。
 - 项目规则（`scope=project`）：项目根 `.claude/rules/` 下所有 `*.md`，递归，按相对路径排序，排在项目根这一级的 CLAUDE 文件之后。按 R4 判断是否生效。
-- AGENTS.md 兜底：只启用 Claude Code 格式时，若 path 所在目录及其所有上级目录都没有 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`，就按 R2 的项目部分读取 `AGENTS.md`（不含 `AGENTS.override.md`）。这样读到的文件标 `format=claude-code`。
+- 一个规则文件夹最多看 500 个文件；超过时，在这些文件之前加一条 `skipped` 说明。
+- AGENTS.md 兜底：只启用 Claude Code 格式时，若 path 所在目录及其所有上级目录都没有 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`（用户自己的 `~/.claude/CLAUDE.md` 不算），就按 R2 的项目部分读取 `AGENTS.md`（不含 `AGENTS.override.md`）。这样读到的文件标 `format=claude-code`。
 - 每份 Claude Code 格式的文件都按 R5 展开 `@import`。
 
 ### R4 按路径生效的规则
 
 - 规则文件开头的 YAML frontmatter 里，`paths` 可以写成列表（多行 `- x` 或单行 `[x, y]`），也可以写成逗号分隔的字符串。
 - 没有 `paths`，或 frontmatter 无法解析时，规则总是生效。
+- `paths` 的值和列表项后面的 `# 注释`（引号外、前面有空白的 `#`）不算 glob，列表中的注释行和空行跳过。
 - 有 `paths` 时，只有传入了 path，且 path 相对于项目根的路径（`/` 分隔）匹配其中一个 glob，规则才生效：
   - glob 支持 `*`、`**` 和 `{a,b}`；
   - 不带目录的 `*.md` 只匹配项目根下的文件。
@@ -61,17 +63,20 @@
   - 路径末尾的 `.,;:!?)]}` 若导致找不到文件，去掉后再试一次。
 - 被引用的文件紧跟在引用它的文件之后返回，标 `imported_by`（引用它的文件路径），格式和 scope 与引用它的文件相同。被引用的文件可以继续引用其他文件。
 - 最多 4 跳：顶层文件引用的文件是第 1 跳。第 5 跳不再展开，记在引用者的 `imports_skipped` 中，原因写明超过 4 跳。
-- 每份文件的 `imports` 列出它引用的所有文件。已经返回过的文件不再重复返回。
+- 每份文件的 `imports` 列出它引用的文件，同一文件只列一次；`imports` 和 `imports_skipped` 各最多列 30 项，其余只计数（`imports_more`、`imports_skipped_more`）。已经返回过的文件不再重复返回。
+- 启用了 Claude Code 格式时，一份先按 Codex 格式读到的文件（例如 AGENTS.md）被 Claude Code 格式的文件引用后，它自己的 `@import` 也照样展开，因为 Claude Code 读它时会展开。
 
 ### R6 安全
 
-- `context()` 读取任何文件之前，都先以 `read` 动作过守卫：
+- `context()` 读取任何会把内容返回给模型的文件（规则文件、被引用的文件、SKILL.md）之前，都先以 `read` 动作过守卫。只为找位置而读、内容不返回的文件（`.claude.json`、Codex 的 `config.toml`、`.git/config`）不在此列：
   - 被拒绝、需要确认，或守卫规则文件损坏时，不读这个文件，也不弹窗；
   - 规则文件记 `skipped`，被引用的文件记在引用者的 `imports_skipped`，都写明原因；
   - 技能的 SKILL.md 被拒绝时，这个技能不列出。
 - 外部引用：`scope=project` 的文件引用项目根以外的文件。这类引用只有满足以下任一条件才展开，否则记在 `imports_skipped`，原因写明“项目外，Claude Code 未批准”：
   - `~/.claude.json`（设置了 `CLAUDE_CONFIG_DIR` 时为该目录下的 `.claude.json`）的 `projects` 里，这个项目根对应条目的 `hasClaudeMdExternalIncludesApproved` 为 true；
   - 配置了 `[context] external_imports = true`。
+- 链接到项目外：目录部分和项目规则里的文件或 `.claude/rules` 文件夹，真实路径（解开符号链接后）不在它被找到的那一级目录之内时，与外部引用适用同样的条件；不满足时不读，记 `skipped`。
+- 网络路径（`\\server\share`、`//server/share`）形式的外部引用，在判断之前不访问它，以免向网络发起连接。
 - `managed`、`global` 文件的引用不受“外部引用”限制，但同样要过守卫。
 
 ### R7 合并、格式开关与全局规则配置
@@ -81,15 +86,15 @@
   1. 全局部分，按 `formats` 的顺序排列各格式的全局文件；
   2. 目录部分，按目录从上到下排列；同一级目录内，按 `formats` 的顺序排列。
 - 同一个文件（按真实路径，Windows 上不区分大小写）只返回一次，以先出现的位置为准。
-- `[context] rules`：配置后（包括 `[]`），代替两种格式的全局部分，只读列出的文件，支持 `~` 和环境变量，不存在的文件静默跳过。格式按文件名判断：
+- `[context] rules`：配置后（包括 `[]`），代替两种格式的全局部分，只读列出的文件，支持 `~` 和环境变量，不存在的文件静默跳过。这些文件是用户明确列出的，不受 `formats` 限制。格式按文件名判断：
   - `CLAUDE.md`、`CLAUDE.local.md`，以及位于 `rules` 文件夹中的文件，为 `claude-code`，并展开 `@import`；
   - 其他文件为 `codex`。
-- 每份规则返回：`path`、`format`、`scope`、`lines`，以及 `content` 或 `truncated` 或 `error` 或 `skipped`。按需附带 `imported_by`、`imports`、`imports_skipped`。
+- 每份规则返回：`path`、`format`、`scope`，以及 `content` 或 `truncated` 或 `error` 或 `skipped`；读到了正文的还有 `lines`。按需附带 `imported_by`、`imports`、`imports_skipped`。`content` 是文件全文（包括开头的 frontmatter）。
 
 ### R8 按仓库名找到本机目录
 
 - `repo` 可以写成 `owner/name`，也可以是任意 git 远端 URL。
-- 匹配方式：取远端 URL 路径的最后两段（去掉 `.git` 后缀和末尾的 `/`），不区分大小写，与 `repo` 的最后两段比较。https、ssh、`git@host:` 写法都支持。
+- 匹配方式：取远端 URL 路径的最后两段（去掉 `.git` 后缀和末尾的 `/`），不区分大小写，与 `repo` 的最后两段比较。https、ssh、`git@host:` 和不带用户名的 `host:`（`~/.ssh/config` 里的主机别名）写法都支持。
 - 候选目录：
   - Codex `config.toml` 中 `[projects]` 的键；
   - Claude Code `.claude.json` 中 `projects` 的键；
@@ -101,7 +106,7 @@
 - 结果：
   - 返回中带 `repo`：`name`、`checkout`、`source`、`other_checkouts`；
   - 没给 path 时，path 为检出目录；
-  - 给了相对 path 时，path 相对于检出目录解析；
+  - 给了相对 path 时（先展开 `~` 和环境变量），path 相对于检出目录解析；
   - 给了绝对 path 时，path 照用。
 - 找不到时，返回工具错误，写明查过哪些来源、各有多少个候选目录，以及配置 `[context] repo_roots` 或改传 `path` 的方法。
 
@@ -131,8 +136,9 @@ Scenario: (A6) 仓库名映射到本机检出目录
 - 技能列表单独限额约 20,000 字符：
   - 限额内按顺序给出完整条目；
   - 超出部分放进 `skills_more`：`count` 为未完整列出的技能总数，`names` 列出名称，名称也受限额约束，放不下的只计数。
-- 规矩正文使用剩余的预算，按返回顺序依次放入。放不下时，从这份文件开始截断，后面的文件只给路径和行数。被截断的文件注明总行数，以及用 `fs_read(path, offset=…)` 继续读的方法。
-- 结果中有被脱敏的内容时，带上 `redacted` 计数和 `redaction_note` 说明，与其他工具一致。
+- `rules_not_applied` 最多占约 8,000 字符，其余只在说明里计数。
+- 规矩正文使用剩余的预算，按返回顺序依次放入。放不下时，这份文件截断，注明总行数，以及用 `fs_read(path, offset=…)` 继续读的方法。连一条截断说明都放不下的文件不再单独列出，放进 `rules_omitted`：`count` 为文件数，`paths` 在约 2,000 字符内列出路径。
+- 结果中有被脱敏的内容时，带上 `redacted` 计数和 `redaction_note` 说明，与其他工具一致。计数包括被截掉的部分。
 
 Scenario: (A7) 技能很多时规矩不被挤掉
 - 设置：300 个用户级技能，每个描述约 300 字符；项目 AGENTS.md 约 20,000 字符。
