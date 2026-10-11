@@ -232,6 +232,9 @@ def reset() -> None:
 # ------------------------------------------------------------------ applying it to results
 
 
+NOTE = "values marked «redacted:…» were masked on the machine; do not write this text back as-is"
+
+
 class RedactOutput(Middleware):
     """Masks configured values in every tool result before it leaves this machine."""
 
@@ -266,9 +269,7 @@ class RedactOutput(Middleware):
                 target = structured.get("result") if wrapped else structured
                 if isinstance(target, dict):  # never add fields beside a wrapped plain value
                     target["redacted"] = max(n, total)
-                    target["redaction_note"] = (
-                        "values marked «redacted:…» were masked on the machine; do not write this text back as-is"
-                    )
+                    target["redaction_note"] = NOTE
             total = max(total, n)
         if not total:
             return result

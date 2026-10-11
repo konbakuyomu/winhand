@@ -111,7 +111,7 @@ Quick rules
   winhand app is its own MCP endpoint at <relay>/mcp/<name>, added as a separate connector.
 - The machine's owner may have written rules and skills for agents: before working in a folder, and
   again after the conversation is compacted, call context(path=<that folder>) and follow what it
-  returns. Calls that read or change the machine are checked against the owner's guard rules
+  returns (repo=<owner/name> finds the folder of a repository you only know by name). Calls that read or change the machine are checked against the owner's guard rules
   (~/.winhand/guards.toml, <project>/.winhand/guards.toml): a refusal, or a call held until the person
   at the machine says yes, is the owner's wish; do not work around it.
 """
@@ -155,8 +155,8 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
 
 GUIDE_CONTEXT = """\
 - The machine's owner may have written rules and skills for agents: before working in a folder, and
-  again after the conversation is compacted, call context(path=<that folder>) and follow what it
-  returns. A call refused, or held until the person at the machine says yes, by the owner's guard
+  again after the conversation is compacted, call context(path=<that folder>, or repo=<owner/name>)
+  and follow what it returns. A call refused, or held until the person at the machine says yes, by the owner's guard
   rules is their wish: do not work around it.
 """
 
@@ -267,15 +267,24 @@ def build_server(
         path: Annotated[
             str | None,
             Field(
-                description="The folder (or a file in it) you are about to work in; omit for the machine-wide part"
+                description="The folder (or a file in it) you are about to work in; omit for the machine-wide "
+                "part. With repo, a relative path is inside that repository's checkout"
+            ),
+        ] = None,
+        repo: Annotated[
+            str | None,
+            Field(
+                description="owner/name (or a git remote URL) of the repository you work on, when you do not "
+                "know where it is checked out on this machine"
             ),
         ] = None,
     ) -> dict:
-        """This machine's rules and skills for agents: the owner's global rule files, every AGENTS.md
-        from the project root down to `path`, the skills here (read a SKILL.md with fs_read when one
-        fits), the guard rules in force and the local MCP servers. Call it before working in a folder
-        and again after the conversation is compacted."""
-        return await asyncio.to_thread(workspace.context, cfg, path)
+        """This machine's rules and skills for agents, read the way Codex and Claude Code read them:
+        the global rule files, AGENTS.md / CLAUDE.md / .claude/rules from the project down to `path`
+        (with their @imports), the skills here (read a SKILL.md with fs_read when one fits), the guard
+        rules in force and the local MCP servers. Call it before working in a folder and again after
+        the conversation is compacted."""
+        return await asyncio.to_thread(workspace.context, cfg, path, repo)
 
     # ------------------------------------------------------------ processes
 

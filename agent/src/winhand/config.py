@@ -24,8 +24,12 @@ files = ['%LOCALAPPDATA%\\vps-fleet\\secrets\\*.env']   # values of KEY=VALUE li
 ipv4 = false                       # every IPv4 address except loopback
 
 [context]                          # what context() reads (see workspace.py); all optional
-rules = ['~/.codex/AGENTS.md', '~/.claude/CLAUDE.md']   # global rule files ([] = none)
+formats = ['codex', 'claude-code'] # whose way of reading rules to follow
+rules = ['D:\\notes\\agents.md']    # replaces the formats' global rule files ([] = none)
 skills = ['~/.agents/skills', '~/.claude/skills', '~/.codex/skills']
+repo_roots = ['D:\\code']           # where context(repo="owner/name") also looks for checkouts
+external_imports = false           # follow a project's @imports out of the project without
+                                   # Claude Code's approval for it
 stdio_hint = false                 # also point stdio clients at context() in the instructions
 ```
 
@@ -110,7 +114,7 @@ class Config:
     raw: dict = field(default_factory=dict)
     # [redact]: values masked in everything handed back to the model (see redact.py)
     redact: dict = field(default_factory=dict)
-    # [context]: where context() looks for rules and skills, and the stdio hint (see workspace.py)
+    # [context]: how context() reads rules, skills and checkouts, and the stdio hint (see workspace.py)
     context: dict = field(default_factory=dict)
 
 

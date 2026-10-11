@@ -127,7 +127,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
-| 本机规则 | `context`：这台电脑写给 AI 的规矩（全局规则文件、项目根到当前目录的 AGENTS.md）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务，见[本机规则与守卫](#本机规则与守卫) |
+| 本机规则 | `context`：这台电脑写给 AI 的规矩（按 Codex、Claude Code 的读法：AGENTS.md、CLAUDE.md、`.claude/rules`、`@` 引用）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务；`repo=owner/name` 可按仓库名找到本机目录。见[本机规则与守卫](#本机规则与守卫) |
 | 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
 
 `run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义；只给 `command` 时整行交给 PowerShell 执行。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
@@ -173,23 +173,53 @@ ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 
 ### context：规矩和技能
 
-`context(path)` 返回以下内容：
+`context(path)` 按 Codex 和 Claude Code 各自的读法返回规矩，和它们在这台电脑上实际读到的一致：
 
-- **全局规则文件**：默认读已存在的 `~/.codex/AGENTS.md` 和 `~/.claude/CLAUDE.md`；
-- **项目规矩**：项目根（最近的 `.git` 所在目录）到 `path` 沿途的每份 `AGENTS.md`；
+- **Codex**：
+  - 全局 `~/.codex/AGENTS.override.md`，没有时读 `~/.codex/AGENTS.md`（设了 `CODEX_HOME` 时，从那里读）；
+  - 项目根（最近的 `.git` 所在目录）到 `path` 沿途每一级，各取一份：`AGENTS.override.md` 优先，没有时取 `AGENTS.md`。
+- **Claude Code**：
+  - 管理员策略文件，以及 `~/.claude/CLAUDE.md` 和 `~/.claude/rules/`；
+  - 从磁盘根目录到 `path` 沿途每一级的 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`；
+  - 项目的 `.claude/rules/`：写了 `paths` 的规则只在路径匹配时生效，不生效的列在 `rules_not_applied` 里；
+  - 文件里的 `@路径` 引用会展开，最多 4 跳。
+
+同一个文件只返回一次。比如 CLAUDE.md 里写了 `@AGENTS.md`，AGENTS.md 只出现一次。每份规则都标出来自哪种格式（`format`）。
+
+除了规矩，还返回：
 - **技能列表**：名称、描述、SKILL.md 路径。默认扫 `~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`，以及项目里的 `.agents/skills`、`.claude/skills`，同名时项目优先；
 - 对该目录生效的守卫规则；
 - 本机 MCP 服务。
 
-文件都是现读的，改完规矩下一次调用就生效。模型按技能描述挑中后，用 `fs_read` 读 SKILL.md，脚本用 `run` 在这台电脑上执行。输出经过脱敏，超出约 6 万字符时截断，并给出用 `fs_read` 接着读的方法。
+文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `fs_read` 读 SKILL.md，脚本用 `run` 在这台电脑上执行。
+
+输出经过脱敏，按脱敏后的长度控制在约 6 万字符以内：
+- 技能列表最多占约 2 万字符，其余技能只列名字；
+- 规矩太长时截断，并给出用 `fs_read` 接着读的方法。
+
+**只知道仓库名时**（比如云端会话只知道 `owner/name`），用 `context(repo="owner/name")`。它在以下位置找这个仓库在本机的检出目录：
+- Codex 记录的项目；
+- Claude Code 记录的项目；
+- `repo_roots` 里列出的文件夹。
+
+再给 `path="src"` 时，`path` 相对于检出目录。
+
+**安全**：`context` 读的每个文件，都先过守卫的 `read` 规则，被拒绝的不读。项目里的规矩引用项目外的文件（例如 `@~/.ssh/id_rsa`）时，只有两种情况才会展开：
+- Claude Code 已为这个项目批准过外部引用；
+- 设置了 `external_imports = true`。
+
+这样，别人的仓库没法借规矩文件读走你的私密文件。
 
 instructions 会提醒模型：开始在某个目录工作前，以及上下文被压缩后，调用 `context`。经中转和 `winhand http` 连接的客户端会看到这句提醒；本机 stdio 客户端默认不显示，因为它们自己会读规则。读哪些文件可以在 `config.toml` 里改：
 
 ```toml
 [context]
-rules = ['~/.codex/AGENTS.md', '~/.claude/CLAUDE.md']   # [] = 不读全局规则文件
+formats = ['codex', 'claude-code']   # 按谁的读法读规矩；['claude-code'] 时与 Claude Code 默认一致
+rules = ['D:\notes\agents.md']       # 写了就代替两种格式的全局规则文件；[] = 不读
 skills = ['~/.agents/skills', '~/.claude/skills', '~/.codex/skills']
-stdio_hint = false    # true：本机 stdio 客户端也显示 context 提醒
+repo_roots = ['D:\code']              # context(repo=...) 还会在这些文件夹和它们的子文件夹里找
+external_imports = false             # true：项目规矩引用项目外文件时，不用等 Claude Code 批准
+stdio_hint = false                   # true：本机 stdio 客户端也显示 context 提醒
 ```
 
 Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructions 只放要点，完整指南由 `help()` 返回。

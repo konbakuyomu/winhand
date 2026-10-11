@@ -87,7 +87,7 @@ winhand 的核心是终端执行 MCP：终端会话、一次性命令、文件�
 | Codex | `~/.codex/AGENTS.md` | `~/.codex/skills`、`~/.agents/skills`、`.agents/skills` | `config.toml` 的 `mcp_servers` |
 | 以后 | Cursor `.cursor/rules`、`GEMINI.md` …… | | |
 
-规矩按各自工具的规则合并：比如 Claude Code 在没有 CLAUDE.md 时才读 AGENTS.md，`@import` 最多展开 4 层。技能同名时项目优先。技能的说明交给模型读，脚本始终用 `run` 在本机执行。
+规矩按各自工具的规则读取：比如 Claude Code 在没有 CLAUDE.md 时才读 AGENTS.md，`@import` 最多展开 4 跳；Codex 每级目录只取一份，`AGENTS.override.md` 优先。两种格式都启用时两边都返回，同一文件只返回一次。技能同名时项目优先。技能的说明交给模型读，脚本始终用 `run` 在本机执行。
 
 **出口**都是标准 MCP，客户端支持哪种就用哪种：
 
@@ -139,7 +139,9 @@ MCP 看不到三个时机：**用户发消息**、**回答结束**、**上下文
    P0 遗留，留给后续 change：
    - 技能很多时，`context()` 会超出约 6 万字符的上限，而且技能列表不截断；
    - 脱敏占位符比原值长，可能让结果超出预算。
-2. **P1**：Claude Code 和 Codex 适配（规矩、技能、hooks、信任）。交互式会话的输入过守卫已在 P0 完成。
+2. **P1**：Claude Code 和 Codex 适配（规矩、技能、hooks、信任）。交互式会话的输入过守卫已在 P0 完成。分两个 change：
+   - `client-rules`（进行中，`docs/comet/changes/client-rules/`）：按 Codex、Claude Code 的读法读规矩，`context(repo=…)`，以及 P0 的两处预算遗留；
+   - `client-hooks`（之后）：Claude Code、Codex hooks 翻译成守卫，信任机制。
 3. **P2**：生命周期桥，以及各客户端的配置生成。
 4. **P3**：resources 和 prompts 出口；跟随本机 MCP 配置；可选导出到 GitHub。
 
