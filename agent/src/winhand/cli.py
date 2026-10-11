@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "stdio":
         from .server import build_server
 
-        build_server().run(transport="stdio", show_banner=False)
+        build_server(local_stdio=True).run(transport="stdio", show_banner=False)
         return 0
     if cmd == "http":
         from .server import build_server
