@@ -481,10 +481,10 @@ def test_imports_of_agents_md_are_followed_with_both_formats(tmp_path, home):
     out = ctx(root)
     assert [(os.path.relpath(r["path"], root), r["format"]) for r in out["rules"]] == [
         ("AGENTS.md", "codex"),
+        (os.path.join("docs", "arch.md"), "claude-code"),  # right after the file that imports it
         ("CLAUDE.md", "claude-code"),
-        (os.path.join("docs", "arch.md"), "claude-code"),
     ]
-    assert out["rules"][1]["imports"] == [str(root / "AGENTS.md")]
+    assert out["rules"][2]["imports"] == [str(root / "AGENTS.md")]
 
 
 def test_repo_odds_and_ends(tmp_path, home, monkeypatch):
@@ -513,3 +513,118 @@ def test_too_many_rule_files_are_named(tmp_path, home):
     out = ctx(root, formats=["claude-code"])
     notes = [r for r in out["rules"] if r["path"] == str(root / ".claude" / "rules")]
     assert len(notes) == 1 and "more than" in notes[0]["skipped"]
+
+
+# ------------------------------------------------------------------ round 3
+
+
+def test_a_hostile_glob_is_quick(tmp_path, home):
+    import time
+
+    root = project(tmp_path)
+    write(
+        root / ".claude" / "rules" / "slow.md", "---\npaths: ['**/*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b']\n---\nx"
+    )
+    write(root / ".claude" / "rules" / "deep.md", "---\npaths: '" + "{" * 3000 + "}" * 3000 + "'\n---\ny")
+    began = time.monotonic()
+    out = ctx(root / "src" / ("a" * 60), formats=["claude-code"])
+    assert time.monotonic() - began < 5
+    assert {os.path.basename(r["path"]) for r in out["rules_not_applied"]} == {"slow.md", "deep.md"}
+
+
+def test_glob_match():
+    g = workspace.glob_match
+    assert g("src/a/x.h", "src/**/*.h") and g("src/x.h", "src/**/*.h") and not g("x.h", "src/**/*.h")
+    assert g("README.md", "*.md") and not g("docs/x.md", "*.md") and g("docs/x.md", "**/*.md")
+    assert g("a/b/c", "a/*/c") and not g("a/b/d/c", "a/*/c") and g("a/b/d/c", "a/**/c")
+    assert g("file5.c", "file[0-9].c") and not g("fileA.c", "file[0-9].c") and g("x.c", "[!a]*.c")
+    assert g("file1.c", "file?.c") and not g("file12.c", "file?.c")
+
+
+def test_linked_rule_folders_follow_the_same_rules(tmp_path, home):
+    root = project(tmp_path)
+    write(root / "shared-rules" / "in.md", "inside the project")
+    write(home / "team-rules" / "out.md", "outside the project")
+    write(home / "dotfiles" / "mine.md", "user level")
+    symlink(root / ".claude" / "rules" / "inside", root / "shared-rules")
+    symlink(root / ".claude" / "rules" / "outside", home / "team-rules")
+    symlink(home / ".claude" / "rules" / "dotfiles", home / "dotfiles")
+    write(root / "docs" / "sub-rules.md", "moved to docs")
+    symlink(root / "sub" / "CLAUDE.md", root / "docs" / "sub-rules.md")  # stays in the project
+
+    out = ctx(root / "sub", formats=["claude-code"])
+    contents = [r.get("content") for r in out["rules"]]
+    assert "user level" in contents and "inside the project" in contents and "moved to docs" in contents
+    assert "outside the project" not in contents
+    (refused,) = [r for r in out["rules"] if "skipped" in r]
+    assert refused["path"] == str(root / ".claude" / "rules" / "outside")
+
+    approved = ctx(root / "sub", formats=["claude-code"], external_imports=True)
+    assert "outside the project" in [r.get("content") for r in approved["rules"]]
+
+
+def test_an_unapproved_import_of_a_global_file_does_not_open_its_imports(tmp_path, home, monkeypatch):
+    codex = tmp_path / "codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    write(codex / "AGENTS.md", "global, see @" + str(home / "private" / "notes.md"))
+    write(home / "private" / "notes.md", "private notes")
+    root = project(tmp_path)
+    write(root / "CLAUDE.md", "@" + str(codex / "AGENTS.md"))
+    out = ctx(root)
+    assert "private notes" not in json.dumps(out)
+    assert [r["path"] for r in out["rules"]] == [str(codex / "AGENTS.md"), str(root / "CLAUDE.md")]
+
+
+def test_lists_stay_capped_after_masking(tmp_path, home, winhand_home):
+    config.save(Config(redact={"values": ["ab"]}))
+    root = project(tmp_path)
+    write(root / "AGENTS.md", "the owner's rules")
+    for i in range(400):
+        write(root / ".claude" / "rules" / f"ab{i:03d}ab.md", f"---\npaths: ab/{i}/ab/**\n---\nab")
+    rules = "".join(
+        f'[[guard]]\non = "write"\npath = ["ab{i}/**"]\ndecision = "note"\nreason = "ab ab ab"\n\n'
+        for i in range(1500)
+    )
+    write(root / ".winhand" / "guards.toml", rules)
+    out = ctx(root)
+    assert len(json.dumps(out, ensure_ascii=False)) <= workspace.BUDGET_CHARS
+    assert out["rules"][0]["content"] == "the owner's rules"
+    assert len(json.dumps(out["rules_not_applied"], ensure_ascii=False)) <= workspace.NOT_APPLIED_CHARS
+    assert out["guards"]["rules_more"] > 0
+
+
+def test_many_imports_are_quick(tmp_path, home):
+    import time
+
+    root = project(tmp_path)
+    for i in range(1000):
+        write(root / "r" / f"{i}.md", "")
+    write(root / "CLAUDE.md", " ".join(f"@r/{i}.md" for i in range(1000)) + " @x" * 60_000)
+    began = time.monotonic()
+    ctx(root, formats=["claude-code"])
+    assert time.monotonic() - began < 10
+
+
+def test_many_checkouts_are_capped(tmp_path, home):
+    for i in range(workspace.MAX_LISTED + 5):
+        checkout(tmp_path / "clones" / f"c{i:02d}", "https://github.com/o/r.git", 1_000_000_000 + i)
+    cfg = Config(context={"skills": [], "repo_roots": [str(tmp_path / "clones")]})
+    repo = workspace.context(cfg, repo="o/r")["repo"]
+    assert len(repo["other_checkouts"]) == workspace.MAX_LISTED and repo["other_checkouts_more"] == 4
+
+
+async def test_file_names_that_are_not_utf8_do_not_break_the_answer(tmp_path, home):
+    if os.name == "nt":
+        pytest.skip("Windows file names are always Unicode")
+    root = project(tmp_path)
+    rules = root / ".claude" / "rules"
+    rules.mkdir(parents=True)
+    try:
+        with open(os.path.join(os.fsencode(rules), b"bad-\xff.md"), "w") as fh:
+            fh.write("odd name")
+    except OSError:
+        pytest.skip("this file system refuses such names")
+    write(rules / "fine.md", "fine")
+    async with Client(build_server(Config(context={"skills": [], "formats": ["claude-code"]}))) as client:
+        result = await client.call_tool("context", {"path": str(root)})
+    assert [r.get("content") for r in result.structured_content["rules"]] == ["fine"]

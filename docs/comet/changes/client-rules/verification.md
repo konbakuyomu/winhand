@@ -31,6 +31,34 @@
 - `redacted` 计数包括被截掉的部分；
 - `content` 包含 frontmatter。
 
-## 第 2 轮
+## 第 2 轮（f2929ab）
+
+**正式检查**
+- 云端 Linux（Verifier 运行）：`ruff check`、`ruff format --check` 通过；`pytest` 323 passed，39 skipped。
+- 把 HOME、CODEX_HOME、CLAUDE_CONFIG_DIR 指向放满规则文件的目录后再跑 context 和 guard 的测试：107 passed，2 skipped。说明测试不会读到运行机器自己的配置。
+- `agent.yml`（run 38164324954，5149d0a，代码与 f2929ab 相同）：ubuntu、windows 都通过。
+
+**独立 Verifier 结论**：A1–A10 全部通过；第 1 轮的问题 1–11 已修，12 按 D7 接受。没有阻断问题，新发现 10 个次要问题：
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 1 | 仓库里的 `paths` glob 能让 `context()` 卡住几分钟到几小时（`PurePath.full_match` 背后的正则回溯） | 改用不回溯的 glob 匹配；超长 glob、过深的 `{}` 不展开 |
+| 2 | `.claude/rules` 里链接进来的子文件夹被静默忽略 | 递归时跟随链接子文件夹，规则与链接文件相同；链出项目且未批准的记 `skipped` |
+| 3 | 链接到项目内其他目录的文件被当成“项目外” | 以项目根为界；项目根以上各级以自身所在目录为界 |
+| 4 | 项目文件未经批准引用 `~/.codex/AGENTS.md` 时，那份文件自己的引用被带出来 | 只有引用本身被允许时才展开已读文件，并按引用者的 scope 判断 |
+| 5 | `rules_not_applied` 在脱敏之前计长度 | 先脱敏再计 |
+| 6 | 项目 `guards.toml` 规则很多、或 `other_checkouts` 很多时无上限 | 守卫摘要限约 8,000 字符；`other_checkouts` 最多 30 个 |
+| 7 | 第 2 轮的 imports 去重变成平方复杂度 | 用集合 |
+| 8 | 嵌套极深的 `{}` 导致 RecursionError | 限制嵌套层数 |
+| 9 | 先按 Codex 读到的文件，其引用排在错误的位置 | 引用的文件挂在引用者之下，输出时紧跟其后 |
+| 10 | 名字不是 UTF-8 的文件让整个回复无法发送 | 跳过这类文件，输出前再做一次清理 |
+| 疑似 | `import_refs` 的去重平方复杂度；列表分隔符少算 1 字符；指向网络路径的符号链接会先被访问 | 都已处理 |
+
+规格中含糊之处的决定：
+- 链接以项目根为界；
+- 批准记录可在项目根到 path 之间任何一级；
+- `formats` 里不认识的值忽略，结果的 `formats` 字段显示实际生效的格式。
+
+## 第 3 轮
 
 （待填）

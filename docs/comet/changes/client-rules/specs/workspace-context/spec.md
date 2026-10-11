@@ -46,7 +46,8 @@
 - 没有 `paths`，或 frontmatter 无法解析时，规则总是生效。
 - `paths` 的值和列表项后面的 `# 注释`（引号外、前面有空白的 `#`）不算 glob，列表中的注释行和空行跳过。
 - 有 `paths` 时，只有传入了 path，且 path 相对于项目根的路径（`/` 分隔）匹配其中一个 glob，规则才生效：
-  - glob 支持 `*`、`**` 和 `{a,b}`；
+  - glob 支持 `*`、`**`、`?`、`[a-z]` / `[!x]` 和 `{a,b}`（Windows 上不区分大小写）；
+  - 匹配用不回溯的算法，耗时与路径长度和 glob 长度的乘积成正比；超过 1,000 字符的 glob 和嵌套超过 8 层的 `{}` 不展开，视为不匹配；
   - 不带目录的 `*.md` 只匹配项目根下的文件。
 - 不生效的规则不读正文，列在 `rules_not_applied` 中，每项包含 `path`、`paths`、`format`、`scope`。
 
@@ -61,10 +62,10 @@
   - 相对路径相对于所在文件的目录；
   - 支持 `~` 和绝对路径；
   - 路径末尾的 `.,;:!?)]}` 若导致找不到文件，去掉后再试一次。
-- 被引用的文件紧跟在引用它的文件之后返回，标 `imported_by`（引用它的文件路径），格式和 scope 与引用它的文件相同。被引用的文件可以继续引用其他文件。
+- 被引用的文件紧跟在引用它的文件之后返回（多份时按引用顺序，各自的引用又紧跟在各自之后），标 `imported_by`（引用它的文件路径），格式和 scope 与引用它的文件相同。被引用的文件可以继续引用其他文件。
 - 最多 4 跳：顶层文件引用的文件是第 1 跳。第 5 跳不再展开，记在引用者的 `imports_skipped` 中，原因写明超过 4 跳。
 - 每份文件的 `imports` 列出它引用的文件，同一文件只列一次；`imports` 和 `imports_skipped` 各最多列 30 项，其余只计数（`imports_more`、`imports_skipped_more`）。已经返回过的文件不再重复返回。
-- 启用了 Claude Code 格式时，一份先按 Codex 格式读到的文件（例如 AGENTS.md）被 Claude Code 格式的文件引用后，它自己的 `@import` 也照样展开，因为 Claude Code 读它时会展开。
+- 启用了 Claude Code 格式时，一份先按 Codex 格式读到的文件（例如 AGENTS.md）被 Claude Code 格式的文件引用后，它自己的 `@import` 也照样展开，因为 Claude Code 读它时会展开；展开的结果紧跟在它之后。只有这次引用本身是允许的（没有超过 4 跳、不是未经批准的外部引用）时才展开，展开时按引用者的 scope 判断外部引用。
 
 ### R6 安全
 
@@ -75,8 +76,10 @@
 - 外部引用：`scope=project` 的文件引用项目根以外的文件。这类引用只有满足以下任一条件才展开，否则记在 `imports_skipped`，原因写明“项目外，Claude Code 未批准”：
   - `~/.claude.json`（设置了 `CLAUDE_CONFIG_DIR` 时为该目录下的 `.claude.json`）的 `projects` 里，这个项目根对应条目的 `hasClaudeMdExternalIncludesApproved` 为 true；
   - 配置了 `[context] external_imports = true`。
-- 链接到项目外：目录部分和项目规则里的文件或 `.claude/rules` 文件夹，真实路径（解开符号链接后）不在它被找到的那一级目录之内时，与外部引用适用同样的条件；不满足时不读，记 `skipped`。
-- 网络路径（`\\server\share`、`//server/share`）形式的外部引用，在判断之前不访问它，以免向网络发起连接。
+- 链接到项目外：项目里找到的规则文件、`.claude/rules` 文件夹和其中的子文件夹，真实路径（解开符号链接后）不在项目根之内时，与外部引用适用同样的条件；不满足时不读，记 `skipped`。项目根以上各级目录里的文件，以它所在的那一级目录为界。链接到项目内其他位置的照常读取；`.claude/rules` 里链接进来的子文件夹照常递归。
+- 网络路径（`\\server\share`、`//server/share`）形式的外部引用，以及指向网络路径的符号链接，在判断之前不访问它，以免向网络发起连接。
+- Claude Code 的批准记录可以在项目根，也可以在项目根到 path 之间任何一级目录（Claude Code 启动的目录）。
+- 名字不是有效 UTF-8 的文件（Linux 允许）跳过，不让整个结果无法发送。
 - `managed`、`global` 文件的引用不受“外部引用”限制，但同样要过守卫。
 
 ### R7 合并、格式开关与全局规则配置
@@ -102,7 +105,7 @@
 - 每个候选目录先找它的项目根，再读 git 配置里所有 remote 的 `url`：
   - `.git` 是文件夹时，读其中的 `config`；
   - `.git` 是文件（worktree）时，按 `gitdir:` 找到 git 目录，若有 `commondir`，读共用目录里的 `config`。
-- 同一项目根只算一次。多个检出目录匹配时，取 git 目录中 `index`、`HEAD`、`FETCH_HEAD` 修改时间最新的那个，其余列在 `other_checkouts`。
+- 同一项目根只算一次。多个检出目录匹配时，取 git 目录中 `index`、`HEAD`、`FETCH_HEAD` 修改时间最新的那个，其余按时间列在 `other_checkouts`，最多 30 个，再多只计数（`other_checkouts_more`）。
 - 结果：
   - 返回中带 `repo`：`name`、`checkout`、`source`、`other_checkouts`；
   - 没给 path 时，path 为检出目录；
@@ -136,7 +139,8 @@ Scenario: (A6) 仓库名映射到本机检出目录
 - 技能列表单独限额约 20,000 字符：
   - 限额内按顺序给出完整条目；
   - 超出部分放进 `skills_more`：`count` 为未完整列出的技能总数，`names` 列出名称，名称也受限额约束，放不下的只计数。
-- `rules_not_applied` 最多占约 8,000 字符，其余只在说明里计数。
+- `rules_not_applied` 按脱敏后的长度最多占约 8,000 字符，其余只在说明里计数。
+- 守卫规则摘要最多占约 8,000 字符，其余只计数（`guards.rules_more`）。
 - 规矩正文使用剩余的预算，按返回顺序依次放入。放不下时，这份文件截断，注明总行数，以及用 `fs_read(path, offset=…)` 继续读的方法。连一条截断说明都放不下的文件不再单独列出，放进 `rules_omitted`：`count` 为文件数，`paths` 在约 2,000 字符内列出路径。
 - 结果中有被脱敏的内容时，带上 `redacted` 计数和 `redaction_note` 说明，与其他工具一致。计数包括被截掉的部分。
 

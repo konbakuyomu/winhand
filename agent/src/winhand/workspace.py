@@ -45,6 +45,7 @@ MAX_IMPORT_HOPS = 4
 MAX_RULE_FILES = 500  # per rules folder
 MAX_LISTED = 30  # imports and skipped imports listed per file
 NOT_APPLIED_CHARS = 8_000
+GUARDS_CHARS = 8_000
 OMITTED_CHARS = 2_500
 MAX_FILE_BYTES = 2_000_000
 BUDGET_CHARS = fs.READ_MAX_CHARS
@@ -142,14 +143,6 @@ def _folder_key(path: str) -> str:
     if path.startswith("\\\\?\\"):
         path = path[4:]
     return os.path.normcase(os.path.normpath(path))
-
-
-def _external_imports_approved(root: str) -> bool:
-    want = _folder_key(root)
-    for folder, entry in _claude_projects().items():
-        if _folder_key(str(folder)) == want and isinstance(entry, dict):
-            return entry.get("hasClaudeMdExternalIncludesApproved") is True
-    return False
 
 
 # ------------------------------------------------------------------ folders
@@ -304,27 +297,118 @@ def rule_paths(text: str) -> list[str] | None:
     return None
 
 
-def _braces(pattern: str, limit: int = 1000) -> list[str]:
+MAX_GLOB_CHARS = 1_000
+
+
+def _braces(pattern: str, limit: int = 1000, depth: int = 0) -> list[str]:
     """`src/*.{c,h}` -> ['src/*.c', 'src/*.h']."""
     start = pattern.find("{")
-    if start < 0:
+    if start < 0 or depth > 8:
         return [pattern]
-    depth = 0
+    level = 0
     for end in range(start, len(pattern)):
         if pattern[end] == "{":
-            depth += 1
+            level += 1
         elif pattern[end] == "}":
-            depth -= 1
-            if depth == 0:
+            level -= 1
+            if level == 0:
                 break
     else:
         return [pattern]
     out: list[str] = []
     for part in _split_top(pattern[start + 1 : end]) or [""]:
-        out += _braces(pattern[:start] + part + pattern[end + 1 :], limit)
+        out += _braces(pattern[:start] + part + pattern[end + 1 :], limit, depth + 1)
         if len(out) >= limit:
             break
     return out[:limit]
+
+
+def _segment_tokens(segment: str) -> list:
+    """`*`, `?`, `[a-z]` / `[!x]` and literal characters (`\\x` escapes one) of one path segment."""
+    tokens: list = []
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+        if ch == "*":
+            if not tokens or tokens[-1] != "*":
+                tokens.append("*")
+            i += 1
+        elif ch == "?":
+            tokens.append("?")
+            i += 1
+        elif ch == "[" and segment.find("]", i + 2) > 0:
+            end = segment.find("]", i + 2)
+            body = segment[i + 1 : end]
+            negate = body[:1] in ("!", "^")
+            tokens.append(("class", negate, body[1:] if negate else body))
+            i = end + 1
+        elif ch == "\\" and i + 1 < len(segment):
+            tokens.append(("lit", segment[i + 1]))
+            i += 2
+        else:
+            tokens.append(("lit", ch))
+            i += 1
+    return tokens
+
+
+def _in_class(body: str, ch: str) -> bool:
+    i = 0
+    while i < len(body):
+        if i + 2 < len(body) and body[i + 1] == "-":
+            if body[i] <= ch <= body[i + 2]:
+                return True
+            i += 3
+        else:
+            if body[i] == ch:
+                return True
+            i += 1
+    return False
+
+
+def _one(token, ch: str) -> bool:
+    if token == "?":
+        return True
+    if token[0] == "lit":
+        return token[1] == ch
+    return _in_class(token[2], ch) != token[1]
+
+
+def _wild(items, tokens, one, star) -> bool:
+    """Wildcard matching where `star` takes any run of items and every other token exactly one:
+    greedy, going back only to the last star, so it takes len(items) * len(tokens) steps at most."""
+    i = t = 0
+    star_at, mark = -1, 0
+    while i < len(items):
+        if t < len(tokens) and tokens[t] != star and one(tokens[t], items[i]):
+            i += 1
+            t += 1
+        elif t < len(tokens) and tokens[t] == star:
+            star_at, mark = t, i
+            t += 1
+        elif star_at >= 0:
+            t = star_at + 1
+            mark += 1
+            i = mark
+        else:
+            return False
+    while t < len(tokens) and tokens[t] == star:
+        t += 1
+    return t == len(tokens)
+
+
+def glob_match(rel: str, pattern: str) -> bool:
+    """Whether a /-separated relative path matches a glob with `**`, `*`, `?` and `[...]`
+    (case-insensitive on Windows). No regular expressions: a repository's pattern cannot make it slow."""
+    if os.name == "nt":
+        rel, pattern = rel.lower(), pattern.lower()
+    segments: list = []
+    for part in pattern.split("/"):
+        if part == "**":
+            if not segments or segments[-1] != "**":
+                segments.append("**")
+        else:
+            segments.append(_segment_tokens(part))
+    return _wild(rel.split("/"), segments, lambda tokens, seg: _wild(seg, tokens, _one, "*"), "**")
 
 
 def rule_applies(paths: list[str], root: str, target: str | None) -> bool:
@@ -335,12 +419,11 @@ def rule_applies(paths: list[str], root: str, target: str | None) -> bool:
     if rel == ".":
         return False
     for glob in paths:
+        if len(glob) > MAX_GLOB_CHARS:
+            continue  # nobody writes such a path; do not spend time on it
         for pattern in _braces(glob.replace("\\", "/").removeprefix("./").lstrip("/")):
-            try:
-                if pattern and guard._PurePath(rel).full_match(pattern):
-                    return True
-            except ValueError:
-                continue
+            if pattern and glob_match(rel, pattern):
+                return True
     return False
 
 
@@ -355,6 +438,7 @@ _TRAILING = ".,;:!?)]}\"'"
 def import_refs(text: str) -> list[str]:
     """The @path references in a CLAUDE.md, skipping code blocks and code spans."""
     refs: list[str] = []
+    known: set[str] = set()
     fence = ""
     for line in text.splitlines():
         m = _FENCE.match(line)
@@ -368,7 +452,8 @@ def import_refs(text: str) -> list[str]:
         line = _CODE_SPAN.sub(lambda s: " " * len(s.group(0)), line)
         for ref in _IMPORT.finditer(line):
             value = ref.group(1).replace("\\ ", " ")
-            if value not in refs:
+            if value not in known:
+                known.add(value)
                 refs.append(value)
     return refs
 
@@ -415,13 +500,15 @@ def _network(path: str) -> bool:
 
 
 class _Rules:
-    """The rule files for one context() call, in the order they are returned."""
+    """The rule files for one context() call. Files imported by a file follow it (children)."""
 
-    def __init__(self, cfg: Config, root: str | None, target: str | None) -> None:
+    def __init__(self, cfg: Config, root: str | None, start: str | None, target: str | None) -> None:
         self.cfg = cfg
         self.root = root
+        self.start = start
         self.target = target
         self.items: list[dict] = []
+        self.children: dict[int, list[dict]] = {}
         self.not_applied: list[dict] = []
         self.texts: dict[int, str] = {}  # id(item) -> text
         self.by_key: dict[str, dict] = {}
@@ -429,6 +516,15 @@ class _Rules:
         self.expanded: set[str] = set()  # files whose @imports were followed
         self.guard_cache: dict = {}
         self._approved: bool | None = None
+
+    def ordered(self) -> list[dict]:
+        out: list[dict] = []
+        stack = list(reversed(self.items))
+        while stack:
+            item = stack.pop()
+            out.append(item)
+            stack.extend(reversed(self.children.get(id(item), [])))
+        return out
 
     def refused(self, path: str) -> str | None:
         """Why the owner's guard rules keep `path` from being read, None when they do not."""
@@ -446,65 +542,116 @@ class _Rules:
 
     def external_ok(self) -> bool:
         if self._approved is None:
-            self._approved = (self.cfg.context or {}).get("external_imports") is True or bool(
-                self.root and _external_imports_approved(self.root)
-            )
+            folders = _chain(self.root, self.start) if self.root and self.start else []
+            self._approved = (self.cfg.context or {}).get(
+                "external_imports"
+            ) is True or _external_imports_approved(folders)
         return self._approved
 
     def _links_out(self, path: str, home: str | None) -> bool:
-        """A project file or folder that is really somewhere outside the folder it is found in."""
+        """A project file or folder that is really somewhere outside `home` (the project root, or for a
+        folder above the project, that folder)."""
         if home is None or self.external_ok():
             return False
         return not guard._under(os.path.realpath(path), os.path.realpath(home))
 
+    def _network_link(self, path: str, home: str | None) -> bool:
+        """A project file that is a link to a network share: refused without looking at the share."""
+        if home is None or self.external_ok():
+            return False
+        try:
+            target = os.readlink(path)
+        except (OSError, ValueError):
+            return False
+        return _network(target) or target.startswith("\\\\?\\UNC\\")
+
+    def _skip(self, path: str, fmt: str, scope: str, why: str, key: str | None = None) -> None:
+        self.seen.add(key or _key(path))
+        self.items.append({"path": path, "format": fmt, "scope": scope, "skipped": why})
+
     def first(self, paths: list[str], fmt: str, scope: str, home: str | None = None) -> None:
         for path in paths:
-            if os.path.isfile(path):
+            if self._network_link(path, home) or os.path.isfile(path):
                 self.file(path, fmt, scope, home=home)
                 return
 
     def file(self, path: str, fmt: str, scope: str, text: str | None = None, home: str | None = None) -> None:
-        """A rule file found in a known place; `home` is the folder of a project file (links out of it
-        need approval)."""
+        """A rule file found in a known place; `home` limits where a project file may really be."""
+        if self._network_link(path, home):
+            key = os.path.normcase(os.path.abspath(path))
+            if key not in self.seen:
+                self._skip(path, fmt, scope, _LINKED_OUT, key)
+            return
         if not os.path.isfile(path) or _key(path) in self.seen:
             return
         why = (_LINKED_OUT if self._links_out(path, home) else None) or self.refused(path)
         if why:
-            self.seen.add(_key(path))
-            self.items.append({"path": path, "format": fmt, "scope": scope, "skipped": why})
+            self._skip(path, fmt, scope, why)
             return
         self._read(path, fmt, scope, None, 0, text)
 
+    def _rule_files(self, folder: str, scope: str, home: str | None) -> tuple[list[str], bool]:
+        """The .md files below a rules folder, following linked subfolders the way linked files are
+        followed; (files, whether there were more than MAX_RULE_FILES)."""
+        found: list[str] = []
+        visited: set[str] = set()
+        stack = [folder]
+        while stack:
+            current = stack.pop()
+            if _key(current) in visited:
+                continue
+            visited.add(_key(current))
+            try:
+                entries = sorted(os.scandir(current), key=lambda e: e.name.lower())
+            except OSError:
+                continue
+            subfolders = []
+            for entry in entries:
+                if entry.name.startswith(".") or not _plain_text(entry.path):
+                    continue
+                try:
+                    if entry.is_symlink() and (
+                        self._network_link(entry.path, home) or self._links_out(entry.path, home)
+                    ):
+                        self._skip(entry.path, "claude-code", scope, _LINKED_OUT)
+                        continue
+                    if entry.is_dir():
+                        subfolders.append(entry.path)
+                    elif entry.name.lower().endswith(".md") and entry.is_file():
+                        found.append(entry.path)
+                except OSError:
+                    continue
+                if len(found) > MAX_RULE_FILES:
+                    return found, True
+            stack.extend(reversed(subfolders))
+        return found, False
+
     def folder(self, folder: str, scope: str, home: str | None = None) -> None:
         """A Claude Code rules folder: every .md below it; one with `paths` only when it applies."""
+        if self._network_link(folder, home):
+            self._skip(folder, "claude-code", scope, _LINKED_OUT, os.path.normcase(os.path.abspath(folder)))
+            return
         if not os.path.isdir(folder):
             return
         if self._links_out(folder, home):
-            self.items.append(
-                {"path": folder, "format": "claude-code", "scope": scope, "skipped": _LINKED_OUT}
-            )
+            self._skip(folder, "claude-code", scope, _LINKED_OUT)
             return
-        found: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(folder):
-            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-            found += [os.path.join(dirpath, f) for f in filenames if f.lower().endswith(".md")]
-            if len(found) > MAX_RULE_FILES:
-                break
+        found, more = self._rule_files(folder, scope, home)
         found.sort(key=lambda p: os.path.relpath(p, folder).replace("\\", "/").lower())
-        if len(found) > MAX_RULE_FILES:
+        if more:
             self.items.append(
                 {
                     "path": folder,
                     "format": "claude-code",
                     "scope": scope,
-                    "skipped": f"more than {MAX_RULE_FILES} rule files here; only the first {MAX_RULE_FILES} "
-                    "(by path) are looked at",
+                    "skipped": f"more than {MAX_RULE_FILES} rule files here; only {MAX_RULE_FILES} of them "
+                    "are looked at",
                 }
             )
         for path in found[:MAX_RULE_FILES]:
             if _key(path) in self.seen:
                 continue
-            why = (_LINKED_OUT if self._links_out(path, home) else None) or self.refused(path)
+            why = self.refused(path)
             text = None
             if not why:
                 try:
@@ -519,12 +666,22 @@ class _Rules:
                 continue
             self.file(path, "claude-code", scope, text, home=home)
 
-    def _read(self, path: str, fmt: str, scope: str, imported_by: str | None, hops: int, text=None) -> None:
+    def _read(
+        self,
+        path: str,
+        fmt: str,
+        scope: str,
+        imported_by: dict | None,
+        hops: int,
+        text: str | None = None,
+    ) -> None:
         self.seen.add(_key(path))
         item: dict = {"path": path, "format": fmt, "scope": scope}
-        if imported_by:
-            item["imported_by"] = imported_by
-        self.items.append(item)
+        if imported_by is None:
+            self.items.append(item)
+        else:
+            item["imported_by"] = imported_by["path"]
+            self.children.setdefault(id(imported_by), []).append(item)
         self.by_key[_key(path)] = item
         try:
             text = _read_file(path) if text is None else text
@@ -540,29 +697,22 @@ class _Rules:
         path = item["path"]
         self.expanded.add(_key(path))
         imports: list[str] = []
+        listed: set[str] = set()
         skipped: list[dict] = []
+        outside = scope == "project" and not self.external_ok()
         for ref in import_refs(text):
             candidates = _import_paths(ref, os.path.dirname(path))
-            outside = scope == "project" and not self.external_ok()
             if outside and any(_network(c) for c in candidates):  # never touch a share on its say-so
                 skipped.append({"import": ref, "path": candidates[0], "reason": _OUTSIDE})
                 continue
             target = next((c for c in candidates if os.path.isfile(c)), None)
             if target is None:
                 continue  # not a file: an @mention, not an import
-            if _key(target) not in {_key(i) for i in imports}:
+            key = _key(target)
+            if key not in listed:
+                listed.add(key)
                 imports.append(target)
-            if _key(target) in self.seen:
-                # read already, perhaps as an AGENTS.md for Codex: Claude Code still follows its imports
-                seen_item = self.by_key.get(_key(target))
-                seen_text = self.texts.get(id(seen_item)) if seen_item else None
-                if (
-                    seen_text is not None
-                    and _key(target) not in self.expanded
-                    and hops + 1 <= MAX_IMPORT_HOPS
-                ):
-                    self._expand(seen_item, seen_text, seen_item["scope"], hops + 1)
-                continue
+            why = None
             if hops + 1 > MAX_IMPORT_HOPS:
                 why = (
                     f"more than {MAX_IMPORT_HOPS} imports deep, so Claude Code does not load it either; "
@@ -570,12 +720,18 @@ class _Rules:
                 )
             elif outside and not self._inside(target):
                 why = _OUTSIDE
-            else:
-                why = self.refused(target)
+            if key in self.seen:
+                # read already, perhaps as an AGENTS.md for Codex: Claude Code still follows its imports
+                seen_item = self.by_key.get(key)
+                seen_text = self.texts.get(id(seen_item)) if seen_item else None
+                if why is None and seen_text is not None and key not in self.expanded:
+                    self._expand(seen_item, seen_text, scope, hops + 1)
+                continue
+            why = why or self.refused(target)
             if why:
                 skipped.append({"import": ref, "path": target, "reason": why})
                 continue
-            self._read(target, "claude-code", scope, path, hops + 1)
+            self._read(target, "claude-code", scope, item, hops + 1)
         if imports:
             item["imports"] = imports[:MAX_LISTED]
             if len(imports) > MAX_LISTED:
@@ -587,6 +743,26 @@ class _Rules:
 
     def _inside(self, path: str) -> bool:
         return bool(self.root) and guard._under(os.path.realpath(path), os.path.realpath(self.root))
+
+
+def _plain_text(path: str) -> bool:
+    """A name that survives being sent as JSON (Linux allows bytes that are not UTF-8 in names)."""
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _external_imports_approved(folders: list[str]) -> bool:
+    """Whether Claude Code approved external imports for the project (recorded under the project
+    root, or the folder it was started in)."""
+    wanted = {_folder_key(f) for f in folders}
+    for folder, entry in _claude_projects().items():
+        if _folder_key(str(folder)) in wanted and isinstance(entry, dict):
+            if entry.get("hasClaudeMdExternalIncludesApproved") is True:
+                return True
+    return False
 
 
 def _read_file(path: str) -> str:
@@ -603,7 +779,7 @@ def _user_claude_md() -> set[str]:
 
 
 def _collect(cfg: Config, root: str | None, start: str | None, target: str | None) -> _Rules:
-    rules = _Rules(cfg, root, target)
+    rules = _Rules(cfg, root, start, target)
     formats = _formats(cfg)
     if "rules" in (cfg.context or {}):  # the owner's own list replaces the formats' global files
         for path in _setting(cfg, "rules", []):
@@ -633,17 +809,16 @@ def _collect(cfg: Config, root: str | None, start: str | None, target: str | Non
     )
     for folder in levels:
         in_project = os.path.normcase(folder) in project
+        home = root if in_project else folder  # where a file found here may really be
         for fmt in formats:
             if fmt == "codex":
                 if in_project:
-                    rules.first(
-                        [os.path.join(folder, n) for n in CODEX_FILES], "codex", "project", home=folder
-                    )
+                    rules.first([os.path.join(folder, n) for n in CODEX_FILES], "codex", "project", home=home)
                 continue
             for path in claude_files(folder):
-                rules.file(path, "claude-code", "project", home=folder)
+                rules.file(path, "claude-code", "project", home=home)
             if agents_for_claude and in_project:
-                rules.file(os.path.join(folder, "AGENTS.md"), "claude-code", "project", home=folder)
+                rules.file(os.path.join(folder, "AGENTS.md"), "claude-code", "project", home=home)
             if os.path.normcase(folder) == os.path.normcase(root):
                 rules.folder(os.path.join(root, ".claude", "rules"), "project", home=root)
     return rules
@@ -659,7 +834,7 @@ def _skills_in(folder: str, scope: str, refused=None) -> list[dict]:
         return []
     out = []
     for entry in entries:
-        if entry.name.startswith(".") or not entry.is_dir():
+        if entry.name.startswith(".") or not _plain_text(entry.path) or not entry.is_dir():
             continue
         skill_md = os.path.join(entry.path, "SKILL.md")
         if not os.path.isfile(skill_md) or (refused and refused(skill_md)):
@@ -816,11 +991,12 @@ def find_repo(cfg: Config, repo: str) -> dict:
             f"{config.config_path()} (for example repo_roots = ['D:\\code']), or call context with path= instead."
         )
     ordered = sorted(found.values(), key=lambda f: f[2], reverse=True)
-    return {
+    more = {"other_checkouts_more": len(ordered) - 1 - MAX_LISTED} if len(ordered) - 1 > MAX_LISTED else {}
+    return more | {
         "name": repo,
         "checkout": ordered[0][0],
         "source": ordered[0][1],
-        "other_checkouts": [f[0] for f in ordered[1:]],
+        "other_checkouts": [f[0] for f in ordered[1 : 1 + MAX_LISTED]],
     }
 
 
@@ -868,8 +1044,8 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
     out["rules"] = []
     if rules.not_applied:
         listed, used = [], 0
-        for entry in rules.not_applied:
-            cost = _json_len(entry) + 1
+        for entry in mask(rules.not_applied):
+            cost = _json_len(entry) + 2
             if used + cost > NOT_APPLIED_CHARS:
                 break
             listed.append(entry)
@@ -887,7 +1063,7 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
     every_skill = mask(skills(cfg, root, rules.refused))
     shown, used = [], 2
     for skill in every_skill:
-        cost = _json_len(skill) + 1
+        cost = _json_len(skill) + 2
         if used + cost > SKILLS_FULL_CHARS:
             break
         shown.append(skill)
@@ -916,7 +1092,16 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         "When a skill fits the task, read its SKILL.md with fs_read and follow it; run the scripts it "
         "names on this machine with run."
     )
-    out["guards"] = mask(guard.rules_for(start))
+    out["guards"] = guards = mask(guard.rules_for(start))
+    kept, used = [], 0
+    for rule in guards["rules"]:
+        used += _json_len(rule) + 2
+        if used > GUARDS_CHARS:
+            guards["rules_more"] = len(guards["rules"]) - len(kept)
+            guards["rules_more_note"] = "the rest are in the guard rule files listed above"
+            break
+        kept.append(rule)
+    guards["rules"] = kept
     out["local_mcp_servers"] = {
         "names": mask([s.name for s in cfg.servers if s.enabled]),
         "note": "each is its own MCP endpoint at <relay>/mcp/<name>, added as a separate connector",
@@ -937,11 +1122,11 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
     # name the files that do not fit at all
     budget = BUDGET_CHARS - _json_len(out) - 300 - OMITTED_CHARS
     omitted: list[str] = []
-    for item in rules.items:
+    for item in rules.ordered():
         text = rules.texts.get(id(item))
         item = mask(item)
         if text is None:
-            cost = _json_len(item) + 1
+            cost = _json_len(item) + 2
             if cost > budget:
                 omitted.append(item["path"])
                 continue
@@ -951,7 +1136,7 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         text = mask(text)
         lines = text.splitlines()
         item["lines"] = len(lines)
-        cost = _json_len(item) + len(', "content": ""') + 1
+        cost = _json_len(item) + len(', "content": ""') + 2
         if cost + _encoded(text) <= budget:
             item["content"] = text
             budget -= cost + _encoded(text)
@@ -989,4 +1174,20 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
     if masked:
         out["redacted"] = masked
         out["redaction_note"] = redact.NOTE
-    return out
+    return _sendable(out)
+
+
+def _sendable(value):
+    """The result with any text that is not valid Unicode (a file name in bytes Linux allows)
+    made printable, so it can be sent as JSON."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+            return value
+        except UnicodeEncodeError:
+            return value.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
+    if isinstance(value, dict):
+        return {k: _sendable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sendable(v) for v in value]
+    return value
