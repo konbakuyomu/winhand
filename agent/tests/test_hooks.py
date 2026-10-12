@@ -690,9 +690,11 @@ def test_a_hooks_file_codex_would_reject_is_not_used(env):
 
 
 def make_worktree(main: Path, worktree: Path) -> None:
+    """What `git worktree add` leaves: the worktree's .git file, and git's records of it."""
     gitdir = main / ".git" / "worktrees" / worktree.name
     gitdir.mkdir(parents=True)
     (gitdir / "commondir").write_text("../..\n")
+    (gitdir / "gitdir").write_text(f"{worktree / '.git'}\n")
     worktree.mkdir()
     (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
 
@@ -871,3 +873,55 @@ def test_context_stays_small_when_a_hooks_file_is_huge(env):
 
 def test_a_strange_hooks_timeout_falls_back(monkeypatch):
     assert hooks.timeout_cap({"timeout_s": float("inf")}) == hooks.DEFAULT_TIMEOUT_S
+
+
+# ------------------------------------------------------------------ round 5
+
+
+def test_optional_fields_set_to_null_count_as_not_set(env):
+    handler = {**codex_command("deny-src"), "statusMessage": None}
+    codex_file(env, {"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [handler]}]}})
+    action = Action("write", "fs_write", paths=(str(env["root"] / "src" / "a.c"),))
+    (finding,) = hooks.check([action], "fs_write", {"content": "x"})
+    assert finding.decision == "deny"
+    for key in ("commandWindows", "command_windows"):
+        assert hooks._unsupported(hooks.Hook("codex", "f", 0, 0, None, {"command": "x", key: None})) is None
+    claude = hooks.Hook("claude-code", "f", 0, 0, None, {"command": "x", "args": None, "statusMessage": None})
+    assert hooks._unsupported(claude) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need a privilege on Windows")
+def test_a_project_reached_through_a_link_keeps_its_trust(env, tmp_path):
+    codex_project_hook(env, "by-command", "Bash")
+    claude_project_hook(env, "by-command", "Bash")
+    link = tmp_path / "linked"
+    os.symlink(env["root"], link)
+    found, _ = hooks.discover(str(link))
+    assert sorted(h.status for h in found) == ["trusted", "trusted"]
+
+
+def test_a_folder_that_only_claims_to_be_a_worktree_is_not_one(env, tmp_path):
+    claude_project_hook(env, "by-command", "Bash")  # trusts env["root"]
+    fake = tmp_path / "unpacked"
+    (fake / "fakegit").mkdir(parents=True)
+    (fake / "fakegit" / "commondir").write_text(f"{env['root'] / '.git'}\n")
+    (fake / ".git").write_text("gitdir: fakegit\n")
+    (fake / ".claude").mkdir()
+    (fake / ".claude" / "settings.json").write_text((env["root"] / ".claude" / "settings.json").read_text())
+    assert hooks._main_checkout(str(fake)) == str(fake)
+    found, _ = hooks.discover(str(fake))
+    assert [h.status for h in found if h.source == "claude-code"] == ["untrusted"]
+
+
+def test_the_legacy_managed_file_can_decide_trust(env, monkeypatch, tmp_path):
+    codex_project_hook(env, "by-command", "Bash", trust_project=False)
+    legacy = tmp_path / "managed_config.toml"
+    legacy.write_text(f'[projects.{json.dumps(str(env["root"]))}]\ntrust_level = "trusted"\n')
+    monkeypatch.setattr(hooks, "codex_legacy_managed_config", lambda: str(legacy))
+    (hook,) = [h for h in hooks.discover(str(env["root"]))[0] if h.source == "codex"]
+    assert hook.status == "trusted"
+
+
+def test_mcp_input_numbers_are_judged_as_serde_reads_them():
+    assert hooks._toml_value({"n": 2**70}) and hooks._toml_value({"n": -(2**63)})
+    assert not hooks._toml_value({"n": 2**63})

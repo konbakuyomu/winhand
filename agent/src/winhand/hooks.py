@@ -341,7 +341,7 @@ def _toml_value(value: object) -> bool:
     if isinstance(value, list):
         return all(_toml_value(v) for v in value)
     if isinstance(value, int) and not isinstance(value, bool):
-        return -(2**63) <= value < 2**63
+        return not 2**63 <= value < 2**64  # a u64 TOML cannot hold; larger ones are floats to serde_json
     return True
 
 
@@ -354,12 +354,13 @@ def _unsupported(hook: Hook) -> str | None:
     for key in ("async",) if hook.source == "codex" else ("async", "asyncRewake", "if", "once"):
         if h.get(key):
             return f"hooks with `{key}` are not run by winhand"
-    for key in ("command", "commandWindows", "command_windows"):
-        if key in h and not isinstance(h[key], str):
+    # a field set to null counts as not set, as in Codex (serde's Option)
+    for key in ("command", "commandWindows", "command_windows", "statusMessage"):
+        if h.get(key) is not None and not isinstance(h[key], str):
             return f"`{key}` is not a string"
     if not hook.command.strip():
         return "it has no command"
-    if hook.source == "claude-code" and "args" in h and not isinstance(h["args"], list):
+    if hook.source == "claude-code" and h.get("args") is not None and not isinstance(h["args"], list):
         return "`args` is not a list"
     timeout = h.get("timeout")
     if timeout is not None:
@@ -369,9 +370,6 @@ def _unsupported(hook: Hook) -> str | None:
             return "`timeout` is not a number of seconds" + (
                 " (Codex wants a whole number)" if number and hook.source == "codex" else ""
             )
-    for key in ("statusMessage",):
-        if key in h and not isinstance(h[key], str):
-            return f"`{key}` is not a string"
     matcher = hook.matcher
     if not _matches_all(hook) and not _EXACT[_dialect(hook)].fullmatch(matcher or ""):
         try:
@@ -476,7 +474,7 @@ def _codex_user() -> tuple[dict, dict[str, str], list[dict]]:
     data, error = _load(path, "toml")
     errors = [{"file": path, "error": error}] if error else []
     levels: dict[str, str] = {}
-    for source in (os.path.join(codex_system_dir(), "config.toml"), path):
+    for source in (os.path.join(codex_system_dir(), "config.toml"), path, codex_legacy_managed_config()):
         found, _ = _load(source, "toml")
         projects = found.get("projects") if isinstance(found, dict) else None
         for k, v in (projects if isinstance(projects, dict) else {}).items():
@@ -511,13 +509,24 @@ def _codex_hooks_on(config_files: list[str], requirements: object) -> bool:
     return on
 
 
+def _spellings(path: str) -> list[str]:
+    """`path` and, when links make it differ, the path they lead to."""
+    try:
+        real = os.path.realpath(path)
+    except (OSError, ValueError):
+        return [path]
+    return [path] if _folder_key(real) == _folder_key(path) else [path, real]
+
+
 def _codex_folder_trusted(candidates: list[str], levels: dict[str, str]) -> bool:
     """Codex decides a .codex folder's trust by the first of these with a trust_level: the folder,
-    the project root, the repository's main checkout (loader decision_for_dir)."""
+    the project root, the repository's main checkout (loader decision_for_dir); each looked up by
+    its real path first, then as written."""
     for folder in candidates:
-        level = levels.get(_folder_key(folder))
-        if level is not None:
-            return level == "trusted"
+        for spelling in reversed(_spellings(folder)):
+            level = levels.get(_folder_key(spelling))
+            if level is not None:
+                return level == "trusted"
     return False
 
 
@@ -574,7 +583,14 @@ def _codex(root: str, chain: list[str]) -> tuple[list[Hook], list[dict]]:
 
 def _codex_status(hook, layer, folder_trusted, state, managed_only) -> None:
     why = _unsupported(hook)
-    entry = state.get(_state_key(hook.key), {})
+    entry = next(
+        (
+            state[k]
+            for f in _spellings(hook.file)
+            if (k := _state_key(f"{f}{hook.key[len(hook.file) :]}")) in state
+        ),
+        {},
+    )
     if why:
         hook.status, hook.reason = "unsupported", why
     elif layer == "managed":
@@ -615,7 +631,7 @@ def _claude_trusted(root: str) -> bool:
     where Claude Code keeps it), or for a folder above it when the project is not a repository of
     its own (trust covers subfolders, not nested repositories)."""
     own_repo = os.path.exists(os.path.join(root, ".git"))
-    exact = {_folder_key(root), _folder_key(_main_checkout(root))}
+    exact = {_folder_key(s) for f in (root, _main_checkout(root)) for s in _spellings(f)}
     for folder, entry in workspace._claude_projects().items():
         if not isinstance(entry, dict) or entry.get("hasTrustDialogAccepted") is not True:
             continue
@@ -682,14 +698,57 @@ def _claude(root: str) -> tuple[list[Hook], list[dict]]:
 
 
 def _main_checkout(root: str) -> str:
-    """The main checkout of a linked git worktree; `root` itself otherwise."""
-    if not os.path.isfile(os.path.join(root, ".git")):
+    """The main checkout of a linked git worktree; `root` itself otherwise. As Codex does
+    (git-utils trust.rs), only when the records agree: the worktree's git folder sits in
+    <common>/worktrees/, points back at this checkout, names that common folder, and the main
+    checkout's .git is that common folder."""
+    dot = os.path.join(root, ".git")
+    try:
+        if not os.path.isfile(dot) or os.path.islink(dot) or os.path.getsize(dot) > 64 * 1024:
+            return root
+        gitdir = _gitdir_file(dot)
+        if not gitdir or not os.path.isdir(gitdir) or os.path.islink(gitdir):
+            return root
+        real = os.path.realpath(gitdir)
+        if os.path.basename(os.path.dirname(real)) != "worktrees":
+            return root
+        common = os.path.dirname(os.path.dirname(real))
+        back = _read_small(os.path.join(real, "gitdir"))
+        commondir = _read_small(os.path.join(real, "commondir"))
+        if not back or not commondir:
+            return root
+        registered = os.path.join(real, back)
+        if os.path.basename(registered) != ".git":
+            return root
+        if os.path.realpath(os.path.dirname(registered)) != os.path.realpath(root):
+            return root
+        if os.path.realpath(os.path.join(real, commondir)) != common:
+            return root
+        main = os.path.dirname(os.path.dirname(os.path.dirname(gitdir)))
+        main_dot = os.path.join(main, ".git")
+        main_git = main_dot if os.path.isdir(main_dot) else _gitdir_file(main_dot)
+        if not main_git or os.path.realpath(main_git) != common:
+            return root
+        return main
+    except (OSError, ValueError):
         return root
-    gitdir, common = workspace._git_dirs(root)
-    if not gitdir or not common or os.path.basename(os.path.normpath(common)) != ".git":
-        return root
-    main = os.path.dirname(os.path.normpath(common))
-    return root if _folder_key(main) == _folder_key(root) else main
+
+
+def _read_small(path: str) -> str:
+    with open(path, "rb") as fh:
+        return fh.read(64 * 1024).decode("utf-8", "replace").strip()
+
+
+def _gitdir_file(dot: str) -> str | None:
+    """The folder a `.git` file points at (`gitdir: <path>`, relative to the file's folder)."""
+    try:
+        text = _read_small(dot)
+    except OSError:
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    target = text[len("gitdir:") :].strip()
+    return os.path.normpath(os.path.join(os.path.dirname(dot), target)) if target else None
 
 
 def discover(folder: str, cfg: dict | None = None) -> tuple[list[Hook], list[dict]]:
@@ -724,7 +783,7 @@ def describe(folder: str | None, max_chars: int = 6_000) -> dict:
     try:
         hooks, errors = discover(folder, cfg)
     except Exception as exc:  # reported, not raised: context() still answers
-        return {"hooks": [], "errors": [{"file": folder, "error": f"hooks could not be read ({exc})"}]}
+        return {"hooks": [], "errors": [{"file": folder, "error": _clip(f"hooks could not be read ({exc})")}]}
     listed, used = [], 0
     for hook in hooks:
         item = hook.summary()

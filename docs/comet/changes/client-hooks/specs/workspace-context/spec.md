@@ -253,7 +253,7 @@ Scenario: (A10) 不擅自读项目外和受保护的文件
   - `runs`：是否会运行；不运行时附 `reason`。
 - 配置文件无法解析时，列出文件和错误。
 - `[hooks] sources = []` 时不读 hooks 配置，`hooks` 为空，并说明已关闭。
-- `hooks` 一项最多占约 6,000 字符，其余只计数。
+- `hooks` 一项的列表最多占约 6,000 字符，其余只计数；无法读取的文件另列，每条原因最多 300 字符，连同列表不超过约 10,000 字符。
 
 Scenario: (A7) context 列出 hooks
 - 设置：项目 `.codex/hooks.json` 有一个已信任的 hook 和一个未信任的 hook；项目 `.claude/settings.json` 有一个 hook，但项目没有接受工作区信任。

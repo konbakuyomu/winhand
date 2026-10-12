@@ -11,7 +11,7 @@
 ### R1 找到 hooks
 
 - 对一个动作，winhand 按它的锚点目录（命令的 `cwd`，文件动作的文件所在目录；会话输入用会话的工作目录）找出对它生效的 hooks。
-- 项目根的定义与 `context()` 相同：最近一个含 `.git` 的上级目录；找不到时为锚点目录本身。
+- 项目根的定义与 `context()` 相同：最近一个含 `.git` 的上级目录；找不到时为锚点目录本身。（Codex 可以用 `project_root_markers` 换掉 `.git` 这个标记，判断仓库主检出目录时还会跳过没有 `HEAD` 的 `.git` 文件夹；这两处 winhand 不跟随。）
 - Codex（`[hooks] sources` 含 `codex` 时）：
   - 用户层：`$CODEX_HOME`（默认 `~/.codex`）下的 `hooks.json`，以及 `config.toml` 的 `[hooks]`；
   - 项目层：项目根到锚点目录沿途每一级的 `.codex/hooks.json` 和 `.codex/config.toml` 的 `[hooks]`；
@@ -47,17 +47,18 @@ Codex：
     - `trusted_hash` 等于当前哈希（R3）：`trusted`；
     - `trusted_hash` 存在但不相等：`modified`；
     - 没有 `trusted_hash`：`untrusted`。
-- 项目层的 hook 还要求它所在的 `.codex` 文件夹被 Codex 信任，按 Codex 的方式逐个文件夹判断：依次看这一级目录、项目根、仓库的主检出目录在系统层和用户 `config.toml` 的 `[projects]` 里的 `trust_level`，取第一个有记录的；它是 `trusted` 才信任。不满足时为 `untrusted`，原因写明这个文件夹未被信任。
+  - 经符号链接到达的项目：键按写法和真实路径各查一次，任一处有记录即用它。
+- 项目层的 hook 还要求它所在的 `.codex` 文件夹被 Codex 信任，按 Codex 的方式逐个文件夹判断：依次看这一级目录、项目根、仓库的主检出目录在系统层、用户 `config.toml` 和旧式托管文件的 `[projects]` 里的 `trust_level`（后者覆盖前者），取第一个有记录的；每个目录先按真实路径（跟随符号链接）查，再按写法查；它是 `trusted` 才信任。不满足时为 `untrusted`，原因写明这个文件夹未被信任。
 - `CODEX_HOME` 恰好是某个项目的 `.codex` 时，它只算用户层，不再作为项目层读第二次。
-- 链接的 git 工作树（`.git` 是文件）：按 Codex 的做法，工作树里存在 `.codex` 文件夹的那几级，hooks 从主检出目录里对应的 `.codex` 读取；信任按上一条，依次看工作树的这一级、工作树根、主检出目录。
+- 链接的 git 工作树（`.git` 是文件）：只有 git 自己的记录都对得上时才算（与 Codex 相同）：工作树的 git 文件夹在 `<公共目录>/worktrees/` 下，它的 `gitdir` 指回这个工作树，`commondir` 指向那个公共目录，主检出目录的 `.git` 就是这个公共目录。算作工作树时，按 Codex 的做法，工作树里存在 `.codex` 文件夹的那几级，hooks 从主检出目录里对应的 `.codex` 读取；信任按上一条，依次看工作树的这一级、工作树根、主检出目录。
 - Codex 会整份拒绝的 hooks 文件，其中的 hooks 一个都不运行，在 `context()` 中报出原因。按 Codex 读文件的方式（serde）判断：
   - 整份拒绝：`hooks.json` 顶层有 `description`、`hooks` 以外的键；以 UTF-8 字节顺序标记开头；任一已知事件（不只是 PreToolUse）下的组或 handler 类型不对，例如 handler 没有 `type`、`type` 不认识（如 `http`）、command handler 没有 `command`、`timeout` 不是非负整数、`async` 不是布尔值、mcp_tool handler 没有 `server` 或 `tool`；
-  - 不影响：组和 handler 里 Codex 不认识的键（例如 `description`、`shell`、`args`、`if`）、不认识的事件名、`matcher` 为 null，Codex 都忽略，winhand 也照常读取；
+  - 不影响：组和 handler 里 Codex 不认识的键（例如 `description`、`shell`、`args`、`if`）、不认识的事件名、`matcher` 为 null，Codex 都忽略，winhand 也照常读取；可选字段（`commandWindows`、`statusMessage`、`timeout` 等）设为 null，等于没设；
   - 只跳过一个 handler：在 Windows 上 `commandWindows` 设为空字符串，或命令只有空白（Codex 跳过这一个）。
 
 Claude Code：
 - 托管层的：`managed`。
-- 链接的 git 工作树：工作区信任也看主检出目录的记录（Claude Code 按主检出目录记工作区信任）。
+- 链接的 git 工作树（判断方法同 Codex 一节）：工作区信任也看主检出目录的记录（Claude Code 按主检出目录记工作区信任）。经符号链接到达的项目，按写法和真实路径各查一次。
 - 托管设置中 `allowManagedHooksOnly = true` 时，其余来源都是 `disabled`。
 - 按 Claude Code 的设置优先级（托管 > 项目本地 > 项目 > 用户），`disableAllHooks` 为 true 时，非托管来源都是 `disabled`。
 - 其余：`.claude.json` 的 `projects` 中，项目根的 `hasTrustDialogAccepted` 为 true 时为 `trusted`。项目根不是独立的仓库（没有 `.git`）时，上级目录的信任也算；是独立仓库时，上级目录的信任不覆盖它（工作区信任不覆盖嵌套的仓库）。否则为 `untrusted`。

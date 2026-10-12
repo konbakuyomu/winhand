@@ -303,7 +303,7 @@ reason = "要改守卫规则"
   - Claude Code：项目已接受工作区信任时才运行；
   - 管理员下发的 hooks 总是运行。
 
-  没信任、改过、被关掉的不运行。`context(path)` 的 `hooks` 一项列出每个 hook 的状态和原因。
+  没信任、改过、被关掉的不运行；Codex 自己读不了的 hooks 文件、Codex 的 `[features] hooks = false` 也一样。`context(path)` 的 `hooks` 一项列出每个 hook 的状态和原因，以及读不了的文件。
 - **hook 看到什么**：动作按那个工具自己的样子交给它。
   - 命令、shell 会话里提交的一行，都是 `Bash`；
   - 写文件：Claude Code 是 `Write`、`Edit`，Codex 是 `apply_patch`；
@@ -331,7 +331,7 @@ command = 'python C:\tools\check_command.py'   # 读 stdin 的 JSON，退出码 
 
 ```toml
 [hooks]
-sources = ['codex', 'claude-code']   # [] = 一个都不运行
+sources = ['codex', 'claude-code']   # [] = 这两个工具的 hook 一个都不运行（guards.toml 的 command 规则照常）
 timeout_s = 30                       # 每个 hook 最多等多久
 ```
 

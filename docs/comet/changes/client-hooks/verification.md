@@ -106,6 +106,34 @@
 - 组或 handler 写成 JSON 数组的位置形式：serde 接受，winhand 整份不用。
 - Codex 的正则语法与 Python 的个别差异。
 
-## 第 4 轮
+## 第 4 轮（1313e3e）
+
+**正式检查**
+- 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 428 passed，40 skipped。
+- `agent.yml`（run 38214141158，1313e3e）：ubuntu、windows 都通过。
+
+**独立 Verifier 结论**：A1–A10 全部通过。第 3 轮的 N1–N6、所有“小”和“另”的条目都已修好（Windows 专属的两条只读代码判断）。
+
+Verifier 的核对方法：
+- 用 Codex 实际使用的 serde 类型和 toml 0.9.5 重建对照程序，对比了 94 个 `hooks.json` 用例、21 个 `config.toml`/`requirements.toml` 用例；
+- 另外 5 个 handler 的哈希与 Codex 的 Rust 代码算出的完全一致。
+
+新发现：
+
+| # | 问题 | 级别 | 处理（第 5 轮） |
+|---|---|---|---|
+| P1 | 可选字段设为 null（`"statusMessage": null`、`"commandWindows": null`）时 hook 被列为不支持，已信任、会拒绝的 hook 不运行（Codex 按“没设”照常运行，哈希也不变） | 次要（更松，实测） | null 等于没设；Claude Code 的 `args: null` 同样处理 |
+| P2 | 经符号链接到达的项目（例如 macOS 的 `/tmp`、链接过去的代码目录）：Codex 先按真实路径查信任，`hooks.state` 的键也可能是真实路径；winhand 只按写法查，于是显示未信任，拒绝的 hook 不运行 | 次要（更松，实测） | 信任按真实路径、再按写法查；`hooks.state` 的键按写法和真实路径各查一次；Claude Code 的工作区信任同样 |
+| P3 | 判断链接的工作树时只看 `commondir`，没有核对 git 的其他记录；一个解压出来的文件夹可以自称是某个已信任仓库的工作树，让它的 `.claude/settings.json` hooks 被当成已信任 | 疑似 | 按 Codex（git-utils trust.rs）核对全部记录：git 文件夹在 `<公共目录>/worktrees/` 下、`gitdir` 指回本工作树、`commondir` 指向公共目录、主检出目录的 `.git` 就是公共目录；有一处不符就不算工作树 |
+| 小 | 旧式托管文件的 `[projects]` 没有参与信任判断 | 小 | 参与，且优先于用户层 |
+| 小 | mcp_tool 的 `input` 里超出 u64 的整数：serde_json 读成浮点数，Codex 接受；winhand 整份拒绝 | 小（更松） | 按 serde 判断：只有 2^63 到 2^64 之间的整数 TOML 装不下 |
+| 小 | `context()` 读 hooks 出异常时，错误文字没有截短 | 小 | 截短到 300 字符 |
+| 规格 | workspace-context R13 的 hooks 大小与代码不一致；hooks R1 没提 Codex 的 `project_root_markers` 和没有 `HEAD` 的 `.git` | 小 | 规格写明：列表约 6,000 字符，连同错误不超过约 10,000；这两处 Codex 的细节 winhand 不跟随 |
+
+**留下的、不处理的差异**（第 3 轮已列的之外；都是 winhand 更严，或者极少见）
+- TOML 里用日期时间当 `statusMessage`（toml 0.9 会转成字符串，winhand 整份拒绝）。
+- `timeout` 写成 `-0`、字符串里有孤立代理字符、`requirements.toml` 的 `managed_dir` 不是路径：Codex 整份拒绝，winhand 照常读。
+
+## 第 5 轮
 
 （待填）
