@@ -597,9 +597,22 @@ class GuardActions(Middleware):
             (hooks.guard_hook(r.file, r.index, r.command or "", r.timeout_s), a) for r, a in verdict.commands
         ]
         message = context.message
-        findings = await asyncio.to_thread(
-            hooks.check, actions, message.name, dict(message.arguments or {}), commands
-        )
+        try:
+            findings = await asyncio.to_thread(
+                hooks.check, actions, message.name, dict(message.arguments or {}), commands
+            )
+        except Exception as exc:  # the owner's hooks could not be asked: do nothing rather than skip them
+            refused = Rule(
+                file="hooks",
+                index=0,
+                on=(actions[0].kind,),
+                decision="deny",
+                reason=f"the hooks that apply here could not be run ({exc}); nothing was done",
+                label="winhand hooks",
+            )
+            verdict.deny.append((refused, actions[0]))
+            verdict.settle()
+            return
         for f in findings:
             rule = Rule(
                 file=f.hook.file,

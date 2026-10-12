@@ -44,16 +44,20 @@ Codex：
     - `trusted_hash` 等于当前哈希（R3）：`trusted`；
     - `trusted_hash` 存在但不相等：`modified`；
     - 没有 `trusted_hash`：`untrusted`。
-- 项目层的 hook 还要求用户 `config.toml` 的 `[projects."<项目根>"]` 中 `trust_level = "trusted"`；不满足时为 `untrusted`，原因写明项目未被信任。
+- 项目层的 hook 还要求它所在的 `.codex` 文件夹被 Codex 信任，按 Codex 的方式逐个文件夹判断：先看这一级目录在用户 `config.toml` 的 `[projects]` 里的 `trust_level`，没有时看项目根的；两者有一个是 `untrusted` 就不信任。不满足时为 `untrusted`，原因写明这个文件夹未被信任。
+- `CODEX_HOME` 恰好是某个项目的 `.codex` 时，它只算用户层，不再作为项目层读第二次。
 
 Claude Code：
 - 托管层的：`managed`。
 - 托管设置中 `allowManagedHooksOnly = true` 时，其余来源都是 `disabled`。
 - 按 Claude Code 的设置优先级（托管 > 项目本地 > 项目 > 用户），`disableAllHooks` 为 true 时，非托管来源都是 `disabled`。
-- 其余：`.claude.json` 的 `projects` 中，项目根或它的某个上级目录的 `hasTrustDialogAccepted` 为 true 时为 `trusted`，否则为 `untrusted`。
+- 其余：`.claude.json` 的 `projects` 中，项目根的 `hasTrustDialogAccepted` 为 true 时为 `trusted`。项目根不是独立的仓库（没有 `.git`）时，上级目录的信任也算；是独立仓库时，上级目录的信任不覆盖它（工作区信任不覆盖嵌套的仓库）。否则为 `untrusted`。
+- 托管设置里 `disableAllHooks = true` 时，所有 hooks（包括托管的）都是 `disabled`；其他设置文件里的 `disableAllHooks` 只关掉非托管的。
 
 两种来源都适用：
 - `type` 不是 `command` 的 hook、带 `async`、`if`、`once` 的 hook：`unsupported`，不运行。
+- 字段类型不对的 hook（`command` 不是字符串、`timeout` 不是秒数，Codex 要求整数；`args` 不是列表）、matcher 不是有效正则的 hook：`unsupported`，写明原因，不运行，也不影响其他 hook 和这次调用。
+- 配置文件只读普通文件，最多 4 MB；设备文件、过大的文件按“无法读取”报告。
 
 ### R3 Codex 的哈希
 
@@ -107,7 +111,8 @@ Scenario: (A4) 与 Codex 的测试值一致
   - 环境变量加上 `CLAUDE_PROJECT_DIR=<项目根>`。
 - 环境变量继承 winhand 的环境。
 - 同一个动作匹配到的 hooks 并行运行。
-- 超时：取 hook 自己的 `timeout`（秒，默认 600）与 `[hooks] timeout_s`（默认 30）中较小的一个。超时后结束整个进程树。
+- 超时：取 hook 自己的 `timeout`（秒，默认 600；Codex 至少 1 秒）与 `[hooks] timeout_s`（默认 30）中较小的一个。超时后结束整个进程树；在 Linux、macOS 上连同它的整个进程组。
+- hook 已经退出、只是它启动的进程还占着输出时，按它的退出码和输出判断，不算超时。
 - 运行时不弹出窗口。
 
 ### R6 结论
@@ -128,7 +133,9 @@ Scenario: (A4) 与 Codex 的测试值一致
 | `additionalContext`、`systemMessage` | 附注 | 附注 |
 | 其他退出码、超时、无法启动、stdout 以 `{` 开头但不是有效的 JSON 对象 | 失败；`onFailure = "block"` 时改为拒绝 | 失败 |
 
+- Codex 来源的输出按 Codex 的严格方式读：有 Codex 不认识的字段，或出现 `continue: false`、`stopReason`、`suppressOutput: true`，都算失败。
 - “失败”表示放行，并在结果里附注哪个 hook 失败及原因。
+- winhand 自己在找 hooks、运行 hooks 时出错（不是 hook 本身失败）：这次调用被拒绝，并写明原因。宁可不做，也不跳过房主的 hooks。
 - 一个动作的结论按以下顺序取最严的一个：拒绝 > 请人确认 > 附注 > 无。
 - 与 `guards.toml` 的结论合在一起，也按这个顺序取最严的。hooks 不能放过 `guards.toml` 拒绝的动作。
 - 拒绝时，工具错误写明：

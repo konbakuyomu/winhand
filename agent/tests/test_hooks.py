@@ -417,3 +417,169 @@ def test_codex_trust_keys_compare_like_the_file_system():
 
 def test_workspace_is_imported():  # hooks reuse context()'s view of where Codex and Claude Code live
     assert hooks.workspace is workspace
+
+
+# ------------------------------------------------------------------ round 2
+
+
+def codex_hook_in(env, folder: Path, mode: str = "by-command", matcher: str = "Bash") -> None:
+    """A trusted-by-hash Codex hook in `folder`/.codex; the trust of folders is set by each test."""
+    handler = codex_command(mode)
+    path = folder / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": matcher, "hooks": [handler]}]}}), encoding="utf-8"
+    )
+    config = env["tmp"] / "codex" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    key = f"{path}:pre_tool_use:0:0"
+    with open(config, "a", encoding="utf-8") as fh:
+        fh.write(f'[hooks.state.{json.dumps(key)}]\ntrusted_hash = "{hooks.codex_hash(matcher, handler)}"\n')
+
+
+def trust_levels(env, levels: dict) -> None:
+    config = env["tmp"] / "codex" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    with open(config, "a", encoding="utf-8") as fh:
+        for folder, level in levels.items():
+            fh.write(f'[projects.{json.dumps(str(folder))}]\ntrust_level = "{level}"\n')
+
+
+@pytest.mark.parametrize(
+    ("hook_in", "levels", "runs"),
+    [
+        ("root", {"root": "untrusted", "sub": "trusted"}, False),
+        ("sub", {"root": "trusted", "sub": "untrusted"}, False),
+        ("root", {"sub": "trusted"}, False),
+        ("sub", {"sub": "trusted"}, True),
+        ("sub", {"root": "trusted"}, True),
+    ],
+)
+def test_codex_trust_is_decided_for_each_codex_folder(env, hook_in, levels, runs):
+    root = env["root"]
+    sub = root / "sub"
+    sub.mkdir()
+    folders = {"root": root, "sub": sub}
+    codex_hook_in(env, folders[hook_in])
+    trust_levels(env, {folders[k]: v for k, v in levels.items()})
+    found, _ = hooks.discover(str(sub))
+    (hook,) = [h for h in found if h.file.startswith(str(root))]
+    assert hook.runs is runs, (hook.status, hook.reason)
+
+
+async def test_a_strange_timeout_does_not_break_anything(env):
+    root = env["root"]
+    handler = {**codex_command("by-command"), "timeout": "5"}
+    (root / ".codex").mkdir()
+    (root / ".codex" / "hooks.json").write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [handler]}]}})
+    )
+    trust_levels(env, {root: "trusted"})
+    claude_project_hook(env, "by-command", "Bash")
+    settings = root / ".claude" / "settings.json"
+    data = json.loads(settings.read_text())
+    data["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = "abc"
+    data["hooks"]["PreToolUse"].append({"matcher": "Ba(sh", "hooks": [{"command": "echo hi"}]})
+    settings.write_text(json.dumps(data))
+    async with Client(build_server(Config())) as client:
+        result = await client.call_tool("run", {**py_command("DENY"), "cwd": str(root)})
+        listed = (await client.call_tool("context", {"path": str(root)})).structured_content["hooks"]["hooks"]
+    assert not result.is_error and calls_made(env) == []
+    reasons = [h["reason"] for h in listed]
+    assert [h["status"] for h in listed] == ["unsupported"] * 3
+    assert "timeout" in reasons[0] and "timeout" in reasons[1] and "regular expression" in reasons[2]
+
+
+def test_a_device_is_not_read_as_a_hooks_file(env):
+    if os.name == "nt":
+        pytest.skip("no /dev/zero")
+    (env["root"] / ".codex").mkdir()
+    os.symlink("/dev/zero", env["root"] / ".codex" / "hooks.json")
+    began = time.monotonic()
+    found, errors = hooks.discover(str(env["root"]))
+    assert time.monotonic() - began < 2 and "regular file" in errors[0]["error"]
+
+
+async def test_a_refusal_counts_even_if_the_hook_leaves_something_running(env):
+    env["settings"]["timeout_s"] = 3
+    claude_project_hook(env, "deny-and-linger", "Bash")
+    async with Client(build_server(Config())) as client:
+        result = await client.call_tool(
+            "run", {**py_command("hi"), "cwd": str(env["root"])}, raise_on_error=False
+        )
+    assert result.is_error and "something lingers" in text_of(result)
+    pid = int(Path(str(env["mark"]) + ".pid").read_text())
+    deadline = time.monotonic() + 5
+    while psutil.pid_exists(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if os.name != "nt":  # Windows keeps no process group to find an orphan by
+        assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+
+
+async def test_codex_home_inside_a_project_runs_once(env, monkeypatch):
+    root = env["root"]
+    monkeypatch.setenv("CODEX_HOME", str(root / ".codex"))
+    (root / ".codex").mkdir()
+    handler = codex_command("by-command")
+    (root / ".codex" / "hooks.json").write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [handler]}]}})
+    )
+    key = f"{root / '.codex' / 'hooks.json'}:pre_tool_use:0:0"
+    (root / ".codex" / "config.toml").write_text(
+        f'[hooks.state.{json.dumps(key)}]\ntrusted_hash = "{hooks.codex_hash("Bash", handler)}"\n'
+    )
+    async with Client(build_server(Config())) as client:
+        await client.call_tool("run", {**py_command("hello"), "cwd": str(root)})
+    assert len(calls_made(env)) == 1
+
+
+def test_claude_trust_does_not_reach_a_nested_repository(env, tmp_path):
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    (inner / ".git").mkdir(parents=True)
+    plain = outer / "notes"
+    plain.mkdir()
+    state = env["tmp"] / "claude" / ".claude.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"projects": {str(outer): {"hasTrustDialogAccepted": True}}}))
+    assert not hooks._claude_trusted(str(inner)) and hooks._claude_trusted(str(plain))
+
+
+def test_managed_disable_all_hooks_turns_off_managed_ones_too(env, tmp_path, monkeypatch):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    monkeypatch.setattr(hooks, "claude_managed_dir", lambda: str(managed))
+    (managed / "managed-settings.json").write_text(
+        json.dumps({"disableAllHooks": True, "hooks": {"PreToolUse": [{"hooks": [{"command": "echo hi"}]}]}})
+    )
+    (hook,) = [h for h in hooks.discover(str(env["root"]))[0] if h.source == "claude-code"]
+    assert hook.status == "disabled"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        '{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "x", "extra": 1}}',
+        '{"stopReason": "no", "hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "x"}}',
+        '{"unknown": true}',
+    ],
+)
+def test_codex_reads_its_output_strictly(stdout):
+    hook = hooks.Hook("codex", "f", 0, 0, None, {"command": "x"})
+    assert hooks.interpret(hook, hooks.Run(code=0, stdout=stdout), 30).decision == "note"
+
+
+async def test_with_hooks_on_and_none_written_nothing_changes(env):
+    root = env["root"]
+    async with Client(build_server(Config())) as client:
+        wrote = await client.call_tool("fs_write", {"path": str(root / "a.txt"), "content": "x"})
+        read = await client.call_tool("fs_read", {"path": str(root / "a.txt")})
+        ran = await client.call_tool("run", {**py_command("hello"), "cwd": str(root)})
+    for result in (wrote, read, ran):
+        text = text_of(result)
+        assert (
+            not result.is_error
+            and "guard notes" not in text
+            and "Code hook" not in text
+            and "Codex hook" not in text
+        )

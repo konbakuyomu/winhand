@@ -22,12 +22,13 @@ import json
 import os
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tomllib
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from . import config, proc, workspace
 from .actions import Action
@@ -95,9 +96,13 @@ def _load(path: str, kind: str) -> tuple[object, str | None]:
     data: object = None
     error = None
     try:
-        if st.st_size > MAX_CONFIG_BYTES:
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("not a regular file")
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_CONFIG_BYTES + 1)
+        if len(raw) > MAX_CONFIG_BYTES:
             raise ValueError(f"larger than {MAX_CONFIG_BYTES:,} bytes")
-        text = Path(path).read_bytes().decode("utf-8-sig")
+        text = raw.decode("utf-8-sig")
         data = json.loads(text) if kind == "json" else tomllib.loads(text)
     except (OSError, ValueError, UnicodeDecodeError) as exc:
         error = f"cannot be read: {exc}"
@@ -206,11 +211,45 @@ def _unsupported(hook: Hook) -> str | None:
     for key in ("async", "asyncRewake", "if", "once"):
         if h.get(key):
             return f"hooks with `{key}` are not run by winhand"
+    for key in ("command", "commandWindows", "command_windows"):
+        if key in h and not isinstance(h[key], str):
+            return f"`{key}` is not a string"
     if not hook.command:
         return "it has no command"
     if hook.source == "claude-code" and "args" in h and not isinstance(h["args"], list):
         return "`args` is not a list"
+    timeout = h.get("timeout")
+    if timeout is not None:
+        whole = isinstance(timeout, int) and not isinstance(timeout, bool)
+        number = whole or isinstance(timeout, float)
+        if not number or timeout < 0 or (hook.source == "codex" and not whole):
+            return "`timeout` is not a number of seconds" + (
+                " (Codex wants a whole number)" if number else ""
+            )
+    for key in ("statusMessage",):
+        if key in h and not isinstance(h[key], str):
+            return f"`{key}` is not a string"
+    matcher = hook.matcher
+    if matcher and matcher.strip() not in ("", "*") and not _EXACT[_dialect(hook)].match(matcher):
+        try:
+            re.compile(matcher)
+        except re.error as exc:
+            return f"its matcher is not a valid regular expression ({exc}); the tool skips this group too"
     return None
+
+
+def _dialect(hook: Hook) -> str:
+    return "codex" if hook.source == "codex" else "claude-code"
+
+
+def _seconds(hook: Hook, cap: float) -> float:
+    """How long a hook may take: its own timeout (Codex: at least 1 s), never more than `cap`."""
+    value = hook.handler.get("timeout")
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        value = HOOK_TIMEOUT_S if hook.source != "guards" else cap
+    if hook.source == "codex":
+        value = max(value, 1)
+    return min(float(value), cap)
 
 
 def _folder_key(path: str) -> str:
@@ -272,24 +311,32 @@ def _state_key(key: str) -> str:
     return ":".join([os.path.normcase(os.path.normpath(parts[0])), *parts[1:]])
 
 
-def _codex_user() -> tuple[dict, set[str], list[dict]]:
-    """hooks.state (by normalized key), the trusted projects and errors, from the user's config.toml."""
+def _codex_user() -> tuple[dict, dict[str, str], list[dict]]:
+    """hooks.state (by normalized key), each project's trust_level (by folder) and errors, from the
+    user's config.toml: only the user decides what is trusted, never a project's own files."""
     path = os.path.join(workspace.codex_home(), "config.toml")
     data, error = _load(path, "toml")
     if error:
-        return {}, set(), [{"file": path, "error": error}]
+        return {}, {}, [{"file": path, "error": error}]
     if not isinstance(data, dict):
-        return {}, set(), []
+        return {}, {}, []
     hooks = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
     raw_state = hooks.get("state") if isinstance(hooks.get("state"), dict) else {}
     state = {_state_key(str(k)): v for k, v in raw_state.items() if isinstance(v, dict)}
     projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
-    trusted = {
-        _folder_key(str(k))
-        for k, v in projects.items()
-        if isinstance(v, dict) and v.get("trust_level") == "trusted"
+    levels = {
+        _folder_key(str(k)): str(v.get("trust_level")) for k, v in projects.items() if isinstance(v, dict)
     }
-    return state, trusted, []
+    return state, levels, []
+
+
+def _codex_folder_trusted(folder: str, root: str, levels: dict[str, str]) -> bool:
+    """Whether Codex loads the .codex folder of `folder`: decided for that folder, else for the
+    project root; an explicit "untrusted" on either wins."""
+    found = [levels.get(_folder_key(folder)), levels.get(_folder_key(root))]
+    if "untrusted" in found:
+        return False
+    return next((level for level in found if level is not None), None) == "trusted"
 
 
 def _codex(root: str, chain: list[str]) -> tuple[list[Hook], list[dict]]:
@@ -298,53 +345,59 @@ def _codex(root: str, chain: list[str]) -> tuple[list[Hook], list[dict]]:
     req, req_error = _load(requirements, "toml")
     errors = [{"file": requirements, "error": req_error}] if req_error else []
     managed_only = isinstance(req, dict) and req.get("allow_managed_hooks_only") is True
-    state, trusted_projects, user_errors = _codex_user()
+    state, levels, user_errors = _codex_user()
     errors += user_errors
     home = workspace.codex_home()
-    layers = [
-        ("managed", requirements, "toml"),
-        ("managed", os.path.join(system, "hooks.json"), "json"),
-        ("managed", os.path.join(system, "config.toml"), "toml"),
-        ("user", os.path.join(home, "hooks.json"), "json"),
-        ("user", os.path.join(home, "config.toml"), "toml"),
+    layers: list[tuple[str, str, str, str | None]] = [
+        ("managed", requirements, "toml", None),
+        ("managed", os.path.join(system, "hooks.json"), "json", None),
+        ("managed", os.path.join(system, "config.toml"), "toml", None),
+        ("user", os.path.join(home, "hooks.json"), "json", None),
+        ("user", os.path.join(home, "config.toml"), "toml", None),
     ]
     for folder in chain:
-        layers.append(("project", os.path.join(folder, ".codex", "hooks.json"), "json"))
-        layers.append(("project", os.path.join(folder, ".codex", "config.toml"), "toml"))
-    project_trusted = any(_folder_key(f) in trusted_projects for f in [root, *chain])
+        if _folder_key(os.path.join(folder, ".codex")) == _folder_key(home):
+            continue  # Codex does not load its own home twice
+        layers.append(("project", os.path.join(folder, ".codex", "hooks.json"), "json", folder))
+        layers.append(("project", os.path.join(folder, ".codex", "config.toml"), "toml", folder))
     hooks: list[Hook] = []
-    for layer, path, kind in layers:
+    for layer, path, kind, folder in layers:
         found, errs = _from_file("codex", path, kind)
         errors += errs
         for hook in found:
-            why = _unsupported(hook)
-            entry = state.get(_state_key(hook.key), {})
-            if why:
-                hook.status, hook.reason = "unsupported", why
-            elif layer == "managed":
-                hook.status = "managed"
-            elif managed_only:
-                hook.status = "disabled"
-                hook.reason = (
-                    "only managed hooks may run (allow_managed_hooks_only in Codex's requirements.toml)"
-                )
-            elif entry.get("enabled") is False:
-                hook.status, hook.reason = "disabled", "turned off in Codex"
-            elif layer == "project" and not project_trusted:
-                hook.status = "untrusted"
-                hook.reason = "the project is not trusted in Codex ([projects] in ~/.codex/config.toml)"
-            else:
-                trusted_hash = entry.get("trusted_hash")
-                if trusted_hash == codex_hash(hook.matcher, hook.handler):
-                    hook.status = "trusted"
-                elif trusted_hash:
-                    hook.status = "modified"
-                    hook.reason = "changed since it was trusted in Codex; review it there (/hooks)"
-                else:
-                    hook.status = "untrusted"
-                    hook.reason = "not trusted in Codex yet; review it there (/hooks)"
+            try:
+                _codex_status(hook, layer, folder, root, state, levels, managed_only)
+            except Exception as exc:  # a strange file must not stop the others
+                hook.status, hook.reason = "unsupported", f"cannot be read ({exc})"
             hooks.append(hook)
     return hooks, errors
+
+
+def _codex_status(hook, layer, folder, root, state, levels, managed_only) -> None:
+    why = _unsupported(hook)
+    entry = state.get(_state_key(hook.key), {})
+    if why:
+        hook.status, hook.reason = "unsupported", why
+    elif layer == "managed":
+        hook.status = "managed"
+    elif managed_only:
+        hook.status = "disabled"
+        hook.reason = "only managed hooks may run (allow_managed_hooks_only in Codex's requirements.toml)"
+    elif entry.get("enabled") is False:
+        hook.status, hook.reason = "disabled", "turned off in Codex"
+    elif layer == "project" and not _codex_folder_trusted(folder or root, root, levels):
+        hook.status = "untrusted"
+        hook.reason = "this folder is not trusted in Codex ([projects] in ~/.codex/config.toml)"
+    else:
+        trusted_hash = entry.get("trusted_hash")
+        if trusted_hash == codex_hash(hook.matcher, hook.handler):
+            hook.status = "trusted"
+        elif trusted_hash:
+            hook.status = "modified"
+            hook.reason = "changed since it was trusted in Codex; review it there (/hooks)"
+        else:
+            hook.status = "untrusted"
+            hook.reason = "not trusted in Codex yet; review it there (/hooks)"
 
 
 # ------------------------------------------------------------------ Claude Code
@@ -359,12 +412,13 @@ def claude_managed_dir() -> str:
 
 
 def _claude_trusted(root: str) -> bool:
+    """Workspace trust accepted for the project, or for a folder above it when the project is not a
+    repository of its own (trust covers subfolders, not nested repositories)."""
+    own_repo = os.path.exists(os.path.join(root, ".git"))
     for folder, entry in workspace._claude_projects().items():
-        if (
-            isinstance(entry, dict)
-            and entry.get("hasTrustDialogAccepted") is True
-            and _under(root, str(folder))
-        ):
+        if not isinstance(entry, dict) or entry.get("hasTrustDialogAccepted") is not True:
+            continue
+        if _folder_key(str(folder)) == _folder_key(root) or (not own_repo and _under(root, str(folder))):
             return True
     return False
 
@@ -380,6 +434,7 @@ def _claude(root: str) -> tuple[list[Hook], list[dict]]:
     data = {path: _load(path, "json") for _, path in layers}
     managed_data = [data[p][0] for p in managed if isinstance(data[p][0], dict)]
     managed_only = any(d.get("allowManagedHooksOnly") is True for d in managed_data)
+    all_off = any(d.get("disableAllHooks") is True for d in managed_data)
     disabled = False
     for _, path in layers:  # most specific setting first: managed, local, project, user
         value = data[path][0]
@@ -396,6 +451,11 @@ def _claude(root: str) -> tuple[list[Hook], list[dict]]:
             why = _unsupported(hook)
             if why:
                 hook.status, hook.reason = "unsupported", why
+            elif all_off:
+                hook.status, hook.reason = (
+                    "disabled",
+                    "disableAllHooks is set in Claude Code's managed settings",
+                )
             elif layer == "managed":
                 hook.status = "managed"
             elif managed_only:
@@ -449,7 +509,10 @@ def describe(folder: str | None, max_chars: int = 6_000) -> dict:
         }
     if not folder:
         return {"hooks": [], "note": "pass path= to see the hooks that apply in a folder"}
-    hooks, errors = discover(folder, cfg)
+    try:
+        hooks, errors = discover(folder, cfg)
+    except Exception as exc:  # reported, not raised: context() still answers
+        return {"hooks": [], "errors": [{"file": folder, "error": f"hooks could not be read ({exc})"}]}
     listed, used = [], 0
     for hook in hooks:
         item = hook.summary()
@@ -478,7 +541,7 @@ def matches(hook: Hook, names: tuple[str, ...]) -> bool:
     matcher = hook.matcher
     if matcher is None or matcher.strip() in ("", "*"):
         return True
-    exact = _EXACT["codex" if hook.source == "codex" else "claude-code"]
+    exact = _EXACT[_dialect(hook)]
     if exact.match(matcher):
         alternatives = {a.strip() for a in re.split(r"[|,]" if hook.source != "codex" else r"\|", matcher)}
         return any(n in alternatives for n in names)
@@ -658,16 +721,46 @@ def run(hook: Hook, stdin: dict, cwd: str, timeout: float) -> Run:
     try:
         out, err = child.communicate(json.dumps(stdin, ensure_ascii=False).encode("utf-8"), timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc._kill_tree(child.pid)
+        answered = child.poll() is not None  # it exited; something it started keeps the pipes open
+        _stop(child)
         try:
-            child.communicate(timeout=5)
+            out, err = child.communicate(timeout=5)
         except (subprocess.TimeoutExpired, OSError, ValueError):
+            out, err = b"", b""
+        if not answered:
+            return Run(timed_out=True)
+    return Run(code=child.returncode, stdout=proc._decode(out or b""), stderr=proc._decode(err or b""))
+
+
+def _stop(child: subprocess.Popen) -> None:
+    """End a hook and everything it started."""
+    proc._kill_tree(child.pid)
+    if not IS_WINDOWS:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)  # its own session: orphans included
+        except (OSError, ProcessLookupError):
             pass
-        return Run(timed_out=True)
-    return Run(code=child.returncode, stdout=proc._decode(out), stderr=proc._decode(err))
 
 
 # ------------------------------------------------------------------ reading the answer
+
+
+_CODEX_FIELDS = {
+    "continue",
+    "stopReason",
+    "suppressOutput",
+    "systemMessage",
+    "decision",
+    "reason",
+    "hookSpecificOutput",
+}
+_CODEX_SPECIFIC = {
+    "hookEventName",
+    "permissionDecision",
+    "permissionDecisionReason",
+    "updatedInput",
+    "additionalContext",
+}
 
 
 @dataclass
@@ -723,6 +816,15 @@ def interpret(hook: Hook, result: Run, timeout: float) -> Outcome:
     if data is None:
         return Outcome()
     specific = data.get("hookSpecificOutput") if isinstance(data.get("hookSpecificOutput"), dict) else {}
+    if not claude:
+        if (
+            set(data) - _CODEX_FIELDS
+            or set(specific) - _CODEX_SPECIFIC
+            or ("hookSpecificOutput" in data and not isinstance(data["hookSpecificOutput"], dict))
+        ):
+            return failed("its output has fields Codex does not accept")
+        if data.get("continue") is False or "stopReason" in data or data.get("suppressOutput") is True:
+            return failed("continue, stopReason and suppressOutput are not supported for PreToolUse in Codex")
     decision = specific.get("permissionDecision")
     reason = str(specific.get("permissionDecisionReason") or "").strip()
     notes = [str(n) for n in (specific.get("additionalContext"), data.get("systemMessage")) if n]
@@ -814,16 +916,16 @@ def check(
                         if same in seen:
                             continue
                         seen.add(same)
-                    timeout = min(float(hook.handler.get("timeout") or HOOK_TIMEOUT_S), cap)
+                    timeout = _seconds(hook, cap)
                     jobs.append((hook, action, payload(hook, tool_name, tool_input, root), root, timeout))
     for hook, action in commands or []:
         root = workspace.project_root(anchor(action))
         for tool_name, tool_input, _ in calls(action, "claude-code", tool, args, root):
-            timeout = min(float(hook.handler.get("timeout") or cap), cap)
+            timeout = _seconds(hook, cap)
             jobs.append((hook, action, payload(hook, tool_name, tool_input, root), root, timeout))
     if not jobs:
         return []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(jobs))) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(jobs))) as pool:
         results = list(pool.map(lambda job: run(job[0], job[2], job[3], job[4]), jobs))
     findings = []
     for (hook, action, _, _, timeout), result in zip(jobs, results, strict=True):

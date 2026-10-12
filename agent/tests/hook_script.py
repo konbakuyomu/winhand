@@ -43,6 +43,14 @@ elif mode == "sleep":
         with open(mark + ".pid", "w") as fh:
             fh.write(str(child.pid))
     time.sleep(120)
+elif mode == "deny-and-linger":
+    # leaves a child that keeps stdout and stderr open, then refuses
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    if mark:
+        with open(mark + ".pid", "w") as fh:
+            fh.write(str(child.pid))
+    print("refused, but something lingers", file=sys.stderr, flush=True)
+    os._exit(2)
 elif mode == "exit1":
     sys.exit(1)
 elif mode == "badjson":
