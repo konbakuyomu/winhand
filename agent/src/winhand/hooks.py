@@ -673,6 +673,12 @@ def _powershell() -> str | None:
     return shutil.which("pwsh") or shutil.which("powershell")
 
 
+def _keep_exit_code(command: str) -> str:
+    """`pwsh -Command` turns a program's exit code 2 into 1, and a hook that refuses with 2 would be
+    let through. winhand passes the code on (stricter than Codex on Windows, as the hook meant)."""
+    return command + "\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"
+
+
 def argv(hook: Hook) -> list[str] | str:
     """How the tool that owns the hook starts it."""
     command = hook.command
@@ -683,7 +689,7 @@ def argv(hook: Hook) -> list[str] | str:
         if IS_WINDOWS:
             shell = _powershell()
             if shell:
-                return [shell, "-NoProfile", "-Command", command]
+                return [shell, "-NoProfile", "-Command", _keep_exit_code(command)]
             return f'"{os.environ.get("COMSPEC") or "cmd.exe"}" /C "{command}"'
         if hook.source == "guards":
             return ["sh", "-c", command]
@@ -693,9 +699,9 @@ def argv(hook: Hook) -> list[str] | str:
         bash = None if h.get("shell") == "powershell" else proc._git_bash(None)
         if bash:
             return [bash, "-c", command]
-        return [_powershell() or "powershell", "-NoProfile", "-Command", command]
+        return [_powershell() or "powershell", "-NoProfile", "-Command", _keep_exit_code(command)]
     if h.get("shell") == "powershell" and _powershell():
-        return [_powershell() or "pwsh", "-NoProfile", "-Command", command]
+        return [_powershell() or "pwsh", "-NoProfile", "-Command", _keep_exit_code(command)]
     return ["sh", "-c", command]
 
 

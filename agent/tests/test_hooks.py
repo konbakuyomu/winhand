@@ -583,3 +583,33 @@ async def test_with_hooks_on_and_none_written_nothing_changes(env):
             and "Code hook" not in text
             and "Codex hook" not in text
         )
+
+
+async def test_on_windows_a_refusal_by_exit_code_survives_powershell(env):
+    if os.name != "nt":
+        pytest.skip("PowerShell's -Command exit codes are a Windows matter here")
+    root = env["root"]
+    handler = {
+        "type": "command",
+        "command": "x",
+        "commandWindows": f"& '{sys.executable}' '{SCRIPT}' deny-src",
+    }
+    path = root / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [handler]}]}}))
+    trust_levels(env, {root: "trusted"})
+    with open(env["tmp"] / "codex" / "config.toml", "a", encoding="utf-8") as fh:
+        key = f"{path}:pre_tool_use:0:0"
+        fh.write(f'[hooks.state.{json.dumps(key)}]\ntrusted_hash = "{hooks.codex_hash("Write", handler)}"\n')
+    async with Client(build_server(Config())) as client:
+        refused = await client.call_tool(
+            "fs_write", {"path": str(root / "src" / "a.c"), "content": "x"}, raise_on_error=False
+        )
+    assert refused.is_error and "no writes in src/" in text_of(refused)
+
+
+def test_powershell_commands_pass_the_exit_code_on():
+    hook = hooks.Hook("codex", "f", 0, 0, None, {"command": "node x.mjs", "commandWindows": "node x.mjs"})
+    line = hooks.argv(hook)
+    if os.name == "nt" and isinstance(line, list):
+        assert line[-1] == "node x.mjs\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"
