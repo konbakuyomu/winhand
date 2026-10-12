@@ -240,6 +240,22 @@ N3 按决定写进规格。N4 修过了头，又有一处没修到：
 - Codex 的 `project_root_markers`、没有 `HEAD` 的 `.git`、命令行参数（`-c`、`--profile`）不跟随。
 - 与 Claude Code 的差异：不复刻 Claude Code 的设置校验（N3），例外写在规格里。
 - Windows 上的行为（PowerShell 退出码、挂起启动加作业对象、不弹窗）由 GitHub Actions 的 Windows 跑过测试；用户真机只跑到第 2 轮的代码。
-- **待做**：经真实 winhand 服务在用户真机上冒烟。WinHand 连接器需要用户在 claude.ai 的连接器设置里重新授权。发布 0.4.6 前补做，结果记入发布说明；有问题另开 change。
+- 真机冒烟已在归档后补做（ad79bf9），见下节。
 
 **用户决定**：用户把推进交给 Claude（“交给你了”）。Claude 按验收结论归档，并在汇报中说明 D1–D7 这几项代定的决定，特别是 D2：已信任的 hook 默认运行，这改变了默认行为。
+
+## 归档后的真机冒烟（ad79bf9，用户电脑：中文 Windows 11，PowerShell 7）
+
+- 测试：`tests/test_hooks.py`、`tests/test_workspace_rules.py` 共 139 passed，11 skipped；跳过的是需要符号链接或命名管道的用例。
+- 只读核对真实配置（`smoke_hooks.py`）：
+  - Codex hooks 7 个 `trusted`、2 个 `untrusted`（还没在 Codex 里审核）；
+  - Claude Code hooks 9 个都是 `untrusted`（`~/.claude.json` 没有项目信任记录）；
+  - 与第 1 轮的结果相同。第 3 轮起按 Codex 的规则判断整份拒绝，用户真实的 comet `hooks.json` 一份也没有被拒，没有错误。
+- 经 MCP 服务端到端（`smoke_hooks_e2e.py`，全部在新建的临时目录里，不碰用户的配置）：
+  - 一个已信任的 Codex hook 用 `node … process.exit(2)` 拒绝，命令本身不传退出码；
+  - `fs_write` 被拒绝，0.36 秒，文件没有写出，错误里带 hook 的原话和声明位置。这在真实的 pwsh 上证实了 D7 的退出码处理；
+  - matcher 不覆盖的 `run` 照常执行。
+- 真实的 comet hook（`smoke_comet_probe.py`）：经 winhand 的执行路径运行 smartsearch 项目已信任的 comet 路由脚本，写入目标放在项目外，comet 因此放行，不读取也不记录任何东西。
+  - 结果：pwsh、含中文的带引号路径、node 都正常，0.48 秒，退出码 0，结论为“不改变”；
+  - 探测文件没有写出。
+- 冒烟脚本和临时目录（`%TEMP%\winhand-p1-smoke`、`%TEMP%\winhand-hooks-smoke-*`）留给用户手动删除。
