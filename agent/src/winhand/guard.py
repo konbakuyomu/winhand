@@ -20,6 +20,7 @@ an AI that means well, not a sandbox (`run cat .env` reads what a read rule on .
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import threading
@@ -40,7 +41,7 @@ DECISIONS = ("deny", "ask", "note")
 ASK_TIMEOUT_S = 40.0
 ASK_TIMEOUT_MAX_S = 50.0
 _MISSING = (FileNotFoundError, NotADirectoryError, PermissionError)
-_KEYS = {"on", "match", "path", "decision", "reason", "timeout_s"}
+_KEYS = {"on", "match", "path", "decision", "reason", "timeout_s", "command"}
 _PurePath = PureWindowsPath if os.name == "nt" else PurePosixPath
 
 
@@ -63,6 +64,8 @@ class Rule:
     path: tuple[str, ...] = ()
     timeout_s: float = ASK_TIMEOUT_S
     base: str | None = None  # the project folder of a project file; None for the global file
+    command: str | None = None  # decision "command": a program decides (hooks.py), global file only
+    label: str | None = None  # where a finding came from, when it is not a rule file (a hook)
 
     def summary(self) -> dict:
         out: dict = {"file": self.file, "rule": self.index, "on": list(self.on), "decision": self.decision}
@@ -72,6 +75,8 @@ class Rule:
             out["path"] = list(self.path)
         if self.reason:
             out["reason"] = self.reason
+        if self.command:
+            out["command"] = self.command
         return out
 
 
@@ -120,14 +125,25 @@ def _rule(path: str, index: int, entry, base: str | None) -> Rule:
     unknown = set(entry) - _KEYS
     if unknown:
         raise ValueError(f"unknown key(s) {sorted(unknown)}; allowed: {sorted(_KEYS)}")
-    if "on" not in entry or "decision" not in entry:
-        raise ValueError("needs `on` and `decision`")
+    command = entry.get("command")
+    if command is not None:
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("command must be a command line")
+        if "decision" in entry:
+            raise ValueError("a rule has `decision` or `command`, not both")
+        if base is not None:
+            raise ValueError(
+                "command rules are allowed only in the global guards.toml: a repository's file must not make "
+                "winhand run commands"
+            )
+    if "on" not in entry or ("decision" not in entry and command is None):
+        raise ValueError("needs `on` and `decision` (or `command`)")
     on = _as_list(entry["on"], "on")
     bad = [k for k in on if k not in KINDS]
     if bad:
         raise ValueError(f"unknown action kind(s) {bad}; kinds: {list(KINDS)}")
-    decision = entry["decision"]
-    if decision not in DECISIONS:
+    decision = "command" if command is not None else entry["decision"]
+    if command is None and decision not in DECISIONS:
         raise ValueError(f"decision must be one of {list(DECISIONS)}, not {decision!r}")
     reason = entry.get("reason", "")
     if not isinstance(reason, str):
@@ -135,8 +151,14 @@ def _rule(path: str, index: int, entry, base: str | None) -> Rule:
     match = entry.get("match")
     if match is not None and not isinstance(match, str):
         raise ValueError("match must be a string (a regular expression)")
-    timeout = entry.get("timeout_s", ASK_TIMEOUT_S)
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+    timeout = entry.get("timeout_s", 0 if command is not None else ASK_TIMEOUT_S)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout < 0
+        or (timeout == 0 and command is None)
+    ):
         raise ValueError("timeout_s must be a positive number")
     return Rule(
         file=path,
@@ -146,8 +168,9 @@ def _rule(path: str, index: int, entry, base: str | None) -> Rule:
         reason=reason,
         match=re.compile(match) if match is not None else None,
         path=tuple(_as_list(entry["path"], "path")) if "path" in entry else (),
-        timeout_s=min(float(timeout), ASK_TIMEOUT_MAX_S),
+        timeout_s=float(timeout) if command is not None else min(float(timeout), ASK_TIMEOUT_MAX_S),
         base=base,
+        command=command,
     )
 
 
@@ -216,10 +239,10 @@ def _under(path: str, folder: str) -> bool:
 def _start_dir(path: str) -> str:
     """The folder a path lives in (the path itself if it is a folder); missing parts are skipped."""
     p = Path(path)
-    if p.is_dir():
+    if os.path.isdir(p):  # False, not an error, for a name too long for the file system
         return str(p)
     p = p.parent
-    while not p.exists() and p != p.parent:
+    while not os.path.exists(p) and p != p.parent:
         p = p.parent
     return str(p)
 
@@ -231,6 +254,9 @@ def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
     seen: set[str] = set()
     glob_file = str(global_path())
     glob_key = _norm(glob_file)
+    # the global file reached by another spelling (a linked home, a short name) is still the
+    # global file, never a project file of the folder above it
+    glob_real = _norm(os.path.realpath(glob_file))
     if cache is not None and glob_key in cache:
         first = cache[glob_key]
     else:
@@ -250,7 +276,10 @@ def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
                 if cache is not None and key in cache:
                     found = cache[key]
                 else:
-                    found = load(candidate, base=str(d))
+                    if os.path.lexists(candidate) and _norm(os.path.realpath(candidate)) == glob_real:
+                        found = None  # the global file, already in
+                    else:
+                        found = load(candidate, base=str(d))
                     if cache is not None:
                         cache[key] = found
                 if found is not None:
@@ -301,6 +330,12 @@ class Verdict:
     ask: list[tuple[Rule, Action]] = field(default_factory=list)
     notes: list[tuple[Rule, Action]] = field(default_factory=list)
     broken: list[RuleFile] = field(default_factory=list)
+    commands: list[tuple[Rule, Action]] = field(default_factory=list)  # command rules to run
+
+    def settle(self) -> None:
+        self.decision = (
+            "deny" if self.broken or self.deny else "ask" if self.ask else "note" if self.notes else None
+        )
 
 
 def judge(actions: list[Action], cache: dict | None = None) -> Verdict:
@@ -314,15 +349,9 @@ def judge(actions: list[Action], cache: dict | None = None) -> Verdict:
                 continue
             for rule in rule_file.rules:
                 if matches(rule, action):
-                    getattr(verdict, "notes" if rule.decision == "note" else rule.decision).append(
-                        (rule, action)
-                    )
-    if verdict.broken or verdict.deny:
-        verdict.decision = "deny"
-    elif verdict.ask:
-        verdict.decision = "ask"
-    elif verdict.notes:
-        verdict.decision = "note"
+                    target = {"note": "notes", "command": "commands"}.get(rule.decision, rule.decision)
+                    getattr(verdict, target).append((rule, action))
+    verdict.settle()
     return verdict
 
 
@@ -343,7 +372,7 @@ _OWNER = "This limit is the machine owner's rule: do not try to get around it an
 
 
 def _where(rule: Rule) -> str:
-    return f"{rule.file} rule {rule.index}"
+    return rule.label or f"{rule.file} rule {rule.index}"
 
 
 def refusal(verdict: Verdict, answer: str | None = None) -> str:
@@ -568,6 +597,44 @@ class GuardActions(Middleware):
                 self._typed[args.get("id")] = UNKNOWN_STATE
             raise
 
+    async def _hooks(self, context: MiddlewareContext, actions: list[Action], verdict: Verdict) -> None:
+        """Run the owner's Codex / Claude Code hooks and guard command rules; add what they said."""
+        from . import hooks
+
+        commands = [
+            (hooks.guard_hook(r.file, r.index, r.command or "", r.timeout_s), a) for r, a in verdict.commands
+        ]
+        message = context.message
+        try:
+            findings = await asyncio.to_thread(
+                hooks.check, actions, message.name, dict(message.arguments or {}), commands
+            )
+        except Exception as exc:  # the owner's hooks could not be asked: do nothing rather than skip them
+            refused = Rule(
+                file="hooks",
+                index=0,
+                on=(actions[0].kind,),
+                decision="deny",
+                reason=f"the hooks that apply here could not be run ({exc}); nothing was done",
+                label="winhand hooks",
+            )
+            verdict.deny.append((refused, actions[0]))
+            verdict.settle()
+            return
+        for f in findings:
+            rule = Rule(
+                file=f.hook.file,
+                index=f.hook.group,
+                on=(f.action.kind,),
+                decision=f.decision,
+                reason=f.text,
+                label=f.hook.label(),
+            )
+            {"deny": verdict.deny, "ask": verdict.ask, "note": verdict.notes}[f.decision].append(
+                (rule, f.action)
+            )
+        verdict.settle()
+
     def _input_rules_apply(self, sid, cache: dict | None = None) -> bool:
         try:
             spec = self.sessions.get(sid).spec
@@ -576,7 +643,11 @@ class GuardActions(Middleware):
         if not is_shell(spec):
             return False
         anchors = [spec.cwd] if getattr(spec, "cwd", None) else []
-        return any(f.error or any("input" in r.on for r in f.rules) for f in files_for(anchors, cache))
+        if any(f.error or any("input" in r.on for r in f.rules) for f in files_for(anchors, cache)):
+            return True
+        from . import hooks
+
+        return hooks.apply_to_input(getattr(spec, "cwd", None))
 
     def _describe(self, tool: str, args: dict) -> list[Action]:
         try:
@@ -619,6 +690,8 @@ class GuardActions(Middleware):
         if not actions:
             return await call_next(context)
         verdict = await asyncio.to_thread(judge, actions, cache)
+        if verdict.decision != "deny":
+            await self._hooks(context, actions, verdict)
         if verdict.decision == "deny":
             return ToolResult(content=[TextContent(type="text", text=refusal(verdict))], is_error=True)
         if verdict.decision == "ask":

@@ -45,6 +45,7 @@ winhand 在执行会读写这台机器的工具调用前，先把调用描述成
 
 - 全局规则：`<WINHAND_HOME>/guards.toml`。默认是 `~/.winhand/guards.toml`。
 - 项目规则：从动作路径向上，逐级收集所有 `.winhand/guards.toml`。命令类动作从 `cwd` 开始向上找；没有 `cwd` 时只用全局规则。
+- 向上找到的文件与全局规则文件是同一个文件时（按真实路径判断，例如主目录经符号链接到达），它仍只按全局规则处理，不再作为项目规则读第二次。`WINHAND_HOME` 指向别处时，`~/.winhand/guards.toml` 是普通的项目规则文件。
 - 文件内容是若干条 `[[guard]]`，每条的字段如下：
 
   | 字段 | 必填 | 含义 |
@@ -52,9 +53,10 @@ winhand 在执行会读写这台机器的工具调用前，先把调用描述成
   | `on` | 是 | 动作类型，或类型列表 |
   | `match` | 否 | 正则，匹配 `text` |
   | `path` | 否 | glob 列表，匹配 `paths` 中任一路径 |
-  | `decision` | 是 | `deny`、`ask` 或 `note` |
+  | `decision` | 没有 `command` 时必填 | `deny`、`ask` 或 `note` |
+  | `command` | 否 | 交给一个命令判断（见 R13），不能与 `decision` 同时写；只能写在全局规则文件里 |
   | `reason` | 否 | 给模型和人看的说明 |
-  | `timeout_s` | 否 | 仅 ask 规则，等待确认的秒数，默认 40，超过 50 按 50 计（客户端约 60 秒放弃一次工具调用） |
+  | `timeout_s` | 否 | ask 规则：等待确认的秒数，默认 40，超过 50 按 50 计（客户端约 60 秒放弃一次工具调用）；command 规则：命令的超时，见 R13。必须是有限的数，`nan`、`inf` 按“写错了”处理 |
 
 - 规则编号从 1 开始，按文件里出现的顺序计算。
 - 文件修改后，下一次调用即生效，不需要重启 winhand；即使修改前后大小和修改时间都相同也一样。
@@ -74,6 +76,8 @@ winhand 在执行会读写这台机器的工具调用前，先把调用描述成
 ### R4 裁决
 
 - 所有命中的规则合并裁决：有 deny 则拒绝；否则有 ask 则请人确认；否则有 note 则放行并附注；都没有则放行。
+- `command` 规则和外部 hooks（见 hooks 规格）的结论一并参与合并，顺序相同：拒绝 > 请人确认 > 附注。
+- 已经有 deny 时，不再运行 `command` 规则和外部 hooks。
 - 规则没有 allow，项目规则不能放宽全局规则。
 
 ### R5 拒绝
@@ -185,3 +189,26 @@ Scenario: (A13) 没有规则时行为不变
 - 设置：没有 `guards.toml`，也没有 `[context]` 配置；
 - 操作：运行原有的全部测试和 lint、格式检查；
 - 结果：全部通过。
+
+### R13 交给命令判断的规则
+
+- 全局规则可以写 `command = "<命令行>"`，与 `on`、`match`、`path`、`reason`、`timeout_s` 一起用，不写 `decision`。
+- 命中时运行这条命令，按 Claude Code 的 PreToolUse hook 协议传入动作、读取结论，与 hooks 规格的 R4、R5、R6 相同：
+  - stdin 的 JSON 中，`tool_name`、`tool_input` 按 Claude Code 来源翻译；
+  - 退出码 2 加 stderr，或输出 `permissionDecision: "deny"`：拒绝；
+  - `ask`：请人确认；
+  - `additionalContext`：附注；
+  - 失败（超时、其他退出码、无效输出）：放行并附注失败原因。
+- 运行方式：Windows 上用 `pwsh -NoProfile -Command`（找不到时用 `powershell.exe`），其他系统用 `sh -c`；工作目录为动作所在项目的根目录。
+- 超时：`timeout_s`，没写时取 `[hooks] timeout_s`（默认 30 秒）；写了也不超过 `[hooks] timeout_s`。
+- 项目规则文件里写了 `command`：整个文件按 R10 处理（失败即关闭），错误说明 command 规则只能写在全局文件里。理由：仓库里的文件不能让 winhand 执行命令。
+
+Scenario: (A8) 全局 command 规则拒绝
+- 设置：全局规则 `on = "command"`、`command = "<脚本>"`，脚本输出 `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "no"}}`。
+- 操作：`run(command="echo hi")`。
+- 结果：不执行，工具错误含理由 `no`，以及规则文件和编号。
+
+Scenario: (A9) 项目文件里的 command 规则
+- 设置：项目 `.winhand/guards.toml` 写了 `command = "..."`。
+- 操作：在项目里 `fs_write`。
+- 结果：被拒绝，错误写明 command 规则只能写在全局 `guards.toml` 里。

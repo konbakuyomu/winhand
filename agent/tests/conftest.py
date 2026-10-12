@@ -17,6 +17,31 @@ def winhand_home(tmp_path, monkeypatch):
     return tmp_path / "home"
 
 
+@pytest.fixture(autouse=True)
+def _no_agent_config_of_this_machine(tmp_path, monkeypatch):
+    """context() must not read the Codex and Claude Code settings of the machine running the tests."""
+    from winhand import workspace
+
+    for var in ("CODEX_HOME", "CLAUDE_CONFIG_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(workspace, "managed_claude_md", lambda: str(tmp_path / "no-managed" / "CLAUDE.md"))
+
+
+@pytest.fixture(autouse=True)
+def _no_hooks_of_this_machine(tmp_path, monkeypatch):
+    """The machine's own Codex / Claude Code hooks never run in tests; test_hooks.py turns its own on."""
+    from winhand import hooks
+
+    monkeypatch.setattr(hooks, "settings", lambda: {"sources": []})
+    monkeypatch.setattr(hooks, "codex_system_dir", lambda: str(tmp_path / "no-codex-system"))
+    monkeypatch.setattr(hooks, "claude_managed_dir", lambda: str(tmp_path / "no-claude-managed"))
+    monkeypatch.setattr(
+        hooks,
+        "codex_legacy_managed_config",
+        lambda: str(tmp_path / "no-codex-system" / "managed_config.toml"),
+    )
+
+
 @pytest.fixture
 def manager():
     m = SessionManager()

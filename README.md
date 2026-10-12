@@ -127,7 +127,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
-| 本机规则 | `context`：这台电脑写给 AI 的规矩（全局规则文件、项目根到当前目录的 AGENTS.md）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务，见[本机规则与守卫](#本机规则与守卫) |
+| 本机规则 | `context`：这台电脑写给 AI 的规矩（按 Codex、Claude Code 的读法：AGENTS.md、CLAUDE.md、`.claude/rules`、`@` 引用）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务；`repo=owner/name` 可按仓库名找到本机目录。见[本机规则与守卫](#本机规则与守卫) |
 | 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
 
 `run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义；只给 `command` 时整行交给 PowerShell 执行。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
@@ -173,23 +173,53 @@ ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 
 ### context：规矩和技能
 
-`context(path)` 返回以下内容：
+`context(path)` 按 Codex 和 Claude Code 各自的读法返回规矩，和它们在这台电脑上实际读到的一致：
 
-- **全局规则文件**：默认读已存在的 `~/.codex/AGENTS.md` 和 `~/.claude/CLAUDE.md`；
-- **项目规矩**：项目根（最近的 `.git` 所在目录）到 `path` 沿途的每份 `AGENTS.md`；
+- **Codex**：
+  - 全局 `~/.codex/AGENTS.override.md`，没有时读 `~/.codex/AGENTS.md`（设了 `CODEX_HOME` 时，从那里读）；
+  - 项目根（最近的 `.git` 所在目录）到 `path` 沿途每一级，各取一份：`AGENTS.override.md` 优先，没有时取 `AGENTS.md`。
+- **Claude Code**：
+  - 管理员策略文件，以及 `~/.claude/CLAUDE.md` 和 `~/.claude/rules/`；
+  - 从磁盘根目录到 `path` 沿途每一级的 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`；
+  - 项目的 `.claude/rules/`：写了 `paths` 的规则只在路径匹配时生效，不生效的列在 `rules_not_applied` 里；
+  - 文件里的 `@路径` 引用会展开，最多 4 跳。
+
+同一个文件只返回一次。比如 CLAUDE.md 里写了 `@AGENTS.md`，AGENTS.md 只出现一次。每份规则都标出来自哪种格式（`format`）。
+
+除了规矩，还返回：
 - **技能列表**：名称、描述、SKILL.md 路径。默认扫 `~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`，以及项目里的 `.agents/skills`、`.claude/skills`，同名时项目优先；
 - 对该目录生效的守卫规则；
 - 本机 MCP 服务。
 
-文件都是现读的，改完规矩下一次调用就生效。模型按技能描述挑中后，用 `fs_read` 读 SKILL.md，脚本用 `run` 在这台电脑上执行。输出经过脱敏，超出约 6 万字符时截断，并给出用 `fs_read` 接着读的方法。
+文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `fs_read` 读 SKILL.md，脚本用 `run` 在这台电脑上执行。
+
+输出经过脱敏，按脱敏后的长度控制在约 6 万字符以内：
+- 技能列表最多占约 2 万字符，其余技能只列名字；
+- 规矩太长时截断，并给出用 `fs_read` 接着读的方法。
+
+**只知道仓库名时**（比如云端会话只知道 `owner/name`），用 `context(repo="owner/name")`。它在以下位置找这个仓库在本机的检出目录：
+- Codex 记录的项目；
+- Claude Code 记录的项目；
+- `repo_roots` 里列出的文件夹。
+
+再给 `path="src"` 时，`path` 相对于检出目录。
+
+**安全**：`context` 读的每个文件，都先过守卫的 `read` 规则，被拒绝的不读。项目里的规矩引用项目外的文件（例如 `@~/.ssh/id_rsa`）时，只有两种情况才会展开：
+- Claude Code 已为这个项目批准过外部引用；
+- 设置了 `external_imports = true`。
+
+项目里指向项目外的符号链接（例如 `CLAUDE.md` 链接到别处）也一样。这样，别人的仓库没法借规矩文件读走你的私密文件。
 
 instructions 会提醒模型：开始在某个目录工作前，以及上下文被压缩后，调用 `context`。经中转和 `winhand http` 连接的客户端会看到这句提醒；本机 stdio 客户端默认不显示，因为它们自己会读规则。读哪些文件可以在 `config.toml` 里改：
 
 ```toml
 [context]
-rules = ['~/.codex/AGENTS.md', '~/.claude/CLAUDE.md']   # [] = 不读全局规则文件
+formats = ['codex', 'claude-code']   # 按谁的读法读规矩；['claude-code'] 时与 Claude Code 默认一致
+rules = ['D:\notes\agents.md']       # 写了就代替两种格式的全局规则文件；[] = 不读
 skills = ['~/.agents/skills', '~/.claude/skills', '~/.codex/skills']
-stdio_hint = false    # true：本机 stdio 客户端也显示 context 提醒
+repo_roots = ['D:\code']              # context(repo=...) 还会在这些文件夹和它们的子文件夹里找
+external_imports = false             # true：项目规矩引用项目外文件时，不用等 Claude Code 批准
+stdio_hint = false                   # true：本机 stdio 客户端也显示 context 提醒
 ```
 
 Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructions 只放要点，完整指南由 `help()` 返回。
@@ -263,6 +293,47 @@ reason = "要改守卫规则"
 - **路径**：按工具自己的方式解析路径（`fs_*` 不展开环境变量，一次性链接工具会展开），并同时按真实路径判断：符号链接、目录联接、8.3 短名、`\\?\` 前缀、`::$DATA` 这类写法不会绕过路径规则。
 
 参数格式不对的调用不经守卫判断，直接由工具自己报错，什么也不会执行。
+
+### 本机的 Codex、Claude Code hooks
+
+在本机用 Codex 或 Claude Code 时会运行的 PreToolUse hooks，经 winhand 的调用也会运行。例如项目里 `.codex/hooks.json` 中“这个阶段不许改 src/”的守卫，云端会话通过 winhand 改文件时同样生效。
+
+- **只运行这两个工具自己会运行的**：
+  - Codex：在 Codex 里审核过（`/hooks`，`trusted_hash` 与现在的内容一致）的 hook，项目里的还要求项目被信任；
+  - Claude Code：项目已接受工作区信任时才运行；
+  - 管理员下发的 hooks 总是运行。
+
+  没信任、改过、被关掉的不运行；Codex 自己读不了的 hooks 文件、Codex 的 `[features] hooks = false` 也一样。`context(path)` 的 `hooks` 一项列出每个 hook 的状态和原因，以及读不了的文件。
+- **hook 看到什么**：动作按那个工具自己的样子交给它。
+  - 命令、shell 会话里提交的一行，都是 `Bash`；
+  - 写文件：Claude Code 是 `Write`、`Edit`，Codex 是 `apply_patch`；
+  - 读文件：Claude Code 是 `Read`。Codex 没有读文件工具，读文件不交给 Codex 的 hook。
+- **结论**：
+  - 退出码 2 或 deny：拒绝；
+  - Claude Code 的 ask：弹窗请你确认；
+  - `additionalContext`：作为附注给模型；
+  - hook 想改写这次调用（`updatedInput`）：拒绝，并告诉模型按 hook 的意思改了再发；
+  - hook 超时、出错：照常执行并附注，与两个工具的做法一致。
+- hook 的结论和 `guards.toml` 一起裁决，只会更严：hook 说 allow 也放不过 `guards.toml` 拒绝的动作。
+- **Windows 上的退出码**：Codex 用 `pwsh -NoProfile -Command <命令>` 运行 hook，PowerShell 会把程序的退出码 2 变成 1，Codex 就当 hook 出错而放行，靠退出码 2 拒绝的 hook 在 Codex 里其实拦不住。winhand 也用 PowerShell 运行，但会把程序的退出码传出来，让这类拒绝照常生效。这一点比 Codex 严格，符合 hook 的本意。想让 hook 在 Codex 里也生效，可在命令末尾加 `; exit $LASTEXITCODE`，或改为输出 JSON 的 deny。
+
+`guards.toml` 也可以把判断交给一个命令，协议与 Claude Code 的 PreToolUse hook 相同：
+
+```toml
+[[guard]]
+on = ["command", "input"]
+command = 'python C:\tools\check_command.py'   # 读 stdin 的 JSON，退出码 2 或输出 deny 即拒绝
+```
+
+`command` 只能写在全局的 `~/.winhand/guards.toml` 里。项目里的文件写了，按“写错了”处理：仓库里的文件不能让 winhand 执行命令。
+
+在 `config.toml` 里可以关掉或调整：
+
+```toml
+[hooks]
+sources = ['codex', 'claude-code']   # [] = 这两个工具的 hook 一个都不运行（guards.toml 的 command 规则照常）
+timeout_s = 30                       # 每个 hook 最多等多久
+```
 
 守卫按工具的参数判断，**不是沙箱**。它适合拦住善意的 AI 犯错，挡不住刻意绕路：`run` 里的程序自己去读写什么（例如 `run("type .env")`）、正则没覆盖到的写法、`proc_kill` 和桌面工具，它都管不到。真正需要隔离时，用系统权限或单独的账户。
 
