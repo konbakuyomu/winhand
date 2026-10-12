@@ -98,7 +98,7 @@
 
 来源：
 - `docs/workspace-layer.md`（c8b652c，complete）；
-- `docs/comet/changes/client-hooks/research.md`：Codex 源码和 Claude Code 文档中的事实，逐条注明出处（complete）；
+- `research.md`（本目录）：Codex 源码和 Claude Code 文档中的事实，逐条注明出处（complete）；
 - 用户原始需求：“本地的 hooks……在云端也能用”。
 
 | 来源条目与位置 | 读取状态 | 需要保留的内容 | Spec 位置 | 验收 ID | 覆盖状态 | 理由或替代关系 |

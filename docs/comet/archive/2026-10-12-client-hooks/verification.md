@@ -219,3 +219,27 @@ N3 按决定写进规格。N4 修过了头，又有一处没修到：
   - 5 个在 `input` 里故意用 serde_json 内部键名（`$serde_json::private::Number`、`RawValue`）的用例；
   - 1 个 TOML 里超出 64 位的整数（Rust 的 toml 解析失败）。
 - 之前各轮的 176 个用例：剩 7 处，都是已列出的差异（重复键、位置形式、孤立代理字符、顶层 null、`managed_dir`、TOML 日期时间）。
+
+**正式检查（d30181a、c2741ea）**
+- 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 447 passed，40 skipped。
+- `agent.yml`：b40561f（run 38240456862）ubuntu、windows 都通过；c2741ea（run 38241999269）结果见归档提交说明。
+
+## 结论
+
+- A1–A10 全部通过：第 1 轮起每轮的 Verifier 都判为通过，第 3 到 7 轮在不断收紧的对照下仍然通过。
+- 7 轮独立验收：
+  - 阻断问题 4 个：第 1 轮 2 个、第 2 轮 1 个、第 3 轮 1 个；
+  - 第 4 轮起没有阻断问题，处理的是与 Codex 读文件、判信任方式的细小差异；
+  - 第 7 轮发现第 4 轮起对照用的 Codex 程序少了 `arbitrary_precision`，据此撤回了一处误判（R6-2）。
+- 核心约束“只运行来源工具会运行的 hook，结论只会更严”的核对方法：
+  - 用 Codex 实际的 serde 类型和编译特性做对照，共 570 多个用例；
+  - 剩下的差异都已列出，几乎都是 winhand 更严。
+
+**已知限制**（不影响验收）：
+- 与 Codex 的差异：重复键、组或 handler 写成数组的位置形式、孤立代理字符、顶层 null、`managed_dir` 不是路径、TOML 日期时间、`input` 里故意用 serde_json 内部键名、TOML 里超出 64 位的整数。
+- Codex 的 `project_root_markers`、没有 `HEAD` 的 `.git`、命令行参数（`-c`、`--profile`）不跟随。
+- 与 Claude Code 的差异：不复刻 Claude Code 的设置校验（N3），例外写在规格里。
+- Windows 上的行为（PowerShell 退出码、挂起启动加作业对象、不弹窗）由 GitHub Actions 的 Windows 跑过测试；用户真机只跑到第 2 轮的代码。
+- **待做**：经真实 winhand 服务在用户真机上冒烟。WinHand 连接器需要用户在 claude.ai 的连接器设置里重新授权。发布 0.4.6 前补做，结果记入发布说明；有问题另开 change。
+
+**用户决定**：用户把推进交给 Claude（“交给你了”）。Claude 按验收结论归档，并在汇报中说明 D1–D7 这几项代定的决定，特别是 D2：已信任的 hook 默认运行，这改变了默认行为。

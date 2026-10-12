@@ -141,7 +141,7 @@ MCP 看不到三个时机：**用户发消息**、**回答结束**、**上下文
    - 脱敏占位符比原值长，可能让结果超出预算。
 2. **P1**：Claude Code 和 Codex 适配（规矩、技能、hooks、信任）。交互式会话的输入过守卫已在 P0 完成。分两个 change：
    - `client-rules`（已实现并归档：`docs/comet/archive/2026-10-12-client-rules/`，现行规格见 `docs/comet/specs/workspace-context/spec.md`）：按 Codex、Claude Code 的读法读规矩，`context(repo=…)`，以及 P0 的两处预算遗留；
-   - `client-hooks`（进行中，`docs/comet/changes/client-hooks/`）：Claude Code、Codex hooks 翻译成守卫，信任机制。
+   - `client-hooks`（已实现并归档：`docs/comet/archive/2026-10-12-client-hooks/`，现行规格见 `docs/comet/specs/hooks/spec.md`、`action-guard`、`workspace-context`）：Claude Code、Codex hooks 翻译成守卫，信任机制。
 3. **P2**：生命周期桥，以及各客户端的配置生成。
 4. **P3**：resources 和 prompts 出口；跟随本机 MCP 配置；可选导出到 GitHub。
 

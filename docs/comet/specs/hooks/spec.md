@@ -4,7 +4,7 @@
 
 经 winhand 的调用，在执行前也会运行本机已有的 Codex、Claude Code PreToolUse hooks，并照它们的结论拒绝、请人确认或附注。只运行来源工具自己会运行的 hooks。
 
-事实依据见 `docs/comet/changes/client-hooks/research.md`。
+事实依据见 `docs/comet/archive/2026-10-12-client-hooks/research.md`。
 
 ## Requirements
 

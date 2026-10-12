@@ -10,7 +10,7 @@ Codex apply_patch), and the answer is read the way that tool reads it: exit code
 refuses, Claude Code's ask asks the person, additionalContext becomes a note, and a hook that fails
 lets the call through with a note, as both tools do. A hook's wish to rewrite the call
 (updatedInput) refuses it with the rewrite in the reason: winhand does not change what the model
-sent. The facts these rules come from are in docs/comet/changes/client-hooks/research.md.
+sent. The facts these rules come from are in docs/comet/archive/2026-10-12-client-hooks/research.md.
 """
 
 from __future__ import annotations

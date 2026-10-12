@@ -110,6 +110,7 @@
 - 每个候选目录先找它的项目根，再读 git 配置里所有 remote 的 `url`：
   - `.git` 是文件夹时，读其中的 `config`；
   - `.git` 是文件（worktree）时，按 `gitdir:` 找到 git 目录，若有 `commondir`，读共用目录里的 `config`。
+  - 这些记录（`.git` 文件、`commondir`、`config`）只读普通文件（可经链接到达）：`.git` 文件、`commondir` 最多 64 KiB，`config` 最多 64 MB；命名管道、设备文件等当作没有，不会让查找卡住。
 - 同一项目根只算一次。多个检出目录匹配时，取 git 目录中 `index`、`HEAD`、`FETCH_HEAD` 修改时间最新的那个，其余按时间列在 `other_checkouts`，最多 30 个、约 4,000 字符，再多只计数（`other_checkouts_more`）。
 - 结果：
   - 返回中带 `repo`：`name`、`checkout`、`source`、`other_checkouts`；
@@ -241,3 +242,21 @@ Scenario: (A10) 不擅自读项目外和受保护的文件
 - 结果：
   - 第一次，三份都不读，列在 `imports_skipped`：两份标明“项目外，未批准”，`.env` 标明被守卫拒绝；
   - 第二次，项目外的两份照常返回，`.env` 仍然被拒绝。
+
+### R13 外部 hooks
+
+- 传了 path 时，返回 `hooks`：对该目录生效的 PreToolUse hooks（见 hooks 规格的 R1、R2），每个包含：
+  - `source`（`codex` 或 `claude-code`）；
+  - `file`（声明它的文件）和 `key`（Codex 的键，或 Claude Code 的组序号）；
+  - `matcher`；
+  - `command`（经过脱敏，过长时截断到 300 字符）；
+  - `status`：`managed`、`trusted`、`untrusted`、`modified`、`disabled`、`unsupported`；
+  - `runs`：是否会运行；不运行时附 `reason`。
+- 配置文件无法解析时，列出文件和错误。
+- `[hooks] sources = []` 时不读 hooks 配置，`hooks` 为空，并说明已关闭。
+- `hooks` 一项的列表最多占约 6,000 字符，其余只计数；无法读取的文件另列，每条原因最多 300 字符，连同列表不超过约 10,000 字符。
+
+Scenario: (A7) context 列出 hooks
+- 设置：项目 `.codex/hooks.json` 有一个已信任的 hook 和一个未信任的 hook；项目 `.claude/settings.json` 有一个 hook，但项目没有接受工作区信任。
+- 操作：`context(path=<项目>)`。
+- 结果：三个 hook 都列出，状态分别为 `trusted`、`untrusted`、`untrusted`；只有第一个的 `runs` 为 true；未运行的写明原因。
