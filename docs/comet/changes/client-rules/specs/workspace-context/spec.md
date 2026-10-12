@@ -14,7 +14,7 @@
 
 - 工具签名：`context(path: str | None = None, repo: str | None = None)`。
 - 传 `path` 时，返回全局部分和项目部分；`path` 和 `repo` 都不传时，只返回全局部分，并提示传入工作目录或仓库名。
-- `path` 可以是文件或目录，也可以不存在：不存在时，从最近的已存在上级目录开始。
+- `path` 可以是文件或目录，也可以不存在（包括名字长到文件系统不接受）：这时从最近的已存在上级目录开始。
 - `repo` 见 R8。
 - 项目根：从 path 向上，最近一个含 `.git` 的目录；找不到时，项目根就是 path 所在目录。
 
@@ -36,6 +36,7 @@
   3. `~/.claude/rules/` 下所有 `*.md`，递归，按相对路径排序（`scope=global`）。按 R4 判断是否生效。
 - 目录部分（`scope=project`）：从文件系统根到 path 所在目录，每一级依次取存在的 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`，按从上到下的顺序。用户自己的 `~/.claude/CLAUDE.md` 是全局文件，不算作主目录这一级的 `.claude/CLAUDE.md`。
 - 项目规则（`scope=project`）：项目根 `.claude/rules/` 下所有 `*.md`，递归，按相对路径排序，排在项目根这一级的 CLAUDE 文件之后。按 R4 判断是否生效。
+- 读取规则文件（包括展开引用、判断 `paths`）最多用 10 秒；超时就停下，结果带 `incomplete` 说明，已读到的照常返回。这样仓库里再多、再大的规则文件也不会让 `context()` 卡住。
 - 一个规则文件夹最多看 500 个文件，按遍历顺序（每个文件夹先看自己的文件，再看子文件夹）；超过时，在这些文件之前加一条 `skipped` 说明。
 - AGENTS.md 兜底：只启用 Claude Code 格式时，若 path 所在目录及其所有上级目录都没有 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`（用户自己的 `~/.claude/CLAUDE.md` 不算），就按 R2 的项目部分读取 `AGENTS.md`（不含 `AGENTS.override.md`）。这样读到的文件标 `format=claude-code`。
 - 每份 Claude Code 格式的文件都按 R5 展开 `@import`。
@@ -47,9 +48,9 @@
 - `paths` 的值和列表项后面的 `# 注释`（引号外、前面有空白的 `#`）不算 glob，列表中的注释行和空行跳过。
 - 有 `paths` 时，只有传入了 path，且 path 相对于项目根的路径（`/` 分隔）匹配其中一个 glob，规则才生效：
   - glob 支持 `*`、`**`、`?`、`[a-z]` / `[!x]` 和 `{a,b}`（Windows 上不区分大小写）；
-  - 反斜杠转义下一个字符（例如 `\[` 表示字面的 `[`），与 Claude Code 文档一致；
+  - 反斜杠转义下一个字符（例如 `\[` 表示字面的 `[`，`\{`、`\}`、`\,` 不参与 `{}` 展开），与 Claude Code 文档一致；
   - 匹配用不回溯的算法：单个模式的耗时与路径长度和模式长度的乘积成正比；
-  - 一个规则文件的 glob 最多展开成 1,000 个模式（与 Claude Code 的上限相同），超过的部分不再尝试；超过 1,000 字符的 glob 跳过；`{}` 最多展开 32 层（连续或嵌套）；
+  - 一个规则文件的 glob 最多展开成 1,000 个模式（与 Claude Code 的上限相同），超过的部分不再尝试；超过 1,000 字符的 glob 跳过；`{}` 最多展开 16 层（连续或嵌套）；
   - 一次调用最多尝试 20,000 个模式；用完后，剩下有 `paths` 的规则列在 `rules_not_applied`，并标 `unchecked`，说明可以用该文件的路径再调用一次；
   - 不带目录的 `*.md` 只匹配项目根下的文件。
 - 不生效的规则不读正文，列在 `rules_not_applied` 中，每项包含 `path`、`paths`、`format`、`scope`。
@@ -81,7 +82,7 @@
   - `~/.claude.json`（设置了 `CLAUDE_CONFIG_DIR` 时为该目录下的 `.claude.json`）的 `projects` 里，这个项目根对应条目的 `hasClaudeMdExternalIncludesApproved` 为 true；
   - 配置了 `[context] external_imports = true`。
 - 链接到项目外：项目里找到的规则文件、`.claude/rules` 文件夹和其中的子文件夹，真实路径（解开符号链接后）不在项目根之内时，与外部引用适用同样的条件；不满足时不读，记 `skipped`。项目根以上各级目录里的文件，以它所在的那一级目录为界。链接到项目内其他位置的照常读取；`.claude/rules` 里链接进来的子文件夹照常递归。
-- 网络路径（`\\server\share`、`//server/share`）形式的外部引用，以及指向网络路径的符号链接，在判断之前不访问它，以免向网络发起连接。
+- 网络路径（`\\server\share`、`//server/share`，以及 `\\?\` 开头但不是盘符的路径，如 `\\?\UNC\…`、`\\?\GLOBALROOT\…`）形式的外部引用，以及指向这类路径的符号链接，在判断之前不访问它，以免向网络发起连接。
 - Claude Code 的批准记录可以在项目根，也可以在项目根到 path 之间任何一级目录（Claude Code 启动的目录）。
 - 名字不是有效 UTF-8 的文件（Linux 允许）跳过，不让整个结果无法发送。
 - `managed`、`global` 文件的引用不受“外部引用”限制，但同样要过守卫。
@@ -109,7 +110,7 @@
 - 每个候选目录先找它的项目根，再读 git 配置里所有 remote 的 `url`：
   - `.git` 是文件夹时，读其中的 `config`；
   - `.git` 是文件（worktree）时，按 `gitdir:` 找到 git 目录，若有 `commondir`，读共用目录里的 `config`。
-- 同一项目根只算一次。多个检出目录匹配时，取 git 目录中 `index`、`HEAD`、`FETCH_HEAD` 修改时间最新的那个，其余按时间列在 `other_checkouts`，最多 30 个，再多只计数（`other_checkouts_more`）。
+- 同一项目根只算一次。多个检出目录匹配时，取 git 目录中 `index`、`HEAD`、`FETCH_HEAD` 修改时间最新的那个，其余按时间列在 `other_checkouts`，最多 30 个、约 4,000 字符，再多只计数（`other_checkouts_more`）。
 - 结果：
   - 返回中带 `repo`：`name`、`checkout`、`source`、`other_checkouts`；
   - 没给 path 时，path 为检出目录；

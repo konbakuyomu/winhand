@@ -29,6 +29,7 @@ import json
 import os
 import re
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -217,11 +218,16 @@ def _strip_comment(value: str) -> str:
     return value
 
 
-def _split_top(value: str) -> list[str]:
-    """Split on commas that are outside quotes and braces."""
+def _split_top(value: str, escapes: bool = False) -> list[str]:
+    """Split on commas that are outside quotes and braces (and, with escapes, not after a backslash)."""
     parts, current, depth, quote = [], [], 0, ""
+    escaped = False
     for ch in value:
-        if quote:
+        if escaped:
+            escaped = False
+        elif escapes and ch == "\\":
+            escaped = True
+        elif quote:
             quote = "" if ch == quote else quote
         elif ch in "'\"":
             quote = ch
@@ -302,29 +308,50 @@ def rule_paths(text: str) -> list[str] | None:
 MAX_GLOB_CHARS = 1_000
 MAX_RULE_PATTERNS = 1_000  # Claude Code's limit per rule file
 GLOB_BUDGET = 20_000  # patterns tried in one context() call
+RULES_TIME_S = 10.0  # reading rule files stops after this; the answer says so
+CHECKOUTS_CHARS = 4_000
 
 
 def _braces(pattern: str, limit: int = 1000, depth: int = 0) -> list[str]:
-    """`src/*.{c,h}` -> ['src/*.c', 'src/*.h']."""
-    start = pattern.find("{")
-    if start < 0 or depth > 32:
+    """`src/*.{c,h}` -> ['src/*.c', 'src/*.h']; `\\{`, `\\}` and `\\,` are literal."""
+    start = _unescaped(pattern, "{")
+    if start < 0 or depth > 16:
         return [pattern]
     level = 0
-    for end in range(start, len(pattern)):
-        if pattern[end] == "{":
+    i = start
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "{":
             level += 1
-        elif pattern[end] == "}":
+        elif ch == "}":
             level -= 1
             if level == 0:
                 break
+        i += 1
     else:
         return [pattern]
+    end = i
     out: list[str] = []
-    for part in _split_top(pattern[start + 1 : end]) or [""]:
+    for part in _split_top(pattern[start + 1 : end], escapes=True) or [""]:
         out += _braces(pattern[:start] + part + pattern[end + 1 :], limit, depth + 1)
         if len(out) >= limit:
             break
     return out[:limit]
+
+
+def _unescaped(text: str, char: str) -> int:
+    i = 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == char:
+            return i
+        i += 1
+    return -1
 
 
 def _segment_tokens(segment: str) -> list:
@@ -416,7 +443,7 @@ def glob_match(rel: str, pattern: str) -> bool:
 
 
 def rule_applies(
-    paths: list[str], root: str, target: str | None, budget: list[int] | None = None
+    paths: list[str], root: str, target: str | None, budget: list[int] | None = None, late=None
 ) -> bool | None:
     """Whether a path-scoped rule is in force for `target` (a file or folder) in the project at root.
     A rule's globs expand to at most MAX_RULE_PATTERNS patterns (as in Claude Code); `budget` is what
@@ -430,6 +457,8 @@ def rule_applies(
     for glob in paths:
         if len(glob) > MAX_GLOB_CHARS:
             continue  # nobody writes such a path; do not spend time on it
+        if late is not None and late():
+            return None
         for pattern in _braces(glob.removeprefix("./").lstrip("/"), left):
             if budget is not None:
                 if budget[0] <= 0:
@@ -514,7 +543,8 @@ def _network(path: str) -> bool:
     """A UNC path: looking at it would open a network connection. Windows writes local link targets
     as \\\\?\\C:\\..., which is not one; \\\\?\\UNC\\server\\share is."""
     if path.startswith(("\\\\?\\", "\\\\.\\", "//?/", "//./")):
-        return path[4:].upper().startswith(("UNC\\", "UNC/"))
+        # only a drive letter is surely local; UNC\\, GLOBALROOT\\Device\\Mup\\ ... may be a share
+        return not re.match(r"[A-Za-z]:([\\\\/]|$)", path[4:])
     return path.startswith(("\\\\", "//"))
 
 
@@ -535,7 +565,15 @@ class _Rules:
         self.expanded: set[str] = set()  # files whose @imports were followed
         self.guard_cache: dict = {}
         self.glob_budget = [GLOB_BUDGET]
+        self.deadline = time.monotonic() + RULES_TIME_S
+        self.stopped = False
         self._approved: bool | None = None
+
+    def late(self) -> bool:
+        """Past the time limit: whatever a repository put in its files, context() answers."""
+        if not self.stopped and time.monotonic() > self.deadline:
+            self.stopped = True
+        return self.stopped
 
     def ordered(self) -> list[dict]:
         out: list[dict] = []
@@ -597,6 +635,8 @@ class _Rules:
 
     def file(self, path: str, fmt: str, scope: str, text: str | None = None, home: str | None = None) -> None:
         """A rule file found in a known place; `home` limits where a project file may really be."""
+        if self.late():
+            return
         if self._network_link(path, home):
             key = os.path.normcase(os.path.abspath(path))
             if key not in self.seen:
@@ -616,7 +656,7 @@ class _Rules:
         found: list[str] = []
         visited: set[str] = set()
         stack = [folder]
-        while stack:
+        while stack and not self.late():
             current = stack.pop()
             if _key(current) in visited:
                 continue
@@ -669,6 +709,8 @@ class _Rules:
                 }
             )
         for path in found[:MAX_RULE_FILES]:
+            if self.late():
+                break
             if _key(path) in self.seen:
                 continue
             why = self.refused(path)
@@ -680,7 +722,9 @@ class _Rules:
                     text = None  # file() reports the error
             paths = rule_paths(text) if text is not None else None
             applies = (
-                rule_applies(paths, self.root, self.target, self.glob_budget) if paths and self.root else True
+                rule_applies(paths, self.root, self.target, self.glob_budget, self.late)
+                if paths and self.root
+                else True
             )
             if paths and not applies:
                 entry = {"path": path, "paths": paths, "format": "claude-code", "scope": scope}
@@ -729,6 +773,8 @@ class _Rules:
         skipped: list[dict] = []
         outside = scope == "project" and not self.external_ok()
         for ref in import_refs(text):
+            if self.late():
+                break
             candidates = _import_paths(ref, os.path.dirname(path))
             if outside and any(_network(c) for c in candidates):  # never touch a share on its say-so
                 skipped.append({"import": ref, "path": candidates[0], "reason": _OUTSIDE})
@@ -1021,12 +1067,18 @@ def find_repo(cfg: Config, repo: str) -> dict:
             f"{config.config_path()} (for example repo_roots = ['D:\\code']), or call context with path= instead."
         )
     ordered = sorted(found.values(), key=lambda f: f[2], reverse=True)
-    more = {"other_checkouts_more": len(ordered) - 1 - MAX_LISTED} if len(ordered) - 1 > MAX_LISTED else {}
+    others, used = [], 0
+    for folder, _, _ in ordered[1 : 1 + MAX_LISTED]:
+        used += _encoded(folder) + 4
+        if used > CHECKOUTS_CHARS:
+            break
+        others.append(folder)
+    more = {"other_checkouts_more": len(ordered) - 1 - len(others)} if len(ordered) - 1 > len(others) else {}
     return more | {
         "name": repo,
         "checkout": ordered[0][0],
         "source": ordered[0][1],
-        "other_checkouts": [f[0] for f in ordered[1 : 1 + MAX_LISTED]],
+        "other_checkouts": others,
     }
 
 
@@ -1072,6 +1124,12 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
     if repo_info:
         out["repo"] = repo_info
     out["formats"] = _formats(cfg)
+    if rules.stopped:
+        out["incomplete"] = (
+            f"stopped reading rule files after {RULES_TIME_S:.0f} s (very many or very large ones here); "
+            "what is listed is what was read. Call context again with path= the file you work on, or read "
+            "the rest with fs_read"
+        )
     out["rules"] = []
     if rules.not_applied:
         listed, used = [], 0
@@ -1090,6 +1148,9 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
             if len(listed) < len(rules.not_applied)
             else ""
         )
+        unchecked = sum(1 for entry in rules.not_applied if "unchecked" in entry)
+        if unchecked:
+            out["rules_not_applied_note"] += f"; {unchecked} of them were not checked (too many patterns)"
 
     every_skill = mask(skills(cfg, root, rules.refused))
     shown, used = [], 2
@@ -1155,7 +1216,7 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         else "Pass path=<the folder you work in>, or repo=<owner/name> when you only know the repository, "
         "to also get that project's rules, skills and guard rules."
     )
-    for key in ("path", "project_root", "repo", "rules_not_applied"):
+    for key in ("path", "project_root", "repo"):
         if key in out:
             out[key] = mask(out[key])
 

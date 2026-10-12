@@ -727,3 +727,52 @@ def test_imports_of_an_already_read_global_file_keep_its_scope(tmp_path, home, m
 def test_a_huge_repo_argument_is_refused(home):
     with pytest.raises(ValueError, match="too long"):
         workspace.context(Config(context={"skills": []}), repo="x" * 100_000 + "/o/n")
+
+
+# ------------------------------------------------------------------ round 5
+
+
+def test_reading_rules_has_a_time_limit(tmp_path, home, monkeypatch):
+    root = project(tmp_path)
+    write(root / "AGENTS.md", "rules")
+    monkeypatch.setattr(workspace, "RULES_TIME_S", -1.0)
+    out = ctx(root)
+    assert "stopped reading rule files" in out["incomplete"] and out["rules"] == []
+
+
+def test_escaped_braces_are_literal():
+    root = "/r" if os.name != "nt" else "C:\\r"
+    escaped = ["src/\\{a,b\\}.md"]
+    assert workspace.rule_applies(escaped, root, os.path.join(root, "src", "{a,b}.md"))
+    assert not workspace.rule_applies(escaped, root, os.path.join(root, "src", "a.md"))
+    assert workspace._braces("x\\,y,{a\\,b,c}") == ["x\\,y,a\\,b", "x\\,y,c"]
+
+
+def test_other_checkouts_are_capped_by_length(tmp_path, home):
+    clones = tmp_path / "clones"
+    for i in range(20):
+        checkout(clones / (f"{i:02d}" + "c" * 230), "https://github.com/o/r.git", 1_000_000_000 + i)
+    cfg = Config(context={"skills": [], "repo_roots": [str(clones)]})
+    repo = workspace.context(cfg, repo="o/r")["repo"]
+    assert len(json.dumps(repo["other_checkouts"])) <= workspace.CHECKOUTS_CHARS
+    assert len(repo["other_checkouts"]) + repo["other_checkouts_more"] == 19
+
+
+def test_not_applied_rules_are_masked_once(tmp_path, home, winhand_home):
+    config.save(Config(redact={"values": ["redacted"]}))
+    root = project(tmp_path)
+    write(root / ".claude" / "rules" / "r.md", "---\npaths: ['redacted/**']\n---\nx")
+    out = ctx(root, formats=["claude-code"])
+    assert "««" not in json.dumps(out, ensure_ascii=False) and out["redacted"] == 1
+
+
+def test_a_name_too_long_for_the_file_system_falls_back(tmp_path, home):
+    root = project(tmp_path)
+    write(root / "AGENTS.md", "rules")
+    out = ctx(root / ("b" * 300))
+    assert out["project_root"] == str(root) and out["rules"][0]["content"] == "rules"
+
+
+def test_other_extended_paths_count_as_remote():
+    assert workspace._network("\\\\?\\GLOBALROOT\\Device\\Mup\\srv\\share\\x.md")
+    assert not workspace._network("\\\\?\\D:\\x.md")

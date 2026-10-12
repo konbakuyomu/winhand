@@ -216,10 +216,10 @@ def _under(path: str, folder: str) -> bool:
 def _start_dir(path: str) -> str:
     """The folder a path lives in (the path itself if it is a folder); missing parts are skipped."""
     p = Path(path)
-    if p.is_dir():
+    if os.path.isdir(p):  # False, not an error, for a name too long for the file system
         return str(p)
     p = p.parent
-    while not p.exists() and p != p.parent:
+    while not os.path.exists(p) and p != p.parent:
         p = p.parent
     return str(p)
 
