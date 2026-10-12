@@ -42,6 +42,17 @@ def _no_hooks_of_this_machine(tmp_path, monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_local_mcp_left_over(monkeypatch):
+    """Each test starts without the local MCP servers an earlier test's app registered."""
+    from winhand import local_mcp
+
+    monkeypatch.setattr(local_mcp, "active", None)
+    monkeypatch.setattr(local_mcp, "_own", None)
+    monkeypatch.setattr(local_mcp, "_calls", {})
+    monkeypatch.setattr(local_mcp, "_listings", {})
+
+
 @pytest.fixture
 def manager():
     m = SessionManager()

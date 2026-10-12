@@ -79,8 +79,9 @@ def _skills_line(names: list[str], room: int) -> str:
     return head + ", ".join(kept) + f" (and {len(names) - len(kept)} more)" if kept or room >= 40 else ""
 
 
-def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
-    """The additionalContext for a session of `repo` (a remote URL or owner/name; may be empty)."""
+def session_start(repo: str | None, cfg: config.Config | None = None, with_skill_names: bool = True) -> str:
+    """The additionalContext for a session of `repo` (a remote URL or owner/name; may be empty): the
+    rules, and the skills' names unless the skills come in a part of their own."""
     cfg = cfg or config.load()
     redactor = redact.current()
 
@@ -131,10 +132,14 @@ def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
         why = str(item.get("skipped") or item.get("error") or "")
         sections.append((mask(item["path"]), None if text is None else mask(text), mask(why)))
 
-    names = [
-        mask(n)
-        for n in sorted({s["name"] for s in workspace.skills(cfg, root, rules.refused)}, key=str.lower)
-    ]
+    names = (
+        [
+            mask(n)
+            for n in sorted({s["name"] for s in workspace.skills(cfg, root, rules.refused)}, key=str.lower)
+        ]
+        if with_skill_names
+        else []
+    )
 
     budget = BUDGET_CHARS - _size(intro) - 2
     parts = [intro]
@@ -184,6 +189,82 @@ def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
     return text
 
 
+SKILL_DESC_CHARS = workspace.SKILL_DESC_LIMIT  # as Claude Code cuts description + when_to_use
+MIN_DESC_CHARS = 80
+
+
+def _checkout(repo: str | None, cfg: config.Config) -> tuple[str | None, str | None]:
+    """(project root of the local checkout of `repo`, owner/name to show) — (None, …) when none."""
+    named = (workspace.repo_key(repo) or repo.rsplit("@", 1)[-1])[:100] if repo else None
+    if not repo:
+        return None, named
+    try:
+        return workspace.project_root(workspace.find_repo(cfg, repo)["checkout"]), named
+    except ValueError:
+        return None, named
+
+
+def skills_text(repo: str | None, cfg: config.Config | None = None, budget: int = BUDGET_CHARS) -> str:
+    """The skills part of a session's start: each skill's name and description, as Claude Code lists
+    them; descriptions shortened evenly when they do not all fit."""
+    cfg = cfg or config.load()
+    redactor = redact.current()
+
+    def mask(text: str) -> str:
+        text = workspace._sendable(text)
+        return text if redactor.empty else redactor.data(text)[0]
+
+    root, _ = _checkout(repo, cfg)
+    rules = workspace._collect(cfg, root, root, root)  # for the guard's read rules
+    found = workspace.skills(cfg, root, rules.refused, desc_chars=SKILL_DESC_CHARS)
+    listed = [(mask(s["name"]), mask(s["description"])) for s in found if s.get("model_invocable", True)]
+    on_request = [mask(s["name"]) for s in found if not s.get("model_invocable", True)]
+    machine = socket.gethostname() or "this PC"
+    head = mask(
+        f"Skills on the PC {machine!r}. They and their scripts are on that PC: when one fits the task, call "
+        "skill(name) for its SKILL.md and files, follow it, and run its scripts there with run."
+    )
+    if not found:
+        return head + "\n(no skills found)"
+    tail = f"Used only when asked for by name: {', '.join(on_request)}" if on_request else ""
+    room = budget - _size(head) - (_size(tail) + 2 if tail else 0) - 2
+
+    def render(cap: int, described: int) -> list[str]:
+        out = []
+        for i, (name, desc) in enumerate(listed):
+            if i < described and desc:
+                short = desc if len(desc) <= cap else desc[: cap - 1] + "…"
+                out.append(f"- {name}: {short}")
+            else:
+                out.append(f"- {name}")
+        return out
+
+    def size(lines: list[str]) -> int:
+        return sum(_size(x) + 1 for x in lines)
+
+    lines = render(SKILL_DESC_CHARS, len(listed))
+    if size(lines) > room:
+        low, high = MIN_DESC_CHARS, SKILL_DESC_CHARS  # the longest cap that fits
+        while low < high:
+            mid = (low + high + 1) // 2
+            if size(render(mid, len(listed))) <= room:
+                low = mid
+            else:
+                high = mid - 1
+        lines = render(low, len(listed))
+        described = len(listed)
+        while size(lines) > room and described > 0:  # still too much: the last ones by name only
+            described -= 1
+            lines = render(MIN_DESC_CHARS, described)
+    text = "\n".join([head, *lines] + ([tail] if tail else []))
+    while _size(text) > budget:
+        text = text[: -max(1, (_size(text) - budget + 1) // 2)]
+    return text
+
+
+PARTS = ("rules", "skills", "tools")
+
+
 async def endpoint(request):
     """Starlette handler for POST /hook/{event}, for the relay's `hook` identity only."""
     from starlette.responses import JSONResponse, PlainTextResponse
@@ -200,7 +281,17 @@ async def endpoint(request):
         hook_input = {}
     repo = (request.headers.get("x-winhand-repo") or "").strip()[:500] or None
     del hook_input  # startup, resume, clear and compact all get the same rules
-    text = await asyncio.to_thread(session_start, repo)
+    part = (request.headers.get("x-winhand-part") or "").strip().lower()
+    if part and part not in PARTS:
+        return PlainTextResponse("unknown part", status_code=404)
+    if part == "skills":
+        text = await asyncio.to_thread(skills_text, repo)
+    elif part == "tools":
+        from . import local_mcp
+
+        text = await asyncio.to_thread(local_mcp.session_text, BUDGET_CHARS)
+    else:  # "rules"; no part at all is a hook from 0.4.7, which also wants the skills' names
+        text = await asyncio.to_thread(session_start, repo, None, not part)
     return JSONResponse({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}})
 
 
@@ -240,11 +331,12 @@ def relay_origin(url: str) -> str:
     return f"{scheme}://{parts.netloc}"
 
 
-def hook_command(origin: str) -> str:
-    """The SessionStart command for a repository's .claude/settings.json (POSIX sh): in a cloud
+def hook_command(origin: str, part: str | None = None) -> str:
+    """A SessionStart command for a repository's .claude/settings.json (POSIX sh): in a cloud
     session only, POST the hook input to the relay with the repository's remote (credentials cut
-    off), and print the answer only when it is a 2xx; quiet and exit 0 whatever happens. The token
-    comes from a Network secret (added by the egress proxy) or WINHAND_HOOK_TOKEN."""
+    off) and which part of the start it asks for, and print the answer only when it is a 2xx;
+    quiet and exit 0 whatever happens. The token comes from a Network secret (added by the egress
+    proxy) or WINHAND_HOOK_TOKEN."""
     return (
         '[ "$CLAUDE_CODE_REMOTE" = true ] || exit 0; '
         'repo=$(git -C "${CLAUDE_PROJECT_DIR:-.}" remote get-url origin 2>/dev/null); repo=${repo##*@}; '
@@ -252,16 +344,20 @@ def hook_command(origin: str) -> str:
         "code=$(curl -sS --max-time 25 -o \"$out\" -w '%{http_code}' -X POST "
         "-H 'content-type: application/json' "
         '-H "X-Winhand-Repo: $repo" '
-        '${WINHAND_HOOK_TOKEN:+-H "X-Winhand-Hook-Token: $WINHAND_HOOK_TOKEN"} '
+        + (f"-H 'X-Winhand-Part: {part}' " if part else "")
+        + '${WINHAND_HOOK_TOKEN:+-H "X-Winhand-Hook-Token: $WINHAND_HOOK_TOKEN"} '
         f"--data-binary @- '{origin}{HOOK_MARK}' 2>/dev/null); "
         'case "$code" in 2??) cat "$out";; esac; rm -f "$out"; exit 0'
     )
 
 
 def hook_group(origin: str) -> dict:
+    """Three hooks, run side by side, each with its own 10,000-character room: rules, skills, tools."""
     return {
         "matcher": MATCHER,
-        "hooks": [{"type": "command", "timeout": 30, "command": hook_command(origin)}],
+        "hooks": [
+            {"type": "command", "timeout": 30, "command": hook_command(origin, part)} for part in PARTS
+        ],
     }
 
 

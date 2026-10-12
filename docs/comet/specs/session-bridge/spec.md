@@ -1,6 +1,6 @@
 # session-bridge：云端会话开场带上本机规矩
 
-云端 Claude Code 会话开始（以及清空、恢复、压缩之后）时，仓库里的 SessionStart hook 经中转向这台电脑要一段上下文：本机的全局规矩、云端仓库里没有的项目规矩、技能名单。事实依据见 `research.md`。
+云端 Claude Code 会话开始（以及清空、恢复、压缩之后）时，仓库里的 SessionStart hook 经中转向这台电脑要一段上下文：本机的全局规矩、云端仓库里没有的项目规矩、技能名单。事实依据见 `docs/comet/archive/2026-10-12-session-bridge/research.md`。
 
 ### R1 中转的 hook 入口
 

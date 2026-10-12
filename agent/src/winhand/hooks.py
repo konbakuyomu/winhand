@@ -948,6 +948,10 @@ def calls(
         return [("Bash", {"command": command}, bash)]
     if kind == "read":
         return [] if source == "codex" else [("Read", {"file_path": p}, ("Read",)) for p in action.paths]
+    if kind == "mcp":  # both name MCP tools mcp__<server>__<tool> and pass the arguments as tool_input
+        name = f"mcp__{args.get('server') or ''}__{args.get('tool') or ''}"
+        arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
+        return [(name, arguments, (name,))]
     if kind in ("write", "edit"):
         if source == "codex":
             return [

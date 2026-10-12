@@ -172,7 +172,20 @@ def test_write_merges_and_does_not_repeat(tmp_path):
     data = json.loads(settings.read_text(encoding="utf-8"))
     assert data["permissions"] == {"allow": ["Bash(ls)"]}
     assert data["hooks"]["PreToolUse"] == [{"hooks": [{"command": "x"}]}]
-    assert len(data["hooks"]["SessionStart"]) == 1
+    (group,) = data["hooks"]["SessionStart"]
+    parts = [h["command"].split("X-Winhand-Part: ")[1].split("'")[0] for h in group["hooks"]]
+    assert parts == ["rules", "skills", "tools"]
+
+
+def test_write_replaces_the_single_hook_of_0_4_7(tmp_path):
+    old = session_bridge.hook_command("https://relay.example.com")
+    settings = write(
+        tmp_path / "repo" / ".claude" / "settings.json",
+        json.dumps({"hooks": {"SessionStart": [{"matcher": "startup", "hooks": [{"command": old}]}]}}),
+    )
+    cli.main(["bridge", "init", "--relay", "https://relay.example.com", "--write", str(tmp_path / "repo")])
+    (group,) = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+    assert len(group["hooks"]) == 3 and all("X-Winhand-Part" in h["command"] for h in group["hooks"])
 
 
 def test_write_refuses_a_broken_settings_file(tmp_path, capsys):
@@ -328,3 +341,70 @@ def test_rules_past_the_bmp_are_cut_not_dropped(checkout, home):
 def test_a_credential_in_an_odd_address_is_not_echoed(checkout):
     text = session_bridge.session_start("https://user:SECRET@host.example/single.git", Config())
     assert "SECRET" not in text
+
+
+# ------------------------------------------------------------------ local-skills-tools A1, A7
+
+
+def skill(home, name, description, extra=""):
+    write(
+        home / ".agents" / "skills" / name / "SKILL.md",
+        f"---\nname: {name}\ndescription: {description}\n{extra}---\n",
+    )
+
+
+def test_the_skills_part_has_each_description(checkout, home):
+    skill(home, "pdf", "Fill and split PDF files.", "when_to_use: when a PDF is mentioned\n")
+    skill(home, "secret-step", "Only by name.", "disable-model-invocation: true\n")
+    write(
+        checkout / ".claude" / "skills" / "build" / "SKILL.md",
+        "---\nname: build\ndescription: Build it.\n---\n",
+    )
+    text = session_bridge.skills_text("owner/name", Config())
+    lines = text.splitlines()
+    assert "skill(name)" in lines[0]
+    assert lines[1] == "- build: Build it."  # the project's first
+    assert "- pdf: Fill and split PDF files. when a PDF is mentioned" in lines
+    assert "- secret-step" not in text and lines[-1] == "Used only when asked for by name: secret-step"
+
+
+def test_long_descriptions_are_shortened_evenly(checkout, home):
+    for i in range(40):
+        skill(home, f"skill-{i:02}", f"{i:02} " + "word " * 60)  # ~300 characters each, ~12,000 in all
+    text = session_bridge.skills_text("owner/name", Config())
+    assert session_bridge._size(text) <= session_bridge.BUDGET_CHARS
+    described = [x for x in text.splitlines() if x.startswith("- skill-")]
+    assert len(described) == 40
+    lengths = {len(x.split(": ", 1)[1]) for x in described}
+    assert len(lengths) == 1 and lengths.pop() >= session_bridge.MIN_DESC_CHARS
+    assert all(x.endswith("…") for x in described)
+
+
+def test_too_many_skills_are_still_all_named(checkout, home):
+    for i in range(150):
+        skill(home, f"skill-{i:03}", "word " * 60)
+    text = session_bridge.skills_text("owner/name", Config())
+    assert session_bridge._size(text) <= session_bridge.BUDGET_CHARS
+    assert all(f"- skill-{i:03}" in text for i in range(150))
+    assert "- skill-000: word" in text and "- skill-149\n" in text + "\n"  # the last by name only
+
+
+async def test_each_part_is_asked_for_by_its_header(checkout, home):
+    def part(name):
+        return {"x-winhand-repo": "github.com/owner/name", "x-winhand-part": name}
+
+    async def context_of(headers):
+        response = await post("/hook/session-start", "hook", headers=headers)
+        assert response.status_code == 200
+        return response.json()["hookSpecificOutput"]["additionalContext"]
+
+    rules = await context_of(part("rules"))
+    assert "GLOBAL CODEX RULE" in rules and "pdf" not in rules
+    skills = await context_of(part("skills"))
+    assert "- pdf: d" in skills and "GLOBAL CODEX RULE" not in skills
+    tools = await context_of(part("tools"))
+    assert tools.startswith("Local MCP servers on this PC") and "GLOBAL" not in tools
+    legacy = await context_of({"x-winhand-repo": "github.com/owner/name"})  # a hook written by 0.4.7
+    assert "GLOBAL CODEX RULE" in legacy and "pdf" in legacy
+    unknown = await post("/hook/session-start", "hook", headers=part("everything"))
+    assert unknown.status_code == 404

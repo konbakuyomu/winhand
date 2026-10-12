@@ -128,6 +128,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
 | 本机规则 | `context`：这台电脑写给 AI 的规矩（按 Codex、Claude Code 的读法：AGENTS.md、CLAUDE.md、`.claude/rules`、`@` 引用）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务；`repo=owner/name` 可按仓库名找到本机目录。见[本机规则与守卫](#本机规则与守卫) |
+| 技能和本机 MCP | `skill(name)`：取一个技能的 SKILL.md 和文件清单（相当于 Claude Code 的 Skill 工具）；`mcp_tools` 列出本机 MCP 服务和它们的工具，`mcp_call` 调用其中的工具。见[本机的其他 MCP 服务](#本机的其他-mcp-服务) |
 | 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
 
 `run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义；只给 `command` 时整行交给 PowerShell 执行。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
@@ -191,7 +192,7 @@ ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 - 对该目录生效的守卫规则；
 - 本机 MCP 服务。
 
-文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `fs_read` 读 SKILL.md，脚本用 `run` 在这台电脑上执行。
+文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `skill(name)` 取 SKILL.md 正文、技能文件夹和其中的文件清单（SKILL.md 同样先过守卫的 `read` 规则），脚本用 `run` 在这台电脑上执行。
 
 输出经过脱敏，按脱敏后的长度控制在约 6 万字符以内：
 - 技能列表最多占约 2 万字符，其余技能只列名字；
@@ -279,7 +280,7 @@ reason = "要改守卫规则"
 ```
 
 - **字段**：
-  - `on`：动作类型；
+  - `on`：动作类型：`command`、`input`、`write`、`edit`、`delete`、`move`、`read`、`mcp`。`mcp` 是经 `mcp_call` 调用本机 MCP 服务的工具，`match` 看到的文字是 `<服务>.<工具> <参数 JSON>`，例如 `match = '^pyocd-debug\.(flash|erase) '`；
   - `match`：在命令行或输入的这一行里搜索的正则；
   - `path`：glob 列表，支持 `**`，Windows 上不区分大小写。项目文件里的相对模式以该项目目录为基准；全局文件里的相对模式匹配任意位置（`*.pem` 等于 `**/*.pem`）；
   - `decision`：`deny`、`ask` 或 `note`；
@@ -339,13 +340,13 @@ timeout_s = 30                       # 每个 hook 最多等多久
 
 ### 云端会话开场就带上本机规矩
 
-云端 Claude Code 会话本来要靠模型自己想起来调用 `context()`。在仓库里加一个 SessionStart hook，会话一开始（以及 `/clear`、恢复、压缩上下文之后）就会自动带上这台电脑上的：
+云端 Claude Code 会话本来要靠模型自己想起来调用 `context()`。在仓库里加 SessionStart hook，会话一开始（以及 `/clear`、恢复、压缩上下文之后）就会自动带上这台电脑上的三段内容，每段是一个单独的 hook，各自不超过 9,000 字符（Claude Code 对每个 hook 的上限是 10,000）：
 
-- 全局规矩（与 `context()` 的读法相同）；
-- 这个仓库在本机的检出目录里、**没提交到仓库**的规则文件，例如 `CLAUDE.local.md`。已提交的文件云端仓库里有，不重复；
-- 技能名单。
+- **规矩**：全局规矩（与 `context()` 的读法相同），以及这个仓库在本机的检出目录里、**没提交到仓库**的规则文件，例如 `CLAUDE.local.md`。已提交的文件云端仓库里有，不重复。放不下的部分列出路径，提示用 `context()` 读；
+- **技能**：每个技能的名字和描述（`description`，有 `when_to_use` 时接在后面），和本机 Claude Code 列技能的方式一样。放不下时均匀缩短每条描述，最短 80 字符；仍放不下时其余的只列名字。要用时调用 `skill(name)`；
+- **本机 MCP 工具**：每个启用的本机 MCP 服务的说明和工具清单（每个工具一行说明）。内容来自电脑上的工具清单缓存，开场**不会启动任何服务**；从没列出过工具的服务只写“尚未列出”。调用用 `mcp_call`，完整参数用 `mcp_tools(server)`。
 
-合计不超过 9,000 字符（Claude Code 对开场上下文的上限是 10,000）。放不下的部分列出路径，提示用 `context()` 读。电脑不在线时，开场只有一句说明。
+电脑不在线时，每段只有一句说明。0.4.7 生成的单个 hook 仍然可用（规矩加技能名单）。升级时先把电脑上的 winhand 更新到 0.4.8，再重新执行 `winhand bridge init --write` 换成三段：电脑还是 0.4.7 时，三段 hook 会各自拿到一份完整的规矩。
 
 设置三步：
 
@@ -366,7 +367,19 @@ hook 令牌只能取开场上下文：中转只为 `/hook/session-start` 认它�
 
 ## 本机的其他 MCP 服务
 
-电脑上已有的 MCP 服务（pyocd-debug、usb-camera、FreeCAD …）不会混进 winhand 的工具列表，而是**各自成为一个独立的远程 MCP 地址**：
+电脑上已有的 MCP 服务（pyocd-debug、usb-camera、FreeCAD …）有两种用法。
+
+**经 winhand 主连接调用**（不用另加连接器）：
+
+- `mcp_tools()`：列出启用的服务、运行状态和缓存里的工具，不启动任何服务；
+- `mcp_tools("pyocd-debug")`：必要时启动它，列出每个工具的说明和参数（inputSchema），并更新缓存；
+- `mcp_call("pyocd-debug", "read_memory", {...})`：必要时启动服务并调用，原样返回文字和图片；服务报错时作为工具错误返回。约 40 秒内没有结果时先返回 `call_id`，用 `mcp_call(call_id=...)` 接着等。`timeout_s`（默认 120 秒）之后放弃这次调用并通知服务取消。
+
+`mcp_call` 和其他工具一样受守卫（动作类型 `mcp`）和本机 hooks 约束；本机 hooks 看到的工具名是 `mcp__<服务>__<工具>`，和 Claude Code、Codex 的命名相同，所以写给它们的 matcher（例如 `mcp__pyocd-debug__.*`）同样生效。守卫拒绝时不会启动服务。`mcp_tools(服务名)` 只列出工具，不受守卫判断：它仍会启动服务。不想让 AI 启动某个服务时，在托盘应用里停用它。
+
+工具清单缓存在 `~/.winhand/cache/mcp-tools.json`，以下三种情况会更新它：任何客户端经下面的独立地址列出工具时、`mcp_tools(服务名)`、托盘应用的“测试”按钮或 `winhand mcp test`。服务的启动命令、参数、地址、工作目录或环境变量改了以后，旧的缓存不再使用。缓存里只有工具清单，没有调用参数和结果。
+
+**各自成为一个独立的远程 MCP 地址**：
 
 ```
 https://<你的中转域名>/mcp/<名称>

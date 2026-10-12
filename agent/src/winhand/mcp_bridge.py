@@ -80,6 +80,35 @@ def _is_response(m: dict) -> bool:
 # ---------------------------------------------------------------- process
 
 
+def _quietly(function, *args) -> None:
+    with contextlib.suppress(Exception):
+        function(*args)
+
+
+def _send_off_loop(loop: asyncio.AbstractEventLoop, process: StdioProcess, message: dict) -> asyncio.Future:
+    """process.send(message) on a daemon thread; a future that is done once it was written."""
+    future = loop.create_future()
+
+    def settle(error: BaseException | None) -> None:
+        if not future.done():
+            if error is None:
+                future.set_result(None)
+            else:
+                future.set_exception(error)
+
+    def work() -> None:
+        try:
+            process.send(message)
+            error = None
+        except BaseException as exc:  # noqa: BLE001 - handed to the waiting caller
+            error = exc
+        with contextlib.suppress(RuntimeError):  # the loop is closed: nobody waits any more
+            loop.call_soon_threadsafe(settle, error)
+
+    threading.Thread(target=work, name=f"mcp-{process.name}-send", daemon=True).start()
+    return future
+
+
 class StdioProcess:
     """One running stdio MCP server: newline-delimited JSON-RPC on stdin/stdout. Threads do
     the pipe work (asyncio pipes differ between event loops on Windows)."""
@@ -117,6 +146,7 @@ class StdioProcess:
         self.on_exit = on_exit
         self.stderr: collections.deque[str] = collections.deque(maxlen=200)
         self._write_lock = threading.Lock()
+        self._writing_since: float | None = None
         log_dir = home() / "logs" / "mcp"
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = log_dir / f"{entry.name}.log"
@@ -168,13 +198,27 @@ class StdioProcess:
         data = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
         assert self.proc.stdin is not None
         with self._write_lock:
-            self.proc.stdin.write(data)
-            self.proc.stdin.flush()
+            self._writing_since = time.monotonic()
+            try:
+                self.proc.stdin.write(data)
+                self.proc.stdin.flush()
+            finally:
+                self._writing_since = None
+
+    def write_stuck_for(self) -> float:
+        """Seconds the current write to the server's stdin has been blocked (0 when none is)."""
+        since = self._writing_since
+        return time.monotonic() - since if since is not None else 0.0
 
     def stop(self) -> None:
-        with contextlib.suppress(OSError):
-            if self.proc.stdin:
-                self.proc.stdin.close()  # a well-behaved server exits on EOF
+        def close_stdin() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                if self.proc.stdin:
+                    self.proc.stdin.close()  # a well-behaved server exits on EOF
+
+        # a thread of its own: closing waits for a write blocked on a full pipe, which only ends
+        # once the process is gone
+        threading.Thread(target=close_stdin, name=f"mcp-{self.name}-close", daemon=True).start()
         try:
             self.proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
@@ -210,6 +254,8 @@ class _Pending:
     future: asyncio.Future | None = None
     activity: dict | None = None
     progress_token: Any = None
+    method: str | None = None
+    first_page: bool = False  # a tools/list request without a cursor
 
 
 class Service:
@@ -322,15 +368,32 @@ class Service:
             log.info("mcp server %s started (pid %s)", self.entry.name, process.pid)
 
     async def _internal(self, method: str, params: dict, timeout: float) -> dict:
+        loop = asyncio.get_running_loop()
         uid = next(self._ids)
-        future = asyncio.get_running_loop().create_future()
+        future = loop.create_future()
         self.pending[uid] = _Pending(None, None, None, future=future)
-        assert self.process is not None
+        process = self.process
+        assert process is not None
+        deadline = loop.time() + timeout
+        sent_at = time.time()
         try:
-            await asyncio.to_thread(
-                self.process.send, {"jsonrpc": "2.0", "id": uid, "method": method, "params": params}
-            )
-            return await asyncio.wait_for(future, timeout)
+            # the send counts against the timeout too (a stuck server stops reading its stdin), on a
+            # thread of its own: one blocked on a full pipe must not hold a worker of the shared pool
+            message = {"jsonrpc": "2.0", "id": uid, "method": method, "params": params}
+            await asyncio.wait_for(_send_off_loop(loop, process, message), timeout)
+            return await asyncio.wait_for(future, max(0.0, deadline - loop.time()))
+        except (TimeoutError, asyncio.CancelledError):
+            # the caller gave up. Only now does the request count as unanswered (a long call that is
+            # still awaited is not a sign of a stuck server): if no answer comes, the health check
+            # pings the server and restarts it. Never for initialize (the spec forbids cancelling it)
+            # or a ping (the health check's own)
+            # (and only for the process still serving: one being stopped is forgotten with its requests)
+            if method not in ("initialize", "ping") and self.process is process and process.alive():
+                self.unanswered[uid] = sent_at
+                cancelled = {"requestId": uid, "reason": "the caller stopped waiting"}
+                message = {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": cancelled}
+                threading.Thread(target=_quietly, args=(process.send, message), daemon=True).start()
+            raise
         finally:
             self.pending.pop(uid, None)
 
@@ -393,6 +456,8 @@ class Service:
                     p.future.set_result(message)
                 return
             answer = {**message, "id": p.client_id}
+            if p.first_page:
+                self._remember_tools(message.get("result"))
             if p.stream is not None:
                 p.stream.queue.put_nowait(("answer", message["id"], answer))
             self._finish_activity(p, answer=answer)
@@ -420,6 +485,21 @@ class Service:
         for session in self.sessions.values():
             if session.streams:
                 session.streams[-1].queue.put_nowait(("message", None, message))
+
+    def _remember_tools(self, result: Any) -> None:
+        """A client listed this server's tools through the gateway: keep the list (one page)."""
+        if (
+            not isinstance(result, dict)
+            or result.get("nextCursor")
+            or not isinstance(result.get("tools"), list)
+        ):
+            return
+        from . import local_mcp
+
+        # off this loop: the cache file is read and written whole
+        instructions = (self.init_result or {}).get("instructions")
+        args = (local_mcp.remember, self.entry, result["tools"], instructions)
+        threading.Thread(target=_quietly, args=args, daemon=True).start()
 
     def _time_out(self, uid: int) -> None:
         """A tool call ran past call_timeout_s: answer the client and tell the server to stop."""
@@ -513,6 +593,8 @@ class Service:
         """Can the server answer a ping right now? A busy server still can; a stuck one cannot."""
         if not self.process or not self.process.alive():
             return False
+        if self.process.write_stuck_for() > PING_TIMEOUT_S:
+            return False  # it has stopped reading: a ping would only block behind that write
         try:
             await self._internal("ping", {}, PING_TIMEOUT_S)
         except (TimeoutError, ServiceError, OSError, ValueError):
@@ -622,7 +704,15 @@ class Service:
         for m in requests:
             uid = next(self._ids)
             token = ((m.get("params") or {}).get("_meta") or {}).get("progressToken")
-            p = _Pending(session, m["id"], stream, activity=self._start_activity(m), progress_token=token)
+            p = _Pending(
+                session,
+                m["id"],
+                stream,
+                activity=self._start_activity(m),
+                progress_token=token,
+                method=m.get("method"),
+                first_page=m.get("method") == "tools/list" and not (m.get("params") or {}).get("cursor"),
+            )
             self.pending[uid] = p
             stream.due.add(uid)
             if m.get("method") == "tools/call":
@@ -829,9 +919,13 @@ class Services:
                 _error(None, f"no local MCP server named {name!r} is enabled in winhand (enabled: {known})"),
                 status_code=404,
             )
+        self.watch_idle()
+        return await service.handle(request)
+
+    def watch_idle(self) -> None:
+        """Start the loop that checks on running servers and stops idle ones (once)."""
         if self._idle_task is None:
             self._idle_task = asyncio.create_task(self._idle_loop())
-        return await service.handle(request)
 
     async def _idle_loop(self) -> None:
         while True:
@@ -864,7 +958,10 @@ def compose_app(mcp_app, services: Services | None):
     from starlette.middleware import Middleware
     from starlette.routing import Mount, Route
 
-    from . import session_bridge, transfer
+    from . import local_mcp, session_bridge, transfer
+
+    if services is not None:
+        local_mcp.active = services  # mcp_tools / mcp_call use the running servers
 
     routes = [
         Route("/transfer/{token}", transfer.endpoint, methods=["GET", "PUT", "POST"]),
@@ -912,10 +1009,19 @@ async def probe(entry: ServerEntry, timeout: float | None = None) -> dict:
                 init = client.initialize_result
                 result["server"] = {"name": init.server_info.name, "version": init.server_info.version}
                 result["protocol"] = init.protocol_version
+                tools = await client.list_tools()
                 result["tools"] = [
                     {"name": t.name, "description": (t.description or "").strip().split("\n")[0][:200]}
-                    for t in await client.list_tools()
+                    for t in tools
                 ]
+                from . import local_mcp
+
+                with contextlib.suppress(Exception):
+                    local_mcp.remember(
+                        entry,
+                        [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in tools],
+                        init.instructions,
+                    )
                 if init.capabilities.prompts:
                     with contextlib.suppress(Exception):
                         result["prompts"] = [p.name for p in await client.list_prompts()]

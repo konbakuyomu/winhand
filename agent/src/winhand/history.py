@@ -84,7 +84,7 @@ class RecentCalls(Middleware):
         )
         if data.get("still_running"):
             entry["status"] = "still_running"
-            entry["run_id"] = data.get("id")
+            entry["run_id"] = data.get("id") or data.get("call_id")  # mcp_call names it call_id
         for key in ("exit_code", "id", "state"):
             if key in data and key not in entry:
                 entry[key] = data[key]

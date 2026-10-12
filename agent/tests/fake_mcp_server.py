@@ -7,11 +7,12 @@ import sys
 import time
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.utilities.types import Image
 
 print("fake server starting", file=sys.stderr, flush=True)
 
-mcp = FastMCP("fake-local", version="1.2.3")
+mcp = FastMCP("fake-local", instructions="A fake server for the tests.", version="1.2.3")
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -65,6 +66,12 @@ async def freeze(seconds: float) -> str:
     """Block the event loop (a server that calls blocking code from an async tool)."""
     time.sleep(seconds)
     return "thawed"
+
+
+@mcp.tool
+def fail(why: str = "it broke") -> str:
+    """Report an error (isError)."""
+    raise ToolError(why)
 
 
 @mcp.tool

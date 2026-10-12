@@ -77,3 +77,52 @@
 
 **正式检查**
 - 电脑：`ruff check`、`ruff format --check` 通过；`pytest tests/test_session_bridge.py` 19 passed（新增 2 个）。
+- 中转：`npm test` 31 passed。
+- CI（b56a8c9，PR konbakuyomu/winhand#9）：ubuntu、windows 的 `agent.yml` 和 `relay.yml`（含 wrangler dev 端到端）共 6 项都通过；合并为 f964b43，发布 0.4.7（release run 38260454037）。
+
+## 真机验收（0.4.7）
+
+**部署**
+- 在用户电脑上，用用户自己的部署配置（`relay/wrangler.deploy.jsonc`，被 git 忽略）执行 `npx wrangler deploy`：
+  - 新版本已上线，占 100%；
+  - 绑定自定义域名那一步报 “Could not find zone”，但域名早已绑定，访问照常。记下：用这个登录账号重新绑定域名会失败。
+- `HOOK_TOKEN` 由脚本生成，经 stdin 交给 `wrangler secret put`，聊天和日志里都没出现。
+- 第一次放进剪贴板的令牌，在用户填表时被别的内容覆盖，存进 claude.ai 的值不对：中转回 “bad hook token”。改为生成新令牌写到桌面文件，用户复制后，文件由 Claude 删除。
+
+**线上中转**
+- 从电脑请求：不带令牌 401（no hook token），带错 401（bad hook token），`/hook/stop` 404。
+
+**云端环境**
+- 用户在环境里加了 Network secret：
+  - 网站 `winhand.konbakuyomu.us`，路径前缀 `/hook/`；
+  - 自定义请求头 `X-Winhand-Hook-Token`，前缀留空。
+- 加上之后，本会话（访问级别不放行这个域名）也能访问中转，代理自动带上了令牌头。
+
+**电脑**
+- 发现用户电脑上运行的 WinHand 还是 0.4.4，0.4.5、0.4.6 都没装上，用户随后更新到 0.4.7。
+- 这说明此前 P0、P1 的功能（守卫、`guards.toml`、本机 hooks）在用户电脑上到这时才真正生效。
+
+**端到端**
+- 从本云端会话 POST `/hook/session-start`（`X-Winhand-Repo: https://github.com/konbakuyomu/winhand`），HTTP 200。回答约 5,977 字符，含：
+  - 电脑 “MSI” 上该仓库的检出目录 `D:\Dev\20_个人项目\winhand`；
+  - 全局规矩 `~/.codex/AGENTS.md`、`~/.claude/rules/comet-workflow-guard.md`；
+  - 技能名单。
+- 在测试仓库 konbakuyomu/winhand-cloud-test（私有，`.claude/settings.json` 由 `winhand bridge init --write` 生成）新开云端会话，用户问“开场收到了哪些规矩和技能”。会话答出了：
+  - 电脑送来的两份规矩，并正确理解 comet 规则只在仓库有 `.comet` 时适用；
+  - 39 个技能的名单；
+  - 说明这台电脑没有该仓库的检出目录（测试仓库只克隆在临时文件夹里，不在 Codex、Claude 记录的项目中），符合 R5。
+
+## 结论
+
+- A1–A7 全部通过。
+- 2 轮独立 Verifier 加 1 次针对性复核，没有阻断问题，发现的问题都已处理或按决定保留。
+- 真机端到端已在真实的云端会话里看到效果。
+
+**已知限制**（不影响验收）：
+- 多仓库的云端会话不读仓库的 hooks，这个功能不生效（Claude Code 的规定）。
+- 用户发消息、回答结束这两个时机没有做（D1）。
+- 用环境变量放令牌时，令牌在容器里可见；推荐用 Network secret。
+- 用这个 wrangler 登录重新绑定自定义域名会失败，以后需要时在 Cloudflare 后台操作。
+- 测试仓库 konbakuyomu/winhand-cloud-test 和电脑上的临时克隆（`%TEMP%\winhand-cloud-test`）留给用户决定是否删除。
+
+**用户决定**：用户同意部署中转、用新建的私有仓库测试，并确认了云端会话里的效果。

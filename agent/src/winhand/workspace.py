@@ -25,6 +25,7 @@ Files are read as they are now, so a rule edited a minute ago is what the next c
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -56,6 +57,7 @@ BUDGET_CHARS = fs.READ_MAX_CHARS
 SKILLS_BUDGET_CHARS = 20_000
 SKILLS_FULL_CHARS = 16_000  # full entries; names of the rest fill up to SKILLS_BUDGET_CHARS
 DESCRIPTION_CHARS = 300
+SKILL_DESC_LIMIT = 1_536  # Claude Code's cut of description + when_to_use
 
 
 def _encoded(text: str) -> int:
@@ -255,7 +257,7 @@ def _frontmatter(text: str) -> dict[str, str]:
     out: dict[str, str] = {}
     i = 1
     while i < len(lines) and lines[i].strip() != "---":
-        m = re.match(r"^(name|description)\s*:\s*(.*)$", lines[i])
+        m = re.match(r"^(name|description|when_to_use|disable-model-invocation)\s*:\s*(.*)$", lines[i])
         i += 1
         if not m:
             continue
@@ -908,7 +910,9 @@ def _collect(cfg: Config, root: str | None, start: str | None, target: str | Non
 # ------------------------------------------------------------------ skills
 
 
-def _skills_in(folder: str, scope: str, refused=None) -> list[dict]:
+def _skills_in(
+    folder: str, scope: str, refused=None, desc_chars: int = DESCRIPTION_CHARS, mask=None
+) -> list[dict]:
     try:
         entries = sorted(os.scandir(folder), key=lambda e: e.name.lower())
     except OSError:
@@ -925,17 +929,22 @@ def _skills_in(folder: str, scope: str, refused=None) -> list[dict]:
         except (OSError, ValueError, fs.FsError):
             head = ""
         meta = _frontmatter(head[:20_000])
-        description = " ".join(meta.get("description", "").split())
-        if len(description) > DESCRIPTION_CHARS:
-            description = description[: DESCRIPTION_CHARS - 1] + "…"
-        out.append(
-            {
-                "name": meta.get("name") or entry.name,
-                "description": description,
-                "path": skill_md,
-                "scope": scope,
-            }
-        )
+        # as Claude Code lists a skill: its description, then when_to_use, cut together
+        description = " ".join(" ".join([meta.get("description", ""), meta.get("when_to_use", "")]).split())
+        if len(description) > desc_chars:
+            # masked before the cut: a secret cut in two would no longer be recognised
+            description = (mask or redact.mask)(description)
+            if len(description) > desc_chars:
+                description = description[: desc_chars - 1] + "…"
+        skill = {
+            "name": meta.get("name") or entry.name,
+            "description": description,
+            "path": skill_md,
+            "scope": scope,
+        }
+        if meta.get("disable-model-invocation", "").strip().lower() == "true":
+            skill["model_invocable"] = False  # Claude Code leaves it out of the list the model sees
+        out.append(skill)
     return out
 
 
@@ -944,12 +953,99 @@ def skill_folders(cfg: Config, root: str | None) -> list[tuple[str, str]]:
     return folders + [(_expand(p), "user") for p in _setting(cfg, "skills", DEFAULT_SKILLS)]
 
 
-def skills(cfg: Config, root: str | None, refused=None) -> list[dict]:
+def skills(
+    cfg: Config, root: str | None, refused=None, desc_chars: int = DESCRIPTION_CHARS, mask=None
+) -> list[dict]:
+    """`mask`: masks a long description before it is cut (default: redact.mask)."""
     found: dict[str, dict] = {}
     for folder, scope in skill_folders(cfg, root):
-        for skill in _skills_in(folder, scope, refused):
+        for skill in _skills_in(folder, scope, refused, desc_chars, mask):
             found.setdefault(skill["name"].lower(), skill)
     return sorted(found.values(), key=lambda s: (s["scope"] != "project", s["name"].lower()))
+
+
+SKILL_FILES = 50  # files listed from a skill's folder
+
+
+def _skill_files(folder: str) -> tuple[list[dict], bool]:
+    """The files in a skill's folder (relative path and size), up to SKILL_FILES; whether more exist."""
+    out: list[dict] = []
+    for here, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in fs._SKIP_DIRS)
+        for name in sorted(files):
+            if len(out) >= SKILL_FILES:
+                return out, True
+            full = os.path.join(here, name)
+            try:
+                size = os.stat(full).st_size
+            except OSError:
+                continue
+            out.append({"path": os.path.relpath(full, folder).replace(os.sep, "/"), "bytes": size})
+    return out, False
+
+
+def skill(cfg: Config, name: str, path: str | None = None, repo: str | None = None) -> dict:
+    """One skill by name: its SKILL.md, its folder and the files in it (what Claude Code's Skill tool
+    loads). A project's skills (path or repo) come before the user's."""
+    root = None
+    if repo:
+        root = project_root(find_repo(cfg, repo)["checkout"])
+    elif path:
+        root = project_root(guard._start_dir(_expand(path)))
+    rules = _Rules(cfg, root, root, root)
+    every = skills(cfg, root, desc_chars=SKILL_DESC_LIMIT)
+    want = name.strip().lower()
+    found = next((s for s in every if s["name"].lower() == want), None) or next(
+        (s for s in every if os.path.basename(os.path.dirname(s["path"])).lower() == want), None
+    )
+    if found is None:
+        names = [s["name"] for s in every]
+        close = difflib.get_close_matches(name, names, n=8, cutoff=0.5)
+        close += [n for n in names if want and want in n.lower() and n not in close][: 8 - len(close)]
+        raise ValueError(
+            f"no skill named {name!r} here"
+            + (f"; close: {', '.join(close)}" if close else "")
+            + f" ({len(names)} skills; context() lists them all)"
+        )
+    folder = os.path.dirname(found["path"])
+    out = {"name": found["name"], "scope": found["scope"], "folder": folder, "skill_md": found["path"]}
+    why = rules.refused(found["path"])
+    if why:  # its description comes from the same file: withheld too
+        out["content"] = None
+        out["refused"] = why
+    else:
+        if found.get("description"):
+            out["description"] = found["description"]
+        try:
+            text, _ = fs.read_text(found["path"])
+        except (OSError, ValueError, fs.FsError) as exc:
+            raise ValueError(f"cannot read {found['path']}: {exc}") from None
+        if len(text) > BUDGET_CHARS:
+            lines = text.splitlines(keepends=True)
+            kept, used = 0, 0
+            while kept < len(lines) and used + len(lines[kept]) <= BUDGET_CHARS:
+                used += len(lines[kept])
+                kept += 1
+            if kept:
+                out["truncated"] = _truncated(found["path"], kept, len(lines))
+                text = "".join(lines[:kept])
+            else:
+                out["truncated"] = (
+                    f"showing the first {BUDGET_CHARS} characters of its first line, which is longer "
+                    f"(the whole file: {found['path']})"
+                )
+                text = text[:BUDGET_CHARS]
+        out["content"] = text
+    out["files"], more = _skill_files(folder)
+    if more:
+        out["files_more"] = f"more than {SKILL_FILES} files; fs_list(path={folder!r}) lists the rest"
+    out["note"] = (
+        "Follow the instructions in content. Paths in it are relative to folder; scripts run on this "
+        "machine (run / session_start with cwd=folder), read other files with fs_read."
+    )
+    redactor = redact.current()
+    out = _sendable(out)
+    return out if redactor.empty else redactor.data(out)[0]
 
 
 # ------------------------------------------------------------------ repo -> local checkout
@@ -1169,7 +1265,7 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         if unchecked:
             out["rules_not_applied_note"] += f"; {unchecked} of them were not checked (too many patterns)"
 
-    every_skill = mask(skills(cfg, root, rules.refused))
+    every_skill = mask(skills(cfg, root, rules.refused, mask=mask))  # counted in `redacted`
     shown, used = [], 2
     for skill in every_skill:
         cost = _json_len(skill) + 2
@@ -1198,8 +1294,8 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
             "folders": mask([f for f, _ in skill_folders(cfg, root) if os.path.isdir(f)]),
         }
     out["skills_note"] = (
-        "When a skill fits the task, read its SKILL.md with fs_read and follow it; run the scripts it "
-        "names on this machine with run."
+        "When a skill fits the task, load it with skill(name) (its SKILL.md and files) and follow it; "
+        "run the scripts it names on this machine with run."
     )
     out["guards"] = guards = mask(guard.rules_for(start))
     errors, used = [], 0
@@ -1227,7 +1323,7 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
     out["hooks"] = mask(hooks.describe(start))
     out["local_mcp_servers"] = {
         "names": mask([s.name for s in cfg.servers if s.enabled]),
-        "note": "each is its own MCP endpoint at <relay>/mcp/<name>, added as a separate connector",
+        "note": "mcp_tools() lists their tools, mcp_call(server, tool, arguments) calls one",
     }
     out["next"] = (
         "Follow these rules while you work here. Call context again for another folder, and after the "
