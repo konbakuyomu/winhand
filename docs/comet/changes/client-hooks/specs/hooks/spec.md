@@ -47,10 +47,10 @@ Codex：
     - `trusted_hash` 等于当前哈希（R3）：`trusted`；
     - `trusted_hash` 存在但不相等：`modified`；
     - 没有 `trusted_hash`：`untrusted`。
-  - 经符号链接到达的项目：键按写法和真实路径各查一次，任一处有记录即用它。
+  - 经符号链接到达的项目：键先按写法查，再把装着 `.codex` 的项目文件夹（用户层为 Codex 主目录）换成真实路径查一次。`.codex` 文件夹和 hooks 文件本身不跟随链接：否则仓库可以把 `.codex` 链到另一个已审核过的项目，借用那里的信任。
 - 项目层的 hook 还要求它所在的 `.codex` 文件夹被 Codex 信任，按 Codex 的方式逐个文件夹判断：依次看这一级目录、项目根、仓库的主检出目录在系统层、用户 `config.toml` 和旧式托管文件的 `[projects]` 里的 `trust_level`（后者覆盖前者），取第一个有记录的；每个目录先按真实路径（跟随符号链接）查，再按写法查；它是 `trusted` 才信任。不满足时为 `untrusted`，原因写明这个文件夹未被信任。
 - `CODEX_HOME` 恰好是某个项目的 `.codex` 时，它只算用户层，不再作为项目层读第二次。
-- 链接的 git 工作树（`.git` 是文件）：只有 git 自己的记录都对得上时才算（与 Codex 相同）：工作树的 git 文件夹在 `<公共目录>/worktrees/` 下，它的 `gitdir` 指回这个工作树，`commondir` 指向那个公共目录，主检出目录的 `.git` 就是这个公共目录。算作工作树时，按 Codex 的做法，工作树里存在 `.codex` 文件夹的那几级，hooks 从主检出目录里对应的 `.codex` 读取；信任按上一条，依次看工作树的这一级、工作树根、主检出目录。
+- 链接的 git 工作树（`.git` 是文件）：只有 git 自己的记录都对得上时才算（与 Codex 相同；这些记录只读不超过 64 KiB 的普通文件，不跟随链接，命名管道之类不会让读取卡住）：工作树的 git 文件夹在 `<公共目录>/worktrees/` 下，它的 `gitdir` 指回这个工作树，`commondir` 指向那个公共目录，主检出目录的 `.git` 就是这个公共目录。算作工作树时，按 Codex 的做法，工作树里存在 `.codex` 文件夹的那几级，hooks 从主检出目录里对应的 `.codex` 读取；信任按上一条，依次看工作树的这一级、工作树根、主检出目录。
 - Codex 会整份拒绝的 hooks 文件，其中的 hooks 一个都不运行，在 `context()` 中报出原因。按 Codex 读文件的方式（serde）判断：
   - 整份拒绝：`hooks.json` 顶层有 `description`、`hooks` 以外的键；以 UTF-8 字节顺序标记开头；任一已知事件（不只是 PreToolUse）下的组或 handler 类型不对，例如 handler 没有 `type`、`type` 不认识（如 `http`）、command handler 没有 `command`、`timeout` 不是非负整数、`async` 不是布尔值、mcp_tool handler 没有 `server` 或 `tool`；
   - 不影响：组和 handler 里 Codex 不认识的键（例如 `description`、`shell`、`args`、`if`）、不认识的事件名、`matcher` 为 null，Codex 都忽略，winhand 也照常读取；可选字段（`commandWindows`、`statusMessage`、`timeout` 等）设为 null，等于没设；
@@ -65,6 +65,7 @@ Claude Code：
 - 托管设置里 `disableAllHooks = true` 时，所有 hooks（包括托管的）都是 `disabled`；其他设置文件里的 `disableAllHooks` 只关掉非托管的。
 
 两种来源都适用：
+- 可选字段设为 null 等于没设。（Claude Code 据其代码会因一个写错的 hook 整份跳过设置文件；winhand 不复刻 Claude Code 的设置校验，这样的文件里的 hooks 照常读取，只会更严。唯一的例外：这样的文件里的 `disableAllHooks` 在 winhand 中仍生效；仓库用一份写对的文件同样能做到，不带来新的绕过。）
 - `type` 不是 `command` 的 hook、带 `async` 的 hook：`unsupported`，不运行。Claude Code 的 hook 带 `if`、`once`、`asyncRewake` 时同样不运行；这些键 Codex 不认识、直接忽略，所以 Codex 的 hook 照常运行。
 - 字段类型不对的 hook（`command` 不是字符串、`timeout` 不是秒数，Codex 要求整数；`args` 不是列表）、matcher 不是有效正则的 hook：`unsupported`，写明原因，不运行，也不影响其他 hook 和这次调用。
 - 配置文件只读普通文件，最多 4 MB；设备文件、过大的文件按“无法读取”报告。JSON 里的 `NaN`、`Infinity` 不是合法 JSON，整份文件按“无法读取”处理；`timeout` 不能是非有限数。

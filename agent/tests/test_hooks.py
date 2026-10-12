@@ -925,3 +925,52 @@ def test_the_legacy_managed_file_can_decide_trust(env, monkeypatch, tmp_path):
 def test_mcp_input_numbers_are_judged_as_serde_reads_them():
     assert hooks._toml_value({"n": 2**70}) and hooks._toml_value({"n": -(2**63)})
     assert not hooks._toml_value({"n": 2**63})
+
+
+# ------------------------------------------------------------------ round 6
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are a POSIX thing")
+@pytest.mark.parametrize("record", ["commondir", "gitdir"])
+def test_a_pipe_among_the_git_records_never_blocks(env, tmp_path, record):
+    import concurrent.futures
+
+    folder = tmp_path / "unpacked"
+    gitdir = env["root"] / ".git" / "worktrees" / "unpacked"
+    gitdir.mkdir(parents=True)
+    (gitdir / "commondir").write_text("../..\n")
+    (gitdir / "gitdir").write_text(f"{folder / '.git'}\n")
+    (gitdir / record).unlink()
+    os.mkfifo(gitdir / record)
+    folder.mkdir()
+    (folder / ".git").write_text(f"gitdir: {gitdir}\n")
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        future = pool.submit(hooks.discover, str(folder))
+        try:
+            future.result(timeout=10)
+        finally:
+            if not future.done():  # unblock the reader so the test can end
+                with open(gitdir / record, "w"):
+                    pass
+    assert hooks._main_checkout(str(folder)) == str(folder)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need a privilege on Windows")
+def test_a_linked_codex_folder_does_not_borrow_another_projects_trust(env, tmp_path):
+    other = tmp_path / "other"
+    (other / ".git").mkdir(parents=True)
+    codex_hook_in(env, other)  # trusted by hash under other's key
+    trust_levels(env, {other: "trusted", env["root"]: "trusted"})
+    os.symlink(other / ".codex", env["root"] / ".codex")
+    (hook,) = [h for h in hooks.discover(str(env["root"]))[0] if h.source == "codex"]
+    assert hook.status == "untrusted"
+
+
+@pytest.mark.parametrize("number", ["1e400", "-0"])
+def test_numbers_serde_cannot_read_make_codex_drop_the_file(env, number):
+    handler = codex_command("by-command")
+    raw = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [handler]}]}})
+    raw = raw.replace('"type": "command"', f'"type": "command", "timeout": {number}')
+    path = codex_file(env, {"hooks": {}}, raw=raw.encode())
+    found, errors = hooks.discover(str(env["root"]))
+    assert not [h for h in found if h.file == str(path)] and errors and errors[0]["file"] == str(path)

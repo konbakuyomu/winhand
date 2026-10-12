@@ -113,6 +113,10 @@ def _load(path: str, kind: str) -> tuple[object, str | None]:
             text = raw.decode("utf-8-sig")
         if kind == "toml":
             data = tomllib.loads(text)
+        elif kind == "codex-json":
+            data = json.loads(
+                text, parse_constant=_no_constant, parse_float=_serde_float, parse_int=_serde_int
+            )
         else:
             data = json.loads(text, parse_constant=_no_constant)
     except (OSError, ValueError, UnicodeDecodeError) as exc:
@@ -123,6 +127,17 @@ def _load(path: str, kind: str) -> tuple[object, str | None]:
 
 def _no_constant(name: str):
     raise ValueError(f"{name} is not JSON")
+
+
+def _serde_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"number out of range: {text[:40]}")
+    return value
+
+
+def _serde_int(text: str) -> int | float:
+    return -0.0 if text == "-0" else int(text)  # serde_json reads -0 as a float
 
 
 def _clip(text: str, limit: int = 300) -> str:
@@ -518,6 +533,16 @@ def _spellings(path: str) -> list[str]:
     return [path] if _folder_key(real) == _folder_key(path) else [path, real]
 
 
+def _state_files(path: str, layer: str) -> list[str]:
+    """The spellings of a hooks file Codex may have keyed its hooks.state with: as written, and with
+    the folder that holds it (a project's folder above .codex, the Codex home) reached through
+    links. The .codex folder and the file themselves are never followed: a link there would let a
+    repository borrow the trust of another project's hook."""
+    holder = os.path.dirname(os.path.dirname(path)) if layer == "project" else os.path.dirname(path)
+    rest = os.path.relpath(path, holder)
+    return list(dict.fromkeys([path, *(os.path.join(s, rest) for s in _spellings(holder))]))
+
+
 def _codex_folder_trusted(candidates: list[str], levels: dict[str, str]) -> bool:
     """Codex decides a .codex folder's trust by the first of these with a trust_level: the folder,
     the project root, the repository's main checkout (loader decision_for_dir); each looked up by
@@ -586,7 +611,7 @@ def _codex_status(hook, layer, folder_trusted, state, managed_only) -> None:
     entry = next(
         (
             state[k]
-            for f in _spellings(hook.file)
+            for f in _state_files(hook.file, layer)
             if (k := _state_key(f"{f}{hook.key[len(hook.file) :]}")) in state
         ),
         {},
@@ -735,16 +760,13 @@ def _main_checkout(root: str) -> str:
 
 
 def _read_small(path: str) -> str:
-    with open(path, "rb") as fh:
-        return fh.read(64 * 1024).decode("utf-8", "replace").strip()
+    """A git record as Codex reads one: a regular file, not a link, at most 64 KiB; else ""."""
+    return workspace.read_git_record(path) or ""
 
 
 def _gitdir_file(dot: str) -> str | None:
     """The folder a `.git` file points at (`gitdir: <path>`, relative to the file's folder)."""
-    try:
-        text = _read_small(dot)
-    except OSError:
-        return None
+    text = _read_small(dot)
     if not text.startswith("gitdir:"):
         return None
     target = text[len("gitdir:") :].strip()

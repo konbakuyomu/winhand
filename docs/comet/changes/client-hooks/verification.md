@@ -134,6 +134,31 @@ Verifier 的核对方法：
 - TOML 里用日期时间当 `statusMessage`（toml 0.9 会转成字符串，winhand 整份拒绝）。
 - `timeout` 写成 `-0`、字符串里有孤立代理字符、`requirements.toml` 的 `managed_dir` 不是路径：Codex 整份拒绝，winhand 照常读。
 
-## 第 5 轮
+## 第 5 轮（6b31917）
+
+**正式检查**
+- 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 433 passed，40 skipped。
+- `agent.yml`（run 38215834162，6b31917）：ubuntu、windows 都通过。
+
+**独立 Verifier 结论**：A1–A10 全部通过。第 4 轮的 P1、P2、P3 和各“小”条目都已修好，没有回退：第 4 轮的 94 个 JSON、21 个 TOML 用例重跑，只剩已知的差异。
+
+P3 的核对方法：Verifier 把 `_main_checkout` 与 Codex 的 `resolve_root` 逐步对照，并用真实的 `git worktree add` 实测了这些情况，都与 Codex 一致：
+- 绝对路径；
+- git 2.48 起的相对路径写法；
+- 经符号链接到达；
+- `--separate-git-dir`；
+- `.git` 文件本身是链接。
+
+新发现：
+
+| # | 问题 | 级别 | 处理（第 6 轮） |
+|---|---|---|---|
+| N1 | git 的记录文件（工作树的 `gitdir`、`commondir`）是命名管道时，查找 hooks 永远卡住；调用不会执行（失败即关闭），但每次占住一个工作线程。第 4 轮的 `commondir` 读取已有这个问题，第 5 轮又多了两处 | 次要（实测） | 这些记录只读不超过 64 KiB 的普通文件、不跟随链接（与 Codex 的 `read_metadata_file` 相同）；client-rules 的仓库识别也改用同一个读法 |
+| N2 | 第 5 轮的链接处理走得太远：`.codex` 文件夹或 `hooks.json` 本身是指向另一个已审核项目的链接时，借用了那边的 `trusted_hash`，Codex 却会把它当成未审核 | 次要（实测；多运行了 Codex 不运行的 hook） | 只把装着 `.codex` 的项目文件夹（用户层为 Codex 主目录）换成真实路径；`.codex` 和文件本身不跟随链接 |
+| N3 | Claude Code 据其代码（2.1.296 的打包代码，Verifier 只读未运行）会因一个写错的 hook（null、`timeout: 0` 等）整份跳过设置文件，winhand 仍读取其余 hooks；这样的文件里的 `disableAllHooks` 在 winhand 中仍生效 | 次要 | 不复刻 Claude Code 的设置校验：差异几乎都是 winhand 更严；`disableAllHooks` 那一处，仓库用一份写对的文件同样能做到，不带来新的绕过。写进规格 |
+| N4 | Codex 的 hooks 文件里有 `1e400`（超出范围）或 `-0`（serde_json 读成浮点数）时 Codex 整份拒绝，winhand 照常读 | 小 | 按 serde_json 读数：`1e400` 无法读取，`-0` 是浮点数 |
+| 规格 | 链接那句话的范围；null 规则对两种来源都适用 | 小 | 规格改正 |
+
+## 第 6 轮
 
 （待填）

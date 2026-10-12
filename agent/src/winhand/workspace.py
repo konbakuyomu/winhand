@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 import time
 import tomllib
@@ -970,32 +971,42 @@ def repo_key(text: str) -> str | None:
     return "/".join(parts[-2:]).lower()
 
 
+def read_git_record(path: str, limit: int = 64 * 1024, follow: bool = False) -> str | None:
+    """A small file git keeps (.git, commondir, gitdir, config), None unless it is a regular file
+    of at most `limit` bytes; a link counts only with `follow`. A cloned or unpacked folder can
+    hold a pipe or a device there, which must never block a read."""
+    try:
+        st = os.stat(path) if follow else os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        with open(path, "rb") as fh:
+            return fh.read(limit).decode("utf-8", "replace").strip()
+    except (OSError, ValueError):
+        return None
+
+
 def _git_dirs(root: str) -> tuple[str | None, str | None]:
     """(git dir, common git dir) of a checkout; a worktree's .git file points at both."""
     dot = os.path.join(root, ".git")
     if os.path.isdir(dot):
         return dot, dot
-    try:
-        first = Path(dot).read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
+    first = read_git_record(dot, follow=True)
+    if first is None:
         return None, None
     if not first.startswith("gitdir:"):
         return None, None
     gitdir = first[len("gitdir:") :].strip()
     gitdir = gitdir if os.path.isabs(gitdir) else os.path.normpath(os.path.join(root, gitdir))
     common = gitdir
-    try:
-        rel = Path(gitdir, "commondir").read_text(encoding="utf-8").strip()
+    rel = read_git_record(os.path.join(gitdir, "commondir"), follow=True)
+    if rel:
         common = rel if os.path.isabs(rel) else os.path.normpath(os.path.join(gitdir, rel))
-    except OSError:
-        pass
     return gitdir, common
 
 
 def _remote_urls(common: str) -> list[str]:
-    try:
-        text = Path(common, "config").read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    text = read_git_record(os.path.join(common, "config"), limit=1_000_000, follow=True)
+    if text is None:
         return []
     urls, in_remote = [], False
     for line in text.splitlines():
