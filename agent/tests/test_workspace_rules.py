@@ -628,3 +628,11 @@ async def test_file_names_that_are_not_utf8_do_not_break_the_answer(tmp_path, ho
     async with Client(build_server(Config(context={"skills": [], "formats": ["claude-code"]}))) as client:
         result = await client.call_tool("context", {"path": str(root)})
     assert [r.get("content") for r in result.structured_content["rules"]] == ["fine"]
+
+
+def test_network_paths_and_windows_link_targets():
+    # Windows reports a local link target as \\?\C:\..., which must not count as a network share
+    assert not workspace._network("\\\\?\\C:\\rules\\x.md") and not workspace._network("\\\\.\\C:\\x")
+    assert workspace._network("\\\\?\\UNC\\server\\share\\x.md")
+    assert workspace._network("\\\\server\\share\\x.md") and workspace._network("//server/share/x.md")
+    assert not workspace._network("C:\\x") and not workspace._network("/home/x")

@@ -495,7 +495,10 @@ _LINKED_OUT = (
 
 
 def _network(path: str) -> bool:
-    """A UNC path: looking at it would open a network connection."""
+    """A UNC path: looking at it would open a network connection. Windows writes local link targets
+    as \\\\?\\C:\\..., which is not one; \\\\?\\UNC\\server\\share is."""
+    if path.startswith(("\\\\?\\", "\\\\.\\", "//?/", "//./")):
+        return path[4:].upper().startswith(("UNC\\", "UNC/"))
     return path.startswith(("\\\\", "//"))
 
 
@@ -563,7 +566,7 @@ class _Rules:
             target = os.readlink(path)
         except (OSError, ValueError):
             return False
-        return _network(target) or target.startswith("\\\\?\\UNC\\")
+        return _network(target)
 
     def _skip(self, path: str, fmt: str, scope: str, why: str, key: str | None = None) -> None:
         self.seen.add(key or _key(path))
