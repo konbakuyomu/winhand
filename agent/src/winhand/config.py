@@ -31,6 +31,10 @@ repo_roots = ['D:\\code']           # where context(repo="owner/name") also look
 external_imports = false           # follow a project's @imports out of the project without
                                    # Claude Code's approval for it
 stdio_hint = false                 # also point stdio clients at context() in the instructions
+
+[hooks]                            # Codex / Claude Code PreToolUse hooks run before winhand acts
+sources = ['codex', 'claude-code'] # [] = run none; only hooks those tools trust ever run
+timeout_s = 30                     # longest a hook may take
 ```
 
 Guard rules live in their own file, ~/.winhand/guards.toml (see guard.py).
@@ -116,6 +120,8 @@ class Config:
     redact: dict = field(default_factory=dict)
     # [context]: how context() reads rules, skills and checkouts, and the stdio hint (see workspace.py)
     context: dict = field(default_factory=dict)
+    # [hooks]: which Codex / Claude Code hooks run before winhand acts, and how long they may take
+    hooks: dict = field(default_factory=dict)
 
 
 def load(path: Path | None = None) -> Config:
@@ -135,6 +141,7 @@ def load(path: Path | None = None) -> Config:
     relay = raw.get("relay", {})
     redact = raw.get("redact") if isinstance(raw.get("redact"), dict) else {}
     context = raw.get("context") if isinstance(raw.get("context"), dict) else {}
+    hooks = raw.get("hooks") if isinstance(raw.get("hooks"), dict) else {}
     return Config(
         servers=servers,
         relay_url=relay.get("url"),
@@ -142,6 +149,7 @@ def load(path: Path | None = None) -> Config:
         raw=raw,
         redact=dict(redact),
         context=dict(context),
+        hooks=dict(hooks),
     )
 
 
@@ -185,11 +193,12 @@ def save(cfg: Config, path: Path | None = None) -> Path:
         for key, value in cfg.redact.items():
             lines.append(f"{_key(key)} = {_toml_value(value)}")
         lines.append("")
-    if cfg.context:
-        lines.append("[context]")
-        for key, value in cfg.context.items():
-            lines.append(f"{_key(key)} = {_toml_value(value)}")
-        lines.append("")
+    for name, section in (("context", cfg.context), ("hooks", cfg.hooks)):
+        if section:
+            lines.append(f"[{name}]")
+            for key, value in section.items():
+                lines.append(f"{_key(key)} = {_toml_value(value)}")
+            lines.append("")
     for s in cfg.servers:
         lines.append(f"[mcp_servers.{_key(s.name)}]")
         if s.description:

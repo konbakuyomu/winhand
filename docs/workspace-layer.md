@@ -148,5 +148,5 @@ MCP 看不到三个时机：**用户发消息**、**回答结束**、**上下文
 ## 待定
 
 - `guards.toml` 用这个格式行不行？
-- 外部 hooks（Claude Code、Codex）默认运行还是默认关闭？
+- 外部 hooks（Claude Code、Codex）默认运行还是默认关闭？（client-hooks 已决定：默认运行这两个工具自己信任的，`[hooks] sources = []` 可全部关闭）
 - 本机 stdio 客户端是否默认关掉规则指引？

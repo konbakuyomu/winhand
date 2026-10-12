@@ -27,6 +27,16 @@ def _no_agent_config_of_this_machine(tmp_path, monkeypatch):
     monkeypatch.setattr(workspace, "managed_claude_md", lambda: str(tmp_path / "no-managed" / "CLAUDE.md"))
 
 
+@pytest.fixture(autouse=True)
+def _no_hooks_of_this_machine(tmp_path, monkeypatch):
+    """The machine's own Codex / Claude Code hooks never run in tests; test_hooks.py turns its own on."""
+    from winhand import hooks
+
+    monkeypatch.setattr(hooks, "settings", lambda: {"sources": []})
+    monkeypatch.setattr(hooks, "codex_system_dir", lambda: str(tmp_path / "no-codex-system"))
+    monkeypatch.setattr(hooks, "claude_managed_dir", lambda: str(tmp_path / "no-claude-managed"))
+
+
 @pytest.fixture
 def manager():
     m = SessionManager()

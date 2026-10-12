@@ -1211,6 +1211,9 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
             break
         kept.append(rule)
     guards["rules"] = kept
+    from . import hooks
+
+    out["hooks"] = mask(hooks.describe(start))
     out["local_mcp_servers"] = {
         "names": mask([s.name for s in cfg.servers if s.enabled]),
         "note": "each is its own MCP endpoint at <relay>/mcp/<name>, added as a separate connector",

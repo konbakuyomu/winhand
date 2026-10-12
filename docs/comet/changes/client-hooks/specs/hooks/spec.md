@@ -75,14 +75,15 @@ Scenario: (A4) 与 Codex 的测试值一致
 |---|---|---|
 | `command`、`input` | `Bash`：`{"command": <命令行>}`；matcher 同时按 `Bash` 和 `PowerShell` 匹配 | `Bash`：`{"command": <命令行>}` |
 | `write` | `Write`：`{"file_path", "content"}`，拿不到内容时为空字符串 | `apply_patch`：`{"command": <补丁>}`，matcher 同时按 `apply_patch`、`Write`、`Edit` 匹配 |
-| `edit` | `Edit`：`{"file_path", "old_string", "new_string", "replace_all"}`；`fs_apply_patch` 对每个文件各发一份，`old_string`、`new_string` 为空字符串 | `apply_patch`：`{"command": <补丁>}`，`fs_apply_patch` 用原补丁 |
+| `edit` | `Edit`：`{"file_path", "old_string", "new_string", "replace_all"}`；`fs_apply_patch` 对每个文件各发一份，`old_string`、`new_string` 为空字符串 | `apply_patch`：`{"command": <补丁>}`；`fs_apply_patch` 的补丁只列出涉及的文件（`*** Update File:`），不带内容 |
 | `delete` | `Bash`：`Remove-Item -LiteralPath '<路径>'` | 同左 |
 | `move` | `Bash`：`Move-Item -LiteralPath '<源>' -Destination '<目标>'` | 同左 |
 | `read` | `Read`：`{"file_path"}` | 不交给 hooks |
 
-- 补丁的格式：
+- 补丁的格式（路径在项目根之内时写成相对路径，与 Codex 一致）：
   - `fs_write` 写新文件时，为 `*** Begin Patch` / `*** Add File: <路径>` / 每行加 `+` / `*** End Patch`；
-  - 覆盖已有文件、或 `fs_edit` 时，为 `*** Update File: <路径>`，带 `@@` 和 `-` / `+` 行。
+  - 覆盖已有文件时，为 `*** Update File: <路径>`、`@@` 和新内容的 `+` 行；
+  - `fs_edit` 时，为 `*** Update File: <路径>`，每处修改一个 `@@`，带 `-` / `+` 行。
 - 一个调用产生多个动作时，每个动作分别交给 hooks；任何一个被拒绝，整个调用被拒绝。
 - stdin 的 JSON：
   - 两种来源都有：`session_id`（winhand 本次连接的标识）、`cwd`（R5 的工作目录）、`hook_event_name`（`"PreToolUse"`）、`permission_mode`（`"default"`）、`tool_name`、`tool_input`、`tool_use_id`（每次调用一个新值）；

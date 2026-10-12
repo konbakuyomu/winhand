@@ -294,6 +294,46 @@ reason = "要改守卫规则"
 
 参数格式不对的调用不经守卫判断，直接由工具自己报错，什么也不会执行。
 
+### 本机的 Codex、Claude Code hooks
+
+在本机用 Codex 或 Claude Code 时会运行的 PreToolUse hooks，经 winhand 的调用也会运行。例如项目里 `.codex/hooks.json` 中“这个阶段不许改 src/”的守卫，云端会话通过 winhand 改文件时同样生效。
+
+- **只运行这两个工具自己会运行的**：
+  - Codex：在 Codex 里审核过（`/hooks`，`trusted_hash` 与现在的内容一致）的 hook，项目里的还要求项目被信任；
+  - Claude Code：项目已接受工作区信任时才运行；
+  - 管理员下发的 hooks 总是运行。
+
+  没信任、改过、被关掉的不运行。`context(path)` 的 `hooks` 一项列出每个 hook 的状态和原因。
+- **hook 看到什么**：动作按那个工具自己的样子交给它。
+  - 命令、shell 会话里提交的一行，都是 `Bash`；
+  - 写文件：Claude Code 是 `Write`、`Edit`，Codex 是 `apply_patch`；
+  - 读文件：Claude Code 是 `Read`。Codex 没有读文件工具，读文件不交给 Codex 的 hook。
+- **结论**：
+  - 退出码 2 或 deny：拒绝；
+  - Claude Code 的 ask：弹窗请你确认；
+  - `additionalContext`：作为附注给模型；
+  - hook 想改写这次调用（`updatedInput`）：拒绝，并告诉模型按 hook 的意思改了再发；
+  - hook 超时、出错：照常执行并附注，与两个工具的做法一致。
+- hook 的结论和 `guards.toml` 一起裁决，只会更严：hook 说 allow 也放不过 `guards.toml` 拒绝的动作。
+
+`guards.toml` 也可以把判断交给一个命令，协议与 Claude Code 的 PreToolUse hook 相同：
+
+```toml
+[[guard]]
+on = ["command", "input"]
+command = 'python C:\tools\check_command.py'   # 读 stdin 的 JSON，退出码 2 或输出 deny 即拒绝
+```
+
+`command` 只能写在全局的 `~/.winhand/guards.toml` 里。项目里的文件写了，按“写错了”处理：仓库里的文件不能让 winhand 执行命令。
+
+在 `config.toml` 里可以关掉或调整：
+
+```toml
+[hooks]
+sources = ['codex', 'claude-code']   # [] = 一个都不运行
+timeout_s = 30                       # 每个 hook 最多等多久
+```
+
 守卫按工具的参数判断，**不是沙箱**。它适合拦住善意的 AI 犯错，挡不住刻意绕路：`run` 里的程序自己去读写什么（例如 `run("type .env")`）、正则没覆盖到的写法、`proc_kill` 和桌面工具，它都管不到。真正需要隔离时，用系统权限或单独的账户。
 
 ## 本机的其他 MCP 服务
