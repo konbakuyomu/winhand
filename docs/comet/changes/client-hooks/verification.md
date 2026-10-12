@@ -33,7 +33,11 @@
 
 **CI**（run 38195189706，519b980）：ubuntu 通过；windows 有 1 个失败：`test_a_trusted_codex_project_hook_refuses_a_write`。
 - 原因：Codex 和 winhand 都用 `pwsh -NoProfile -Command <命令>` 运行 hook，PowerShell 会把程序的退出码 2 变成 1。在用户真机（PowerShell 7.6.5）上核对过：不加 `; exit $LASTEXITCODE` 时得到 1，加上后得到 2。
-- 结论：winhand 与 Codex 的行为一致，是测试里的 hook 命令写法不对。测试改为在 `commandWindows` 末尾加 `; exit $LASTEXITCODE`，README 写明了这个坑。
+- 进一步核对用户真机上 comet 的 `comet-hook-router.mjs`：对 codex、claude-code 平台，拒绝时用退出码 2 加 stderr。所以在 Codex 的 Windows 环境里，comet 的写入阶段守卫会被 PowerShell 变成退出码 1，被当成 hook 出错而放行。这是根据 PowerShell 的行为和 comet 源码推断的，没有实际运行 Codex 验证。
+- 处理：
+  - 新决定 D7：winhand 经 PowerShell 运行 hook 时，把程序的退出码传出来，让这类拒绝生效；
+  - 补了 Windows 上的测试（不加 `; exit $LASTEXITCODE` 的 hook，靠退出码 2 也能拒绝）；
+  - README 写明 Codex 里的这个坑。
 
 ## 第 2 轮
 

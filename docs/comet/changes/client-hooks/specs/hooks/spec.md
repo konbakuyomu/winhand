@@ -103,6 +103,7 @@ Scenario: (A4) 与 Codex 的测试值一致
 - 工作目录：动作所在项目的根目录；没有项目时，为锚点目录。
 - Codex：
   - Windows 上依次尝试 `pwsh.exe -NoProfile -Command <命令>`、`powershell.exe -NoProfile -Command <命令>`、`cmd.exe /C <命令>`，用找到的第一个；
+  - 经 PowerShell 运行时，命令后补一行 `if ($LASTEXITCODE) { exit $LASTEXITCODE }`，让程序的退出码（例如 2）原样传出；Codex 本身不这样做，退出码 2 会变成 1（D7）。Claude Code 的 `shell = "powershell"` 和 `guards.toml` 的 `command` 规则同样处理；
   - 其他系统用 `$SHELL -c <命令>`，没有 `$SHELL` 时用 `/bin/sh`。
 - Claude Code：
   - 有 `args` 时，把 `command` 作为程序、`args` 作为参数直接运行；
