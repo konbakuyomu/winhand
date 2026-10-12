@@ -26,6 +26,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 import uuid
 from dataclasses import dataclass, field
@@ -706,46 +707,127 @@ def argv(hook: Hook) -> list[str] | str:
 
 
 def run(hook: Hook, stdin: dict, cwd: str, timeout: float) -> Run:
+    """Run one hook. Its input and output go through files, not pipes, so a process it leaves behind
+    cannot hold its answer hostage; whatever it started ends with it (a job object on Windows,
+    its process group elsewhere)."""
     env = dict(os.environ)
     if hook.source == "claude-code":
         env["CLAUDE_PROJECT_DIR"] = cwd
     extra: dict = (
         {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {"start_new_session": True}
     )
-    try:
-        child = subprocess.Popen(
-            argv(hook),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-            **extra,
-        )
-    except (OSError, ValueError) as exc:
-        return Run(error=f"could not start: {exc}")
-    try:
-        out, err = child.communicate(json.dumps(stdin, ensure_ascii=False).encode("utf-8"), timeout=timeout)
-    except subprocess.TimeoutExpired:
-        answered = child.poll() is not None  # it exited; something it started keeps the pipes open
-        _stop(child)
+    with tempfile.TemporaryFile() as fin, tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+        fin.write(json.dumps(stdin, ensure_ascii=False).encode("utf-8"))
+        fin.seek(0)
         try:
-            out, err = child.communicate(timeout=5)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            out, err = b"", b""
-        if not answered:
+            child = subprocess.Popen(
+                argv(hook), stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, env=env, **extra
+            )
+        except (OSError, ValueError) as exc:
+            return Run(error=f"could not start: {exc}")
+        job = _windows_job(child.pid) if IS_WINDOWS else None
+        try:
+            code: int | None = child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            code = None
+        finally:
+            _end_all(child, job)
+        if code is None:
             return Run(timed_out=True)
-    return Run(code=child.returncode, stdout=proc._decode(out or b""), stderr=proc._decode(err or b""))
+        fout.seek(0)
+        ferr.seek(0)
+        out, err = fout.read(MAX_OUTPUT_BYTES), ferr.read(MAX_OUTPUT_BYTES)
+    return Run(code=code, stdout=proc._decode(out), stderr=proc._decode(err))
 
 
-def _stop(child: subprocess.Popen) -> None:
-    """End a hook and everything it started."""
-    proc._kill_tree(child.pid)
+MAX_OUTPUT_BYTES = 1_000_000
+
+
+def _end_all(child: subprocess.Popen, job) -> None:
+    """End the hook (if it still runs) and everything it started."""
+    if job is not None:
+        _close_job(job)  # kill-on-close: the whole tree, orphans included
+    else:
+        proc._kill_tree(child.pid)
     if not IS_WINDOWS:
         try:
             os.killpg(child.pid, signal.SIGKILL)  # its own session: orphans included
         except (OSError, ProcessLookupError):
             pass
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _windows_job(pid: int):
+    """A job object holding the hook's process, closed (and so ended) with everything in it."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        class Basic(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", Basic),
+                ("IoInfo", ctypes.c_ulonglong * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = Extended()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+        handle = kernel32.OpenProcess(0x0001 | 0x0100, False, pid)  # TERMINATE | SET_QUOTA
+        assigned = bool(handle) and bool(kernel32.AssignProcessToJobObject(job, handle))
+        if handle:
+            kernel32.CloseHandle(handle)
+        if not assigned:
+            kernel32.CloseHandle(job)
+            return None
+        return job
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _close_job(job) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle(job)
 
 
 # ------------------------------------------------------------------ reading the answer

@@ -252,6 +252,9 @@ def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
     seen: set[str] = set()
     glob_file = str(global_path())
     glob_key = _norm(glob_file)
+    # the owner's own file in its usual place is never a project file of their home folder, even
+    # when WINHAND_HOME points elsewhere
+    usual = _norm(str(Path.home() / PROJECT_DIR / FILE_NAME))
     if cache is not None and glob_key in cache:
         first = cache[glob_key]
     else:
@@ -266,7 +269,7 @@ def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
         while True:
             candidate = str(d / PROJECT_DIR / FILE_NAME)
             key = _norm(candidate)
-            if key not in seen:
+            if key not in seen and key != usual:
                 seen.add(key)
                 if cache is not None and key in cache:
                     found = cache[key]

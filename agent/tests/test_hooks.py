@@ -512,8 +512,7 @@ async def test_a_refusal_counts_even_if_the_hook_leaves_something_running(env):
     deadline = time.monotonic() + 5
     while psutil.pid_exists(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
-    if os.name != "nt":  # Windows keeps no process group to find an orphan by
-        assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
 
 
 async def test_codex_home_inside_a_project_runs_once(env, monkeypatch):
@@ -613,3 +612,14 @@ def test_powershell_commands_pass_the_exit_code_on():
     line = hooks.argv(hook)
     if os.name == "nt" and isinstance(line, list):
         assert line[-1] == "node x.mjs\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"
+
+
+def test_the_owners_usual_guard_file_is_never_a_project_file(env, tmp_path, monkeypatch):
+    from winhand import guard
+
+    home = Path(os.environ["HOME"])
+    (home / ".winhand").mkdir(parents=True, exist_ok=True)
+    (home / ".winhand" / "guards.toml").write_text('[[guard]]\non = "write"\ncommand = "echo hi"\n')
+    monkeypatch.setenv("WINHAND_HOME", str(tmp_path / "elsewhere"))
+    files = guard.files_for([str(home / "work" / "a.txt")])
+    assert all(not f.path.startswith(str(home / ".winhand")) for f in files)
