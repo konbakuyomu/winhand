@@ -923,8 +923,8 @@ def test_the_legacy_managed_file_can_decide_trust(env, monkeypatch, tmp_path):
 
 
 def test_mcp_input_numbers_are_judged_as_serde_reads_them():
-    assert hooks._toml_value({"n": 2**70}) and hooks._toml_value({"n": -(2**63)})
-    assert not hooks._toml_value({"n": 2**63})
+    assert hooks._toml_value({"n": 2**70}) and hooks._toml_value({"n": 2**63})
+    assert not hooks._toml_value({"n": [float("inf")]})  # from TOML only; serde_json cannot hold it
 
 
 # ------------------------------------------------------------------ round 6
@@ -989,21 +989,23 @@ def test_an_odd_number_where_codex_does_not_look_leaves_the_file_alone(env):
     assert errors == [] and [h.status for h in found if h.source == "codex"] == ["trusted"]
 
 
+@pytest.mark.parametrize("number", ["9" * 320, "1e400", str(2**64 - 1)])
 @pytest.mark.parametrize("where", ["handler", "input"])
-def test_a_whole_number_too_long_for_serde_makes_codex_drop_the_file(env, where):
-    long = "9" * 320
+def test_numbers_codex_keeps_as_written_do_not_stop_its_hooks(env, where, number):
+    """Codex is built with serde_json's arbitrary_precision: a number it reads without a type is
+    never out of range, so the file loads and the trusted hook next to it runs."""
     data = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [codex_command("by-command")]}]}}
     raw = json.dumps(data)
     if where == "handler":
-        raw = raw.replace('"type": "command"', f'"type": "command", "weight": {long}')
+        raw = raw.replace('"type": "command"', f'"type": "command", "weight": {number}')
     else:
-        raw = raw.replace(
-            '"hooks": [{"type"',
-            f'"hooks": [{{"type": "mcp_tool", "server": "s", "tool": "t", "input": {{"n": {long}}}}}, {{"type"',
-        )
+        mcp = f'{{"type": "mcp_tool", "server": "s", "tool": "t", "input": {{"n": {{"m": [{number}]}}}}}}'
+        raw = raw.replace("}]}]}}", "}, " + mcp + "]}]}}")
     path = codex_file(env, data, raw=raw.encode())
     found, errors = hooks.discover(str(env["root"]))
-    assert not [h for h in found if h.file == str(path)] and "out of range" in errors[0]["error"]
+    mine = [h for h in found if h.file == str(path)]
+    assert errors == [] and len(mine) == (2 if where == "input" else 1)
+    assert [h.status for h in mine if h.handler.get("type") == "command"] == ["trusted"]
 
 
 def test_whole_numbers_read_as_serde_json_reads_them():

@@ -130,8 +130,9 @@ def _no_constant(name: str):
 
 
 class _OutOfRange:
-    """A number serde_json cannot hold (1e400, a 309-digit integer). It only makes Codex drop the
-    file where serde reads the value (inside a handler); under a key it ignores, it is skipped."""
+    """A number a float cannot hold (1e400, a 309-digit integer). Codex is built with serde_json's
+    arbitrary_precision, so such a number never makes it drop a file; it only fails where a field
+    wants a whole number (timeout) or a string, as this marker does."""
 
     def __repr__(self) -> str:
         return "<number out of range>"
@@ -146,7 +147,8 @@ def _serde_float(text: str) -> float | _OutOfRange:
 
 
 def _serde_int(text: str) -> int | float | _OutOfRange:
-    """As serde_json reads a whole number: -0 and anything past u64 / i64 are floats."""
+    """A whole number as Codex's typed fields see it: -0 and anything past u64 / i64 are not whole
+    numbers there (kept as floats, or the marker past what a float holds)."""
     if text == "-0":
         return -0.0
     try:
@@ -161,14 +163,6 @@ def _serde_int(text: str) -> int | float | _OutOfRange:
         return OUT_OF_RANGE
 
 
-def _out_of_range(value: object) -> bool:
-    if value is OUT_OF_RANGE:
-        return True
-    if isinstance(value, dict):
-        return any(_out_of_range(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_out_of_range(v) for v in value)
-    return False
 
 
 def _clip(text: str, limit: int = 300) -> str:
@@ -343,8 +337,6 @@ def _codex_file_problem(data: object, kind: str) -> str | None:
 def _codex_handler_problem(h: object) -> str | None:
     if not isinstance(h, dict):
         return "it is not a table"
-    if _out_of_range(h):  # serde reads every value of a handler, its unknown keys too
-        return "a number in it is out of range"
     kind = h.get("type")
     if not isinstance(kind, str):
         return "it has no type"
@@ -388,8 +380,8 @@ def _toml_value(value: object) -> bool:
         return all(_toml_value(v) for v in value.values())
     if isinstance(value, list):
         return all(_toml_value(v) for v in value)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return not 2**63 <= value < 2**64  # a u64 TOML cannot hold; larger ones are floats to serde_json
+    if isinstance(value, float):  # only TOML gives inf / nan here, which serde_json cannot hold
+        return math.isfinite(value)
     return True
 
 

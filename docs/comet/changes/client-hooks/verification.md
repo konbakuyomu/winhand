@@ -195,3 +195,27 @@ N3 按决定写进规格。N4 修过了头，又有一处没修到：
   - handler 里和 mcp_tool `input` 里三百多位的整数让整份文件被拒绝；
   - 整数的各个边界；
   - 1 MB 以上的 git `config` 仍能读出远端。
+
+**针对性复核（b40561f）**：R6-3 已修好（1.26 MB、5.4 MB 的 `config` 都能找到）；R6-1 成立。但 Verifier 发现，第 4 轮起用来对照的“Codex 的 serde”程序与 Codex 实际的编译方式不同：
+
+- Codex 的 `exec-server-protocol` 依赖开启了 serde_json 的 `arbitrary_precision`（还有 `raw_value`），Cargo 把这些特性合并到整个程序，hooks 的读取也受影响。
+- 证据有三处：main 分支和 rust-v0.162.1 的 `Cargo.toml`（Builder 另行核对过 main）；npm 发布的 0.162.1 程序里含 59 处只有开启这个特性才有的常量；按真实特性重建的对照程序。
+- 开启后，serde_json 不对它不按类型读取的数做范围检查，超出范围的数按原样保存。
+
+所以第 6 轮的 R6-2 是误报，第 7 轮为它加的拒绝反而让 winhand 跳过 Codex 会运行的 hook：
+- handler 里不认识的键、mcp_tool `input` 里的 `1e400` 或几百位的整数，会让整份文件被拒绝；
+- 第 4 轮起 `input` 里 2^63 到 2^64 的整数也会。
+
+按真实特性重新对照了 380 个新用例，加上之前各轮的 161 个。
+
+| # | 问题 | 级别 | 处理 |
+|---|---|---|---|
+| R7-1 | 上述误拒：已信任的 hook 因旁边一个“超出范围”的数不运行 | 次要（更松，实测） | 去掉 handler 里超出范围就拒绝的检查和 `input` 的整数区间检查；要求整数的字段照旧检查；测试改为“这些数不影响加载，旁边的 hook 照常运行” |
+| R7-2 | TOML 写的 mcp_tool `input` 里有 `inf`、`nan`，Codex 拒绝，winhand 照常读 | 小（更严） | 一并改为拒绝 |
+| 规格 | hooks R2 关于数字的说法按错误的对照写成 | 小 | 按 `arbitrary_precision` 重写 |
+
+**改后复核**（Builder 用 Verifier 留下的两个对照程序和比较脚本重跑）：
+- 380 个新用例加 19 个其他用例：剩 6 处不一致，都是 Codex 拒绝、winhand 照常读（更严）：
+  - 5 个在 `input` 里故意用 serde_json 内部键名（`$serde_json::private::Number`、`RawValue`）的用例；
+  - 1 个 TOML 里超出 64 位的整数（Rust 的 toml 解析失败）。
+- 之前各轮的 176 个用例：剩 7 处，都是已列出的差异（重复键、位置形式、孤立代理字符、顶层 null、`managed_dir`、TOML 日期时间）。

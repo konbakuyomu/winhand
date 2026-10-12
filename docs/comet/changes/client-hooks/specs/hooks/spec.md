@@ -53,8 +53,8 @@ Codex：
 - 链接的 git 工作树（`.git` 是文件）：只有 git 自己的记录都对得上时才算（与 Codex 相同；这些记录只读不超过 64 KiB 的普通文件，不跟随链接，命名管道之类不会让读取卡住）：工作树的 git 文件夹在 `<公共目录>/worktrees/` 下，它的 `gitdir` 指回这个工作树，`commondir` 指向那个公共目录，主检出目录的 `.git` 就是这个公共目录。算作工作树时，按 Codex 的做法，工作树里存在 `.codex` 文件夹的那几级，hooks 从主检出目录里对应的 `.codex` 读取；信任按上一条，依次看工作树的这一级、工作树根、主检出目录。
 - Codex 会整份拒绝的 hooks 文件，其中的 hooks 一个都不运行，在 `context()` 中报出原因。按 Codex 读文件的方式（serde）判断：
   - 整份拒绝：`hooks.json` 顶层有 `description`、`hooks` 以外的键；以 UTF-8 字节顺序标记开头；任一已知事件（不只是 PreToolUse）下的组或 handler 类型不对，例如 handler 没有 `type`、`type` 不认识（如 `http`）、command handler 没有 `command`、`timeout` 不是非负整数、`async` 不是布尔值、mcp_tool handler 没有 `server` 或 `tool`；
-  - 不影响：组和 handler 里 Codex 不认识的键（例如 `description`、`shell`、`args`、`if`）、不认识的事件名、`matcher` 为 null，Codex 都忽略，winhand 也照常读取（handler 里不认识的键的值除外，见下条“数字”）；可选字段（`commandWindows`、`statusMessage`、`timeout` 等）设为 null，等于没设；
-  - 数字按 serde_json 的读法：`-0` 和超出 64 位整数范围的整数是浮点数（所以不能当 `timeout`）；超出浮点数范围的数（`1e400`、三百多位的整数）只在 Codex 实际读取的地方让整份文件被拒绝，即 handler 里的任何键（包括不认识的）和 mcp_tool 的 `input`；在组里不认识的键、不认识的事件名下面，Codex 只检查语法，winhand 也不管；
+  - 不影响：组和 handler 里 Codex 不认识的键（例如 `description`、`shell`、`args`、`if`）、不认识的事件名、`matcher` 为 null，Codex 都忽略，winhand 也照常读取；可选字段（`commandWindows`、`statusMessage`、`timeout` 等）设为 null，等于没设；
+  - 数字：Codex 编译时开启了 serde_json 的 `arbitrary_precision`，不按类型读取的数按原样保存，所以超出范围的数（`1e400`、几百位的整数）放在哪里都不会让文件被拒绝。只有要求整数的字段（`timeout`、`additionalContextLimit`）必须是 0 到 2^64−1 的整数，`-0`、小数、超出范围的数都会让整份文件被拒绝；mcp_tool 的 `input` 写在 TOML 里时不能有 `inf`、`nan`；
   - 只跳过一个 handler：在 Windows 上 `commandWindows` 设为空字符串，或命令只有空白（Codex 跳过这一个）。
 
 Claude Code：
