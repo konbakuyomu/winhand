@@ -89,7 +89,8 @@ def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
         return text if redactor.empty else redactor.data(text)[0]
 
     machine = socket.gethostname() or "this PC"
-    named = (workspace.repo_key(repo) or repo[:100]) if repo else None  # owner/name, never a credential
+    # owner/name, or the address with anything up to an @ (a credential) cut off; kept short
+    named = (workspace.repo_key(repo) or repo.rsplit("@", 1)[-1])[:100] if repo else None
     checkout, missing = None, False
     if repo:
         try:
@@ -157,8 +158,8 @@ def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
         room = budget - _size(head) - _size(note) - 3
         if text is not None and room >= 400 and not left_out:
             cut = text[:room]
-            while _size(cut) > room:
-                cut = cut[: -max(1, (_size(cut) - room))]
+            while _size(cut) > room:  # characters past the BMP count twice: trim half the excess
+                cut = cut[: -max(1, (_size(cut) - room + 1) // 2)]
             parts.append(f"{head}\n{cut}{note}")
             budget -= _size(head) + _size(cut) + _size(note) + 3
             continue

@@ -317,3 +317,14 @@ def test_a_rule_not_read_says_so_once(checkout, home, monkeypatch):
     monkeypatch.setattr(workspace, "_collect", collect)
     text = session_bridge.session_start("owner/name", Config())
     assert "(not read: test)" in text and "not read: not read" not in text
+
+
+def test_rules_past_the_bmp_are_cut_not_dropped(checkout, home):
+    write(home / ".codex" / "AGENTS.md", "\U0001f600" * 12_000)
+    text = session_bridge.session_start("owner/name", Config())
+    assert text.count("\U0001f600") > 3_000 and session_bridge._size(text) <= session_bridge.BUDGET_CHARS
+
+
+def test_a_credential_in_an_odd_address_is_not_echoed(checkout):
+    text = session_bridge.session_start("https://user:SECRET@host.example/single.git", Config())
+    assert "SECRET" not in text

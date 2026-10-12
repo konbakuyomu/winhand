@@ -1,3 +1,3 @@
 """winhand: let an AI drive a Windows machine through one MCP server."""
 
-__version__ = "0.4.6"
+__version__ = "0.4.7"

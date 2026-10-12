@@ -22,8 +22,8 @@ Scenario: (A1) 正确的令牌
 - 结果：电脑收到身份为 `hook` 的请求；客户端收到电脑的回答。
 
 Scenario: (A1) 错误的令牌
-- 操作：不带令牌、带错的令牌各 POST 一次；再从同一 IP 连续失败到第 21 次。
-- 结果：前两次 401；第 21 次 429。
+- 操作：不带令牌 POST 30 次；再从同一 IP 带错的令牌连续 POST 21 次；之后带对的令牌 POST 一次。
+- 结果：不带令牌的都是 401 且不计数；带错的前 20 次 401，第 21 次 429；带对的照常转给电脑。
 
 Scenario: (A1) 没有配置
 - 设置：没有 `HOOK_TOKEN`。
@@ -104,7 +104,7 @@ Scenario: (A5) 找不到仓库
   {"hooks": {"SessionStart": [{"matcher": "startup|resume|clear|compact",
     "hooks": [{"type": "command", "timeout": 30, "command": "<命令>"}]}]}}
   ```
-- 命令（bash，云端是 Linux）做这些事：
+- 命令（POSIX sh，云端是 Linux）做这些事：
   - `CLAUDE_CODE_REMOTE` 不是 `true` 时退出 0；
   - 用 `git -C "$CLAUDE_PROJECT_DIR" remote get-url origin` 取仓库地址，取不到时用空值；
   - `curl -sS --max-time 25` 把 stdin 原样 POST 到 `https://<中转>/hook/session-start`，带 `content-type: application/json`、`X-Winhand-Repo`；`WINHAND_HOOK_TOKEN` 非空时再带 `X-Winhand-Hook-Token`；
