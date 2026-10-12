@@ -210,6 +210,8 @@ class _Pending:
     future: asyncio.Future | None = None
     activity: dict | None = None
     progress_token: Any = None
+    method: str | None = None
+    first_page: bool = False  # a tools/list request without a cursor
 
 
 class Service:
@@ -325,12 +327,19 @@ class Service:
         uid = next(self._ids)
         future = asyncio.get_running_loop().create_future()
         self.pending[uid] = _Pending(None, None, None, future=future)
-        assert self.process is not None
+        process = self.process
+        assert process is not None
         try:
             await asyncio.to_thread(
-                self.process.send, {"jsonrpc": "2.0", "id": uid, "method": method, "params": params}
+                process.send, {"jsonrpc": "2.0", "id": uid, "method": method, "params": params}
             )
             return await asyncio.wait_for(future, timeout)
+        except (TimeoutError, asyncio.CancelledError):
+            if method != "initialize" and process.alive():  # the spec forbids cancelling initialize
+                cancelled = {"requestId": uid, "reason": "the caller stopped waiting"}
+                with contextlib.suppress(Exception):
+                    process.send({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": cancelled})
+            raise
         finally:
             self.pending.pop(uid, None)
 
@@ -393,6 +402,8 @@ class Service:
                     p.future.set_result(message)
                 return
             answer = {**message, "id": p.client_id}
+            if p.first_page:
+                self._remember_tools(message.get("result"))
             if p.stream is not None:
                 p.stream.queue.put_nowait(("answer", message["id"], answer))
             self._finish_activity(p, answer=answer)
@@ -420,6 +431,19 @@ class Service:
         for session in self.sessions.values():
             if session.streams:
                 session.streams[-1].queue.put_nowait(("message", None, message))
+
+    def _remember_tools(self, result: Any) -> None:
+        """A client listed this server's tools through the gateway: keep the list (one page)."""
+        if (
+            not isinstance(result, dict)
+            or result.get("nextCursor")
+            or not isinstance(result.get("tools"), list)
+        ):
+            return
+        from . import local_mcp
+
+        with contextlib.suppress(Exception):
+            local_mcp.remember(self.entry, result["tools"], (self.init_result or {}).get("instructions"))
 
     def _time_out(self, uid: int) -> None:
         """A tool call ran past call_timeout_s: answer the client and tell the server to stop."""
@@ -622,7 +646,15 @@ class Service:
         for m in requests:
             uid = next(self._ids)
             token = ((m.get("params") or {}).get("_meta") or {}).get("progressToken")
-            p = _Pending(session, m["id"], stream, activity=self._start_activity(m), progress_token=token)
+            p = _Pending(
+                session,
+                m["id"],
+                stream,
+                activity=self._start_activity(m),
+                progress_token=token,
+                method=m.get("method"),
+                first_page=m.get("method") == "tools/list" and not (m.get("params") or {}).get("cursor"),
+            )
             self.pending[uid] = p
             stream.due.add(uid)
             if m.get("method") == "tools/call":
@@ -829,9 +861,13 @@ class Services:
                 _error(None, f"no local MCP server named {name!r} is enabled in winhand (enabled: {known})"),
                 status_code=404,
             )
+        self.watch_idle()
+        return await service.handle(request)
+
+    def watch_idle(self) -> None:
+        """Start the loop that checks on running servers and stops idle ones (once)."""
         if self._idle_task is None:
             self._idle_task = asyncio.create_task(self._idle_loop())
-        return await service.handle(request)
 
     async def _idle_loop(self) -> None:
         while True:
@@ -864,7 +900,10 @@ def compose_app(mcp_app, services: Services | None):
     from starlette.middleware import Middleware
     from starlette.routing import Mount, Route
 
-    from . import session_bridge, transfer
+    from . import local_mcp, session_bridge, transfer
+
+    if services is not None:
+        local_mcp.active = services  # mcp_tools / mcp_call use the running servers
 
     routes = [
         Route("/transfer/{token}", transfer.endpoint, methods=["GET", "PUT", "POST"]),
@@ -912,10 +951,19 @@ async def probe(entry: ServerEntry, timeout: float | None = None) -> dict:
                 init = client.initialize_result
                 result["server"] = {"name": init.server_info.name, "version": init.server_info.version}
                 result["protocol"] = init.protocol_version
+                tools = await client.list_tools()
                 result["tools"] = [
                     {"name": t.name, "description": (t.description or "").strip().split("\n")[0][:200]}
-                    for t in await client.list_tools()
+                    for t in tools
                 ]
+                from . import local_mcp
+
+                with contextlib.suppress(Exception):
+                    local_mcp.remember(
+                        entry,
+                        [t.model_dump(mode="json", exclude_none=True) for t in tools],
+                        init.instructions,
+                    )
                 if init.capabilities.prompts:
                     with contextlib.suppress(Exception):
                         result["prompts"] = [p.name for p in await client.list_prompts()]

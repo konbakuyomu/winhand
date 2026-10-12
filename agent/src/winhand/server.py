@@ -4,19 +4,22 @@ processes and the desktop."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.types import Image
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field
 
 from . import (
     __version__,
     coalesce,
     fs,
+    local_mcp,
     media,
     patching,
     proc,
@@ -107,8 +110,12 @@ Quick rules
   sys_info(checks=true) lists the usual suspects with fixes.
 - A tool named here but missing from your tool list (winhand was updated after the conversation
   started): call(tool, arguments) reaches every current tool; help() lists them.
-- Local MCP servers (pyocd-debug, usb-camera ...) are not tools here: each one configured in the
-  winhand app is its own MCP endpoint at <relay>/mcp/<name>, added as a separate connector.
+- Skills on this machine (listed by context(), or at the start of a cloud session): when one fits the
+  task, skill(name) loads its SKILL.md and lists its files; follow it, and run its scripts here.
+- Local MCP servers set up in the winhand app (pyocd-debug, a camera ...): mcp_tools() lists them and
+  their tools, mcp_tools(server) gives a server's tools with parameters (starting it if need be), and
+  mcp_call(server, tool, arguments) calls one; a call still going after ~40 s returns a call_id for
+  mcp_call(call_id=...). Each is also its own MCP endpoint at <relay>/mcp/<name>.
 - The machine's owner may have written rules and skills for agents: before working in a folder, and
   again after the conversation is compacted, call context(path=<that folder>) and follow what it
   returns (repo=<owner/name> finds the folder of a repository you only know by name). Calls that read or change the machine are checked against the owner's guard rules
@@ -150,6 +157,8 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   restarts winhand, elevated=true for admin tasks); follow it with job_status(id, wait_s=40).
 - Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the
   usual suspects with fixes. A tool missing from your list: call(tool, arguments) reaches it.
+- Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
+  tools, mcp_call(server, tool, arguments) calls one.
 - After a connection error, call history() before resending anything.
 """
 
@@ -171,6 +180,20 @@ def instructions(cfg: Config, local_stdio: bool = False) -> str:
 
 def _text(value: str) -> TextContent:
     return TextContent(type="text", text=value)
+
+
+def _mcp_result(result: dict) -> ToolResult:
+    """A local MCP server's tools/call answer as this tool's own result: content as given."""
+    try:
+        parsed = CallToolResult.model_validate(result)
+    except ValueError:
+        text = json.dumps(result, ensure_ascii=False, default=str)
+        return ToolResult(content=[_text(text)], is_error=bool(result.get("isError")))
+    return ToolResult(
+        content=list(parsed.content) or [_text("(the tool returned no content)")],
+        structured_content=parsed.structuredContent,
+        is_error=parsed.isError,
+    )
 
 
 Ids = Annotated[list[str] | str, Field(description="Session id, or a list of ids to watch together")]
@@ -258,7 +281,7 @@ def build_server(
         info["winhand"] = __version__
         info["local_mcp_servers"] = {
             "names": local_servers,
-            "note": "each is its own MCP endpoint at <relay>/mcp/<name>; add it as a separate connector",
+            "note": "mcp_tools() lists their tools, mcp_call(server, tool, arguments) calls one",
         }
         return info
 
@@ -285,6 +308,91 @@ def build_server(
         rules in force and the local MCP servers. Call it before working in a folder and again after
         the conversation is compacted."""
         return await asyncio.to_thread(workspace.context, cfg, path, repo)
+
+    @mcp.tool
+    async def skill(
+        name: Annotated[str, Field(description="The skill's name, as listed at the start or by context()")],
+        path: Annotated[
+            str | None, Field(description="The folder you work in: its project's own skills come first")
+        ] = None,
+        repo: Annotated[
+            str | None, Field(description="owner/name of the repository you work on, instead of path")
+        ] = None,
+    ) -> dict:
+        """Load one of this machine's skills, as Claude Code's Skill tool does: its SKILL.md (the
+        instructions to follow), its folder and the files in it. Use it when a listed skill fits the
+        task; the scripts it names run on this machine."""
+        return await asyncio.to_thread(workspace.skill, cfg, name, path, repo)
+
+    @mcp.tool
+    async def mcp_tools(
+        server: Annotated[
+            str | None, Field(description="A local MCP server's name; omit to see all of them")
+        ] = None,
+    ) -> dict:
+        """The MCP servers set up in the winhand app on this machine and their tools. Without server:
+        each enabled server, its state and its tools as last listed (nothing is started). With server:
+        starts it if need be and lists every tool with its description and parameters (inputSchema).
+        Call a tool with mcp_call."""
+        if not server:
+            return {
+                "servers": await asyncio.to_thread(local_mcp.overview),
+                "next": "mcp_tools(server) for a server's tools with their parameters; "
+                "mcp_call(server, tool, arguments) calls one",
+            }
+        listed = await local_mcp.listing(server)
+        if listed is None:
+            return {
+                "server": server,
+                "still_running": True,
+                "next": f"{server} is still starting (some take minutes); call mcp_tools({server!r}) again to "
+                "keep waiting",
+            }
+        out = {"server": server, "tools": listed.get("tools") or []}
+        if listed.get("instructions"):
+            out["instructions"] = listed["instructions"]
+        return out
+
+    @mcp.tool
+    async def mcp_call(
+        server: Annotated[
+            str | None, Field(description="The local MCP server, as mcp_tools names it")
+        ] = None,
+        tool: Annotated[str | None, Field(description="The name of one of its tools")] = None,
+        arguments: Annotated[
+            dict | None, Field(description="The tool's arguments, as its inputSchema describes them")
+        ] = None,
+        timeout_s: Annotated[
+            float,
+            Field(
+                description="Give up on the tool after this many seconds (starting the server not counted)"
+            ),
+        ] = 120,
+        call_id: Annotated[
+            str | None,
+            Field(
+                description="Keep waiting for a call that came back still_running: its call_id, nothing else"
+            ),
+        ] = None,
+    ):
+        """Call a tool of a local MCP server on this machine (mcp_tools lists them). The answer comes
+        back as the server gave it, text and pictures. A call still going after ~40 s comes back with
+        still_running and a call_id; mcp_call(call_id=...) waits for the rest."""
+        if call_id:
+            result, pending = await local_mcp.wait_call(call_id)
+        else:
+            if not server or not tool:
+                raise ValueError("give server and tool (mcp_tools lists them), or call_id to keep waiting")
+            if timeout_s <= 0:
+                raise ValueError("timeout_s must be more than 0")
+            result, pending = await local_mcp.start_call(server, tool, arguments or {}, timeout_s)
+        if pending is not None:
+            return {
+                "still_running": True,
+                "call_id": pending,
+                "next": f"mcp_call(call_id={pending!r}) waits up to 40 s more for the answer",
+            }
+        return _mcp_result(result)
 
     # ------------------------------------------------------------ processes
 

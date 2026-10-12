@@ -1,12 +1,14 @@
 """Tool calls described as actions on this machine: what the guard (guard.py) judges.
 
 A call that reads or changes the machine becomes one or more actions: a command it runs, a line
-typed into a shell session, a file it writes, edits, deletes, moves or reads. Calls that only look
-(session_list, fs_stat ...) and the desktop tools are not actions.
+typed into a shell session, a file it writes, edits, deletes, moves or reads. A call to a tool of a local
+MCP server (mcp_call) is an `mcp` action: `<server>.<tool> <arguments as JSON>`. Calls that only look
+(session_list, fs_stat, mcp_tools ...) and the desktop tools are not actions.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -15,7 +17,7 @@ from . import fs, patching, profiles
 from .proc import split_command
 from .session.keys import encode_key
 
-KINDS = ("command", "input", "write", "edit", "delete", "move", "read")
+KINDS = ("command", "input", "write", "edit", "delete", "move", "read", "mcp")
 _SHELLS = {"pwsh", "powershell", "cmd", "bash", "sh", "zsh", "ssh"}
 _LINE_END = re.compile(r"(\r\n|\r|\n)")
 _CSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O.)")
@@ -66,6 +68,9 @@ class Action:
                 if self.opaque
                 else ""
             )
+        elif self.kind == "mcp":
+            text = " ".join((self.text or "").split())
+            what = f"mcp: {text if len(text) <= 300 else text[:299] + '…'}"
         else:
             what = f"{self.kind}: {' -> '.join(self.paths)}"
         return f"{self.tool} → {what}"
@@ -220,6 +225,8 @@ def describe(
         return one("read", a.get("path"), expand_vars=True)
     if tool == "fs_search":  # reads the files below path
         return one("read", a.get("path") or ".")
+    if tool == "mcp_call" and not a.get("call_id"):  # waiting for an earlier call runs nothing new
+        return [Action("mcp", tool, text=mcp_text(a.get("server"), a.get("tool"), a.get("arguments")))]
     if tool == "fs_op":
         op = (a.get("action") or "").lower()
         if op == "copy":
@@ -232,6 +239,12 @@ def describe(
             dest = _destination(a.get("path"), a.get("to"))
             return one("move", a.get("path"), dest) + one("read", a.get("path")) + one("write", dest)
     return []
+
+
+def mcp_text(server, tool, arguments) -> str:
+    """What a guard rule's `match` sees for a local MCP tool call: `<server>.<tool> <arguments JSON>`."""
+    args = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return f"{server or ''}.{tool or ''} {args}"
 
 
 def _continues(line: str) -> bool:

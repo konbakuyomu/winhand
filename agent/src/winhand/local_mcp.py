@@ -1,0 +1,336 @@
+"""The machine's local MCP servers as seen through winhand's own connection: what tools each offers
+(kept in a cache, so describing them never starts a server) and calling one of them.
+
+The cache lives in <WINHAND_HOME>/cache/mcp-tools.json, one entry per server, valid while the
+server's configuration is unchanged. It is filled whenever winhand learns a server's tool list:
+a client listing them through the /mcp/<name> gateway, mcp_tools(server), or the app's test button.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import atexit
+import contextlib
+import hashlib
+import itertools
+import json
+import os
+import threading
+import time
+from typing import Any
+
+from . import config
+from .config import ServerEntry
+
+CACHE_FILE = "mcp-tools.json"
+INSTRUCTIONS_CHARS = 300
+TOOL_LINE_CHARS = 150
+ANSWER_WITHIN_S = 40.0  # clients abandon a tool call after ~60 s (see session/wait.py)
+KEEP_UNCLAIMED_S = 600.0  # a finished call nobody came back for is dropped after this
+_lock = threading.Lock()
+
+# the Services of the running agent (set by mcp_bridge.compose_app); None in stdio / http mode
+active = None
+_own = None
+
+
+def fingerprint(entry: ServerEntry) -> str:
+    """What a cached tool list depends on: how the server is started or reached."""
+    parts = {
+        "kind": entry.kind,
+        "command": entry.command,
+        "args": list(entry.args),
+        "url": entry.url,
+        "cwd": entry.cwd,
+        "env": sorted((entry.env or {}).items()),
+    }
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _path():
+    return config.home() / "cache" / CACHE_FILE
+
+
+def _read_all() -> dict:
+    try:
+        data = json.loads(_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def cached(entry: ServerEntry) -> dict | None:
+    """The cached list for this server, None when there is none for its current configuration."""
+    item = _read_all().get(entry.name)
+    if not isinstance(item, dict) or item.get("fingerprint") != fingerprint(entry):
+        return None
+    if not isinstance(item.get("tools"), list):
+        return None
+    return item
+
+
+def remember(entry: ServerEntry, tools: list, instructions: str | None = None) -> None:
+    """Store a server's tool list (name, description, inputSchema of each)."""
+    kept = []
+    for tool in tools:
+        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+            continue
+        kept.append(
+            {
+                "name": tool["name"],
+                "description": str(tool.get("description") or ""),
+                "inputSchema": tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {},
+            }
+        )
+    with _lock:
+        data = _read_all()
+        data[entry.name] = {
+            "fingerprint": fingerprint(entry),
+            "listed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "instructions": str(instructions or "")[:2000],
+            "tools": kept,
+        }
+        path = _path()
+        with contextlib.suppress(OSError):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, path)
+
+
+def services():
+    """The Services that serve local MCP servers here: the running agent's, or our own."""
+    global _own
+    if active is not None:
+        return active
+    if _own is None:
+        from .mcp_bridge import Services
+
+        _own = Services(config.load().servers)
+        atexit.register(_stop_own)
+    return _own
+
+
+def _stop_own() -> None:
+    """At exit (stdio mode): the servers this process started go with it."""
+    for service in list(_own.services.values()) if _own else []:
+        if service.process is not None:
+            with contextlib.suppress(Exception):
+                service.process.stop()
+
+
+def enabled_entries() -> list[ServerEntry]:
+    return [s.entry for s in services().services.values() if s.entry.enabled]
+
+
+def _entry(name: str) -> ServerEntry:
+    service = services().get(name)
+    if service is None:
+        names = ", ".join(e.name for e in enabled_entries()) or "none"
+        raise ValueError(f"no local MCP server named {name!r} is enabled in winhand (enabled: {names})")
+    return service.entry
+
+
+def _first_line(text: str, limit: int) -> str:
+    line = next((x.strip() for x in str(text or "").splitlines() if x.strip()), "")
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+# ------------------------------------------------------------------ talking to a server
+
+
+async def _request(name: str, method: str, params: dict, timeout: float) -> dict:
+    """One JSON-RPC request to a local server (started if need be); its `result`."""
+    every = services()
+    service = every.get(name)
+    if service is None:
+        _entry(name)  # raises with the list of enabled servers
+    if service.entry.kind == "http":
+        return await _http_request(service.entry, method, params, timeout)
+    every.watch_idle()
+    problem = await service.check_health(before_call=True)
+    if problem:
+        raise RuntimeError(problem)
+    await service.ensure_started()
+    service.last_used = time.time()
+    try:
+        answer = await service._internal(method, params, timeout)
+    except TimeoutError:
+        raise TimeoutError(f"{name} did not answer {method} within {timeout:g} s") from None
+    finally:
+        service.last_used = time.time()
+    if "error" in answer:
+        error = answer["error"] or {}
+        raise RuntimeError(f"{name}: {error.get('message') or error}")
+    return answer.get("result") or {}
+
+
+async def _http_request(entry: ServerEntry, method: str, params: dict, timeout: float) -> dict:
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    transport = StreamableHttpTransport(entry.url, headers=entry.headers or None)
+    async with asyncio.timeout(timeout):
+        async with Client(transport, timeout=timeout) as client:
+            if method == "tools/list":
+                tools = await client.list_tools_mcp()
+                return tools.model_dump(mode="json", exclude_none=True)
+            result = await client.call_tool_mcp(params["name"], params.get("arguments") or {})
+            return result.model_dump(mode="json", exclude_none=True)
+
+
+async def list_tools(name: str, timeout: float = 90) -> dict:
+    """Start the server if need be, list its tools (all pages) and remember them."""
+    entry = _entry(name)
+    tools: list = []
+    cursor = None
+    for _ in range(50):
+        result = await _request(name, "tools/list", {"cursor": cursor} if cursor else {}, timeout)
+        tools += result.get("tools") or []
+        cursor = result.get("nextCursor")
+        if not cursor:
+            break
+    service = services().get(name)
+    instructions = ((service.init_result or {}).get("instructions") if service else None) or ""
+    remember(entry, tools, instructions)
+    return cached(entry) or {"tools": tools, "instructions": instructions}
+
+
+async def call_tool(name: str, tool: str, arguments: dict, timeout: float) -> dict:
+    return await _request(name, "tools/call", {"name": tool, "arguments": arguments}, timeout)
+
+
+# ------------------------------------------------------------------ answering within a client's patience
+
+_calls: dict[str, tuple[asyncio.Task, float]] = {}  # call id -> (task, when it finished or started)
+_listings: dict[str, asyncio.Task] = {}  # server -> its tools/list in flight
+_ids = itertools.count(1)
+
+
+def _forget_old() -> None:
+    now = time.time()
+    for key, (task, since) in list(_calls.items()):
+        if task.done() and now - since > KEEP_UNCLAIMED_S:
+            _calls.pop(key, None)
+            with contextlib.suppress(BaseException):
+                task.result()  # retrieved: no "exception was never retrieved" warning
+
+
+async def _within(task: asyncio.Task, wait_s: float) -> bool:
+    """Wait for `task` up to wait_s without cancelling it; whether it is done."""
+    await asyncio.wait({task}, timeout=max(0.0, wait_s))
+    return task.done()
+
+
+async def start_call(name: str, tool: str, arguments: dict, timeout: float, wait_s: float = ANSWER_WITHIN_S):
+    """Call a tool; (result, None) when it answers within wait_s, else (None, call id)."""
+    _entry(name)
+    _forget_old()
+    task = asyncio.ensure_future(call_tool(name, tool, arguments, timeout))
+    if await _within(task, wait_s):
+        return task.result(), None
+    key = f"m{next(_ids)}"
+    _calls[key] = (task, time.time())
+
+    def finished(t: asyncio.Task) -> None:
+        if key in _calls:
+            _calls[key] = (t, time.time())  # kept KEEP_UNCLAIMED_S from now
+
+    task.add_done_callback(finished)
+    return None, key
+
+
+async def wait_call(key: str, wait_s: float = ANSWER_WITHIN_S):
+    """A call that was still running: (result, None) once done, else (None, key) again."""
+    _forget_old()
+    if key not in _calls:
+        raise ValueError(f"no call {key!r} is waiting here (finished ones are handed out once)")
+    task = _calls[key][0]
+    if not await _within(task, wait_s):
+        return None, key
+    _calls.pop(key, None)
+    return task.result(), None
+
+
+async def listing(name: str, wait_s: float = ANSWER_WITHIN_S) -> dict | None:
+    """list_tools(name) within wait_s; None while it is still starting (call again to keep waiting)."""
+    _entry(name)
+    task = _listings.get(name)
+    if task is None:
+        task = _listings[name] = asyncio.ensure_future(list_tools(name))
+
+        def finished(t: asyncio.Task) -> None:
+            if _listings.get(name) is t:
+                _listings.pop(name, None)
+            if not t.cancelled():
+                t.exception()  # retrieved: a failure nobody waited for is not logged as unhandled
+
+        task.add_done_callback(finished)
+    if not await _within(task, wait_s):
+        return None
+    return task.result()
+
+
+# ------------------------------------------------------------------ describing them
+
+
+def overview() -> list[dict]:
+    """Each enabled server: its state and what the cache knows of its tools."""
+    out = []
+    status = {s["name"]: s for s in services().snapshot()}
+    for entry in enabled_entries():
+        item = cached(entry)
+        row: dict[str, Any] = {"server": entry.name, "state": status.get(entry.name, {}).get("state")}
+        if item is None:
+            row["tools"] = None
+            row["note"] = f'not listed yet: mcp_tools("{entry.name}") starts it and lists its tools'
+        else:
+            row["listed_at"] = item.get("listed_at")
+            row["tools"] = [
+                {"name": t["name"], "description": _first_line(t["description"], TOOL_LINE_CHARS)}
+                for t in item["tools"]
+            ]
+        out.append(row)
+    return out
+
+
+def session_text(budget: int) -> str:
+    """The tools part of a cloud session's start: every enabled server and its tools, one line each."""
+    from .session_bridge import _size
+
+    rows = overview()
+    head = (
+        "Local MCP servers on this PC. Call a tool with mcp_call(server, tool, arguments); "
+        "mcp_tools(server) gives each tool's full parameters."
+    )
+    if not rows:
+        return head + "\n(none are enabled in winhand)"
+    parts = [head]
+    used = _size(head)
+    cut = 0
+    for row in rows:
+        entry = next(e for e in enabled_entries() if e.name == row["server"])
+        item = cached(entry)
+        lines = [f"## {row['server']}"]
+        if item is None:
+            lines.append(f'(not listed yet: mcp_tools("{row["server"]}") starts it and lists its tools)')
+        else:
+            if item.get("instructions"):
+                lines.append(_first_line(item["instructions"], INSTRUCTIONS_CHARS))
+            lines += [
+                f"- {t['name']}: {t['description']}" if t["description"] else f"- {t['name']}"
+                for t in row["tools"]
+            ]
+        block = "\n".join(lines)
+        if used + _size(block) + 2 > budget - 80:
+            names = ", ".join(t["name"] for t in row["tools"] or [])
+            short = f"## {row['server']}\n" + (names or "(not listed yet)")
+            if used + _size(short) + 2 > budget - 80:
+                cut += 1
+                continue
+            block = short
+        parts.append(block)
+        used += _size(block) + 2
+    if cut:
+        parts.append(f"{cut} more server(s) left out for lack of room; mcp_tools() lists them all.")
+    return "\n\n".join(parts)
