@@ -97,20 +97,20 @@
 ## Source coverage
 
 来源：
-- `docs/workspace-layer.md`（7a7c135，complete）；
+- `docs/workspace-layer.md`（c8b652c，complete）；
 - `docs/comet/changes/client-hooks/research.md`：Codex 源码和 Claude Code 文档中的事实，逐条注明出处（complete）；
 - 用户原始需求：“本地的 hooks……在云端也能用”。
 
 | 来源条目与位置 | 读取状态 | 需要保留的内容 | Spec 位置 | 验收 ID | 覆盖状态 | 理由或替代关系 |
 |---|---|---|---|---|---|---|
-| S1：§1 规则来源 1“或交给一个命令去判断” | complete | `guards.toml` 的 command 规则 | action-guard R-cmd | A8、A9 | covered | 只允许写在全局文件中，见 D4 |
-| S2：§1 规则来源 2（Claude Code、Codex hooks 翻译） | complete | 动作到工具名的对应、协议 | hooks R2–R5 | A1–A6 | covered | 按 research 修正：Codex 写入为 `apply_patch`，读文件不交给 Codex |
-| S3：§1“外部 hooks 只运行已信任的” | complete | Codex `trusted_hash`、Claude Code 工作区信任 | hooks R1 | A3、A4 | covered | Claude Code 没有逐个 hook 的信任，按工作区信任处理 |
-| S4：§1 “未信任的只在 context() 里列出” | complete | 可见性 | workspace-context R-hooks | A7 | covered | |
-| S5：待定“外部 hooks 默认运行还是默认关闭” | complete | 默认值 | hooks R6 | A10 | covered | 默认运行来源工具已信任的，见 D2 |
+| S1：§1 规则来源 1“或交给一个命令去判断” | complete | `guards.toml` 的 command 规则 | action-guard R2、R4、R13 | A8、A9 | covered | 只允许写在全局文件中，见 D4 |
+| S2：§1 规则来源 2（Claude Code、Codex hooks 翻译） | complete | 动作到工具名的对应、协议 | hooks R1–R6 | A1–A6 | covered | 按 research 修正：Codex 写入为 `apply_patch`，读文件不交给 Codex |
+| S3：§1“外部 hooks 只运行已信任的” | complete | Codex `trusted_hash`、Claude Code 工作区信任 | hooks R2、R3 | A3、A4 | covered | Claude Code 没有逐个 hook 的信任，按工作区信任处理 |
+| S4：§1 “未信任的只在 context() 里列出” | complete | 可见性 | workspace-context R13 | A7 | covered | |
+| S5：待定“外部 hooks 默认运行还是默认关闭” | complete | 默认值 | hooks R7 | A10 | covered | 默认运行来源工具已信任的，见 D2 |
 | S6：§2 来源表“工具”列 `.winhand/profiles/` | complete | | — | — | non-goal | 仓库自带的终端配置等于让仓库决定运行什么，另开 change 设计信任机制 |
 | S7：§3 生命周期桥（UserPromptSubmit、Stop、PreCompact 等） | complete | | — | — | non-goal | P2 |
-| S8：用户原始需求“本地的 hooks” | complete | 本机 hooks 在云端经 winhand 生效 | hooks R1–R5 | A1–A6 | covered | 只限 PreToolUse；其余事件属于 P2 |
+| S8：用户原始需求“本地的 hooks” | complete | 本机 hooks 在云端经 winhand 生效 | hooks R1–R6 | A1–A6 | covered | 只限 PreToolUse；其余事件属于 P2 |
 
 # Non-goals
 
