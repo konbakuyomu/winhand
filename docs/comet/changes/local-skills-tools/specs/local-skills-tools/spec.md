@@ -137,7 +137,12 @@ Scenario: (A4) 缓存损坏
   - 约 40 秒内没有结果时返回 `still_running`、`call_id` 和 `next`；`mcp_call(call_id=...)` 再等最多约 40 秒；
   - `call_id` 是 `m` 加 12 位随机十六进制数，winhand 重启后旧的 id 不会对上新的调用；`history()` 把它记为这次调用的 `run_id`，连接出错后可以从那里找回；
   - 结果只交出一次：同时有两个等待时，一个拿到结果，另一个得到“已经交出”的工具错误；没人取的结果 10 分钟后丢弃；
-  - 超过 `timeout_s` 仍没有回答时返回工具错误（`<server> did not answer tools/call within … s`，stdio 和 HTTP 服务相同）；stdio 服务还会收到 `notifications/cancelled`（在单独的线程里发送，卡住的服务不会拖住 agent；ping 和 initialize 不发）；服务继续可用；
+  - 超过 `timeout_s` 仍没有回答时返回工具错误（`<server> did not answer tools/call within … s`，stdio 和 HTTP 服务相同；发送请求的时间也计在内）；服务继续可用。对 stdio 服务还会：
+    - 发 `notifications/cancelled`（ping 和 initialize 不发）；
+    - 把这个请求记为“没有回答”。和客户端经独立地址发的请求一样，没有回答超过 30 秒时，健康检查会 ping 这个服务，连 ping 也不回、超过 120 秒时重启它。调用方还在 `timeout_s` 之内等待的请求不算，所以长时间运行的工具不会让服务被当成卡住；
+  - 发给 stdio 服务的消息在各自的线程里写入管道，不占用 agent 的事件循环和公用线程池。服务停止读取输入（管道写满）时：
+    - 写入卡住超过 ping 的等待时间，就直接判定为“没有响应”，不再排队发 ping；
+    - 停止服务时关闭输入不会卡住，照常等 3 秒后结束进程树；
   - 服务不存在或已停用：工具错误，列出启用的服务；没给 `server`/`tool` 也没给 `call_id`：工具错误；`call_id` 不存在：工具错误；`timeout_s` 不大于 0：工具错误。
 - 服务在 `mcp_call` 期间向客户端发起的请求（sampling、elicitation、roots）：没有客户端经 `/mcp/<name>` 连着这个服务时回答“没有客户端可以回答”；有时交给那个客户端（与独立地址原有的行为相同）。
 - HTTP 服务：列出工具时用一个连接跟随全部分页并取服务说明；每次调用单独连接。

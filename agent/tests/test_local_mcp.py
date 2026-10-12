@@ -514,3 +514,49 @@ async def test_an_http_server_past_its_timeout_says_so(winhand_home):
         await every.close()
         server.should_exit = True
         await task
+
+
+# ------------------------------------------------------------------ round 3 of the verification
+
+
+async def test_a_long_call_still_awaited_does_not_make_the_server_look_stuck(services, monkeypatch):
+    monkeypatch.setattr(mcp_bridge, "CHECK_AFTER_S", 0.05)
+    monkeypatch.setattr(mcp_bridge, "PING_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(mcp_bridge, "RESTART_AFTER_S", 0.1)
+    result, key = await local_mcp.start_call("fake", "freeze", {"seconds": 1.5}, 20, wait_s=0.3)
+    assert result is None
+    fake = services.services["fake"]
+    pid = fake.process.pid
+    assert not fake.unanswered  # its caller still waits within timeout_s
+    assert await fake.check_health(before_call=True) is None
+    done, _ = await local_mcp.wait_call(key, 20)
+    assert done["content"][0]["text"] == "thawed" and fake.process.pid == pid  # not restarted
+
+
+async def test_a_server_that_stopped_reading_is_judged_and_stopped_without_hanging(monkeypatch):
+    import threading
+    import time
+
+    entry = ServerEntry(name="deaf", command=sys.executable, args=["-c", "import time; time.sleep(60)"])
+    process = mcp_bridge.StdioProcess(entry, asyncio.get_running_loop(), lambda m: None, lambda c: None)
+    blob = {"jsonrpc": "2.0", "method": "x", "params": {"blob": "x" * 4_000_000}}  # more than a pipe holds
+    threading.Thread(target=mcp_bridge._quietly, args=(process.send, blob), daemon=True).start()
+    for _ in range(100):
+        if process.write_stuck_for() > 0.3:
+            break
+        await asyncio.sleep(0.05)
+    assert process.write_stuck_for() > 0.3
+    monkeypatch.setattr(mcp_bridge, "PING_TIMEOUT_S", 0.2)
+    service = mcp_bridge.Service(entry)
+    service.process = process
+    before = threading.active_count()
+    for _ in range(5):
+        assert not await service.responds()  # no ping queued behind the blocked write
+    assert threading.active_count() <= before
+    started = time.monotonic()
+    await asyncio.to_thread(process.stop)  # closing stdin would wait for the blocked write
+    for _ in range(60):
+        if not process.alive():
+            break
+        await asyncio.sleep(0.05)
+    assert not process.alive() and time.monotonic() - started < 8

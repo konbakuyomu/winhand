@@ -85,6 +85,30 @@ def _quietly(function, *args) -> None:
         function(*args)
 
 
+def _send_off_loop(loop: asyncio.AbstractEventLoop, process: StdioProcess, message: dict) -> asyncio.Future:
+    """process.send(message) on a daemon thread; a future that is done once it was written."""
+    future = loop.create_future()
+
+    def settle(error: BaseException | None) -> None:
+        if not future.done():
+            if error is None:
+                future.set_result(None)
+            else:
+                future.set_exception(error)
+
+    def work() -> None:
+        try:
+            process.send(message)
+            error = None
+        except BaseException as exc:  # noqa: BLE001 - handed to the waiting caller
+            error = exc
+        with contextlib.suppress(RuntimeError):  # the loop is closed: nobody waits any more
+            loop.call_soon_threadsafe(settle, error)
+
+    threading.Thread(target=work, name=f"mcp-{process.name}-send", daemon=True).start()
+    return future
+
+
 class StdioProcess:
     """One running stdio MCP server: newline-delimited JSON-RPC on stdin/stdout. Threads do
     the pipe work (asyncio pipes differ between event loops on Windows)."""
@@ -122,6 +146,7 @@ class StdioProcess:
         self.on_exit = on_exit
         self.stderr: collections.deque[str] = collections.deque(maxlen=200)
         self._write_lock = threading.Lock()
+        self._writing_since: float | None = None
         log_dir = home() / "logs" / "mcp"
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = log_dir / f"{entry.name}.log"
@@ -173,13 +198,27 @@ class StdioProcess:
         data = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
         assert self.proc.stdin is not None
         with self._write_lock:
-            self.proc.stdin.write(data)
-            self.proc.stdin.flush()
+            self._writing_since = time.monotonic()
+            try:
+                self.proc.stdin.write(data)
+                self.proc.stdin.flush()
+            finally:
+                self._writing_since = None
+
+    def write_stuck_for(self) -> float:
+        """Seconds the current write to the server's stdin has been blocked (0 when none is)."""
+        since = self._writing_since
+        return time.monotonic() - since if since is not None else 0.0
 
     def stop(self) -> None:
-        with contextlib.suppress(OSError):
-            if self.proc.stdin:
-                self.proc.stdin.close()  # a well-behaved server exits on EOF
+        def close_stdin() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                if self.proc.stdin:
+                    self.proc.stdin.close()  # a well-behaved server exits on EOF
+
+        # a thread of its own: closing waits for a write blocked on a full pipe, which only ends
+        # once the process is gone
+        threading.Thread(target=close_stdin, name=f"mcp-{self.name}-close", daemon=True).start()
         try:
             self.proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
@@ -336,22 +375,20 @@ class Service:
         process = self.process
         assert process is not None
         deadline = loop.time() + timeout
-        if method not in ("initialize", "ping"):
-            # like a client's request: left unanswered, it gets the server checked and restarted
-            self.unanswered[uid] = time.time()
+        sent_at = time.time()
         try:
-            # the send counts against the timeout too: a stuck server stops reading its stdin
-            await asyncio.wait_for(
-                asyncio.to_thread(
-                    process.send, {"jsonrpc": "2.0", "id": uid, "method": method, "params": params}
-                ),
-                timeout,
-            )
+            # the send counts against the timeout too (a stuck server stops reading its stdin), on a
+            # thread of its own: one blocked on a full pipe must not hold a worker of the shared pool
+            message = {"jsonrpc": "2.0", "id": uid, "method": method, "params": params}
+            await asyncio.wait_for(_send_off_loop(loop, process, message), timeout)
             return await asyncio.wait_for(future, max(0.0, deadline - loop.time()))
         except (TimeoutError, asyncio.CancelledError):
-            # tell the server to stop (never for initialize, which the spec forbids, or a ping). A
-            # thread of its own: a stuck server's full pipe must not block this loop
+            # the caller gave up. Only now does the request count as unanswered (a long call that is
+            # still awaited is not a sign of a stuck server): if no answer comes, the health check
+            # pings the server and restarts it. Never for initialize (the spec forbids cancelling it)
+            # or a ping (the health check's own)
             if method not in ("initialize", "ping") and process.alive():
+                self.unanswered[uid] = sent_at
                 cancelled = {"requestId": uid, "reason": "the caller stopped waiting"}
                 message = {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": cancelled}
                 threading.Thread(target=_quietly, args=(process.send, message), daemon=True).start()
@@ -555,6 +592,8 @@ class Service:
         """Can the server answer a ping right now? A busy server still can; a stuck one cannot."""
         if not self.process or not self.process.alive():
             return False
+        if self.process.write_stuck_for() > PING_TIMEOUT_S:
+            return False  # it has stopped reading: a ping would only block behind that write
         try:
             await self._internal("ping", {}, PING_TIMEOUT_S)
         except (TimeoutError, ServiceError, OSError, ValueError):

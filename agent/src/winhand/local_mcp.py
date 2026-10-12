@@ -207,7 +207,8 @@ def _http_client(entry: ServerEntry, timeout: float):
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
-    return Client(StreamableHttpTransport(entry.url, headers=entry.headers or None), timeout=timeout)
+    # the client's own read timeout comes later: the caller's asyncio.timeout decides, with its message
+    return Client(StreamableHttpTransport(entry.url, headers=entry.headers or None), timeout=timeout + 5)
 
 
 async def _http_request(entry: ServerEntry, method: str, params: dict, timeout: float) -> dict:
