@@ -222,7 +222,7 @@ N3 按决定写进规格。N4 修过了头，又有一处没修到：
 
 **正式检查（d30181a、c2741ea）**
 - 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 447 passed，40 skipped。
-- `agent.yml`：b40561f（run 38240456862）ubuntu、windows 都通过；c2741ea（run 38241999269）结果见归档提交说明。
+- `agent.yml`：b40561f（run 38240456862）ubuntu、windows 都通过；c2741ea（run 38241999269）ubuntu、windows 都通过。
 
 ## 结论
 
