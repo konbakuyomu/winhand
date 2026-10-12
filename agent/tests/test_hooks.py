@@ -220,7 +220,7 @@ async def test_a_failing_hook_lets_the_call_through(env, mode):
 
 
 async def test_a_line_typed_into_a_shell_is_shown_to_hooks(env):
-    claude_project_hook(env, "deny-rm", "Bash")
+    claude_project_hook(env, "deny-word", "Bash")
     fake = [sys.executable, "-u", FAKE_APP]
     async with Client(build_server(Config())) as client:
         sid = (
@@ -237,9 +237,11 @@ async def test_a_line_typed_into_a_shell_is_shown_to_hooks(env):
         ).structured_content["session"]["id"]
         try:
             refused = await client.call_tool(
-                "session_send", {"id": sid, "text": "echo rm -rf build", "submit": True}, raise_on_error=False
+                "session_send",
+                {"id": sid, "text": "echo FORBIDDEN-WORD build", "submit": True},
+                raise_on_error=False,
             )
-            assert refused.is_error and "no rm -rf" in text_of(refused)
+            assert refused.is_error and "no forbidden word" in text_of(refused)
             ok = await client.call_tool("session_send", {"id": sid, "text": "echo fine", "submit": True})
             assert (
                 "fine" in ok.structured_content["output"] and "rm -rf" not in ok.structured_content["output"]

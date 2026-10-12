@@ -24,9 +24,9 @@ if mode == "deny-src":
     if "src/" in text.replace("\\\\", "/"):
         print("no writes in src/ in this phase", file=sys.stderr)
         sys.exit(2)
-elif mode == "deny-rm":
-    if "rm -rf" in text:
-        print("no rm -rf", file=sys.stderr)
+elif mode == "deny-word":  # a word no guard rule of the machine running the tests would know
+    if "FORBIDDEN-WORD" in text:
+        print("no forbidden word", file=sys.stderr)
         sys.exit(2)
 elif mode == "by-command":
     if "DENY" in text:
