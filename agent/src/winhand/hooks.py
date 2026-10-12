@@ -163,8 +163,6 @@ def _serde_int(text: str) -> int | float | _OutOfRange:
         return OUT_OF_RANGE
 
 
-
-
 def _clip(text: str, limit: int = 300) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
