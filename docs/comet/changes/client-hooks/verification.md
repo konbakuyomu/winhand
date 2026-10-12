@@ -159,6 +159,39 @@ P3 的核对方法：Verifier 把 `_main_checkout` 与 Codex 的 `resolve_root` 
 | N4 | Codex 的 hooks 文件里有 `1e400`（超出范围）或 `-0`（serde_json 读成浮点数）时 Codex 整份拒绝，winhand 照常读 | 小 | 按 serde_json 读数：`1e400` 无法读取，`-0` 是浮点数 |
 | 规格 | 链接那句话的范围；null 规则对两种来源都适用 | 小 | 规格改正 |
 
-## 第 6 轮
+## 第 6 轮（cde2e9f）
 
-（待填）
+**正式检查**
+- 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 438 passed，40 skipped。
+- `agent.yml`（run 38217738867，cde2e9f）：ubuntu、windows 都通过。
+
+**独立 Verifier 结论**：A1–A10 全部通过，没有阻断问题。第 5 轮的 N1（命名管道）、N2（链接的范围）都已修好，前任 Verifier 的实验和新增的情况都与 Codex 一致：
+- 经链接的上级目录到达的项目；
+- 嵌套的 `sub/.codex`；
+- 链接的 `CODEX_HOME`；
+- 用户层 `hooks.json` 本身是链接；
+- 直接到达或经链接到达的工作树。
+
+N3 按决定写进规格。N4 修过了头，又有一处没修到：
+
+| # | 问题 | 级别 | 处理（第 7 轮） |
+|---|---|---|---|
+| R6-1 | `1e400` 出现在 Codex 不读取的地方（组里不认识的键、不认识的事件名下），Codex 照常加载，winhand 却整份拒绝，已信任的 hook 不运行。第 6 轮引入，实测 | 次要（更松） | 读数时不再报错，而是标成“超出范围”；只有它出现在 handler 里（serde 会读 handler 的每个值）或 mcp_tool 的 `input` 里时才整份拒绝 |
+| R6-2 | handler 里三百多位的整数：serde_json 读成浮点数后溢出，Codex 整份拒绝；winhand 照常读 | 小（更严） | 整数按 serde_json 的读法：超出 64 位整数范围的是浮点数，溢出的标成“超出范围”；超过 Python 位数上限的同样处理 |
+| R6-3 | client-rules 的仓库识别把 git `config` 限在 1 MB，一个 1.26 MB 的 `config`（14000 个分支段）在第 5 轮能找到，第 6 轮找不到 | 小（回退） | 上限提到 64 MB；workspace-context 规格 R8 写明只读普通文件和各自的上限 |
+| R6-4 | 规格没写数字的读法；“不认识的键照常读”与 R6-1、R6-2 的情况不符 | 小 | 规格写明数字的读法和例外 |
+| R6-5 | 规格说 `disableAllHooks` 是“唯一的例外”，但托管设置文件里的 `disableAllHooks`、`allowManagedHooksOnly` 同样不随 Claude Code 的整份跳过 | 疑似 / 小 | 规格写明；这些文件只有管理员能写 |
+
+**Verifier 对“多运行或少运行 hook”的回答**
+- 少运行：R6-1（已修）；超过 4300 位的整数（已一并修）；N3 写明的例外和 R6-5（已写进规格）。
+- 多运行：R6-2（已修）；第 4 轮已列的差异（重复键、孤立代理字符、`managed_dir` 不是路径、TOML 日期时间）。
+
+## 第 7 轮
+
+**正式检查**
+- 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 443 passed，40 skipped。
+- 新增测试：
+  - 组里和不认识的事件下的 `1e400` 不影响加载，已信任的 hook 照常运行；
+  - handler 里和 mcp_tool `input` 里三百多位的整数让整份文件被拒绝；
+  - 整数的各个边界；
+  - 1 MB 以上的 git `config` 仍能读出远端。

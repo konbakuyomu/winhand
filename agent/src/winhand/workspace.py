@@ -1005,7 +1005,7 @@ def _git_dirs(root: str) -> tuple[str | None, str | None]:
 
 
 def _remote_urls(common: str) -> list[str]:
-    text = read_git_record(os.path.join(common, "config"), limit=1_000_000, follow=True)
+    text = read_git_record(os.path.join(common, "config"), limit=64_000_000, follow=True)
     if text is None:
         return []
     urls, in_remote = [], False

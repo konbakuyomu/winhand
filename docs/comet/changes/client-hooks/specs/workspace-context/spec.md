@@ -110,6 +110,7 @@
 - 每个候选目录先找它的项目根，再读 git 配置里所有 remote 的 `url`：
   - `.git` 是文件夹时，读其中的 `config`；
   - `.git` 是文件（worktree）时，按 `gitdir:` 找到 git 目录，若有 `commondir`，读共用目录里的 `config`。
+  - 这些记录（`.git` 文件、`commondir`、`config`）只读普通文件（可经链接到达）：`.git` 文件、`commondir` 最多 64 KiB，`config` 最多 64 MB；命名管道、设备文件等当作没有，不会让查找卡住。
 - 同一项目根只算一次。多个检出目录匹配时，取 git 目录中 `index`、`HEAD`、`FETCH_HEAD` 修改时间最新的那个，其余按时间列在 `other_checkouts`，最多 30 个、约 4,000 字符，再多只计数（`other_checkouts_more`）。
 - 结果：
   - 返回中带 `repo`：`name`、`checkout`、`source`、`other_checkouts`；

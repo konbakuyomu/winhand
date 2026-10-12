@@ -129,15 +129,46 @@ def _no_constant(name: str):
     raise ValueError(f"{name} is not JSON")
 
 
-def _serde_float(text: str) -> float:
+class _OutOfRange:
+    """A number serde_json cannot hold (1e400, a 309-digit integer). It only makes Codex drop the
+    file where serde reads the value (inside a handler); under a key it ignores, it is skipped."""
+
+    def __repr__(self) -> str:
+        return "<number out of range>"
+
+
+OUT_OF_RANGE = _OutOfRange()
+
+
+def _serde_float(text: str) -> float | _OutOfRange:
     value = float(text)
-    if not math.isfinite(value):
-        raise ValueError(f"number out of range: {text[:40]}")
-    return value
+    return value if math.isfinite(value) else OUT_OF_RANGE
 
 
-def _serde_int(text: str) -> int | float:
-    return -0.0 if text == "-0" else int(text)  # serde_json reads -0 as a float
+def _serde_int(text: str) -> int | float | _OutOfRange:
+    """As serde_json reads a whole number: -0 and anything past u64 / i64 are floats."""
+    if text == "-0":
+        return -0.0
+    try:
+        value = int(text)
+    except ValueError:  # longer than Python allows: far past what a float holds
+        return OUT_OF_RANGE
+    if -(2**63) <= value < 2**64:
+        return value
+    try:
+        return float(value)
+    except OverflowError:
+        return OUT_OF_RANGE
+
+
+def _out_of_range(value: object) -> bool:
+    if value is OUT_OF_RANGE:
+        return True
+    if isinstance(value, dict):
+        return any(_out_of_range(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_out_of_range(v) for v in value)
+    return False
 
 
 def _clip(text: str, limit: int = 300) -> str:
@@ -312,6 +343,8 @@ def _codex_file_problem(data: object, kind: str) -> str | None:
 def _codex_handler_problem(h: object) -> str | None:
     if not isinstance(h, dict):
         return "it is not a table"
+    if _out_of_range(h):  # serde reads every value of a handler, its unknown keys too
+        return "a number in it is out of range"
     kind = h.get("type")
     if not isinstance(kind, str):
         return "it has no type"

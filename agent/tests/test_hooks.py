@@ -974,3 +974,52 @@ def test_numbers_serde_cannot_read_make_codex_drop_the_file(env, number):
     path = codex_file(env, {"hooks": {}}, raw=raw.encode())
     found, errors = hooks.discover(str(env["root"]))
     assert not [h for h in found if h.file == str(path)] and errors and errors[0]["file"] == str(path)
+
+
+# ------------------------------------------------------------------ round 7
+
+
+def test_an_odd_number_where_codex_does_not_look_leaves_the_file_alone(env):
+    handler = codex_command("deny-src")
+    data = {"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [handler]}]}}
+    raw = json.dumps(data).replace('"matcher": "Write"', '"matcher": "Write", "note": 1e400')
+    raw = raw.replace('{"PreToolUse"', '{"Notification": [{"x": -1e400}], "PreToolUse"')
+    codex_file(env, data, raw=raw.encode())
+    found, errors = hooks.discover(str(env["root"]))
+    assert errors == [] and [h.status for h in found if h.source == "codex"] == ["trusted"]
+
+
+@pytest.mark.parametrize("where", ["handler", "input"])
+def test_a_whole_number_too_long_for_serde_makes_codex_drop_the_file(env, where):
+    long = "9" * 320
+    data = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [codex_command("by-command")]}]}}
+    raw = json.dumps(data)
+    if where == "handler":
+        raw = raw.replace('"type": "command"', f'"type": "command", "weight": {long}')
+    else:
+        raw = raw.replace(
+            '"hooks": [{"type"',
+            f'"hooks": [{{"type": "mcp_tool", "server": "s", "tool": "t", "input": {{"n": {long}}}}}, {{"type"',
+        )
+    path = codex_file(env, data, raw=raw.encode())
+    found, errors = hooks.discover(str(env["root"]))
+    assert not [h for h in found if h.file == str(path)] and "out of range" in errors[0]["error"]
+
+
+def test_whole_numbers_read_as_serde_json_reads_them():
+    assert hooks._serde_int("-0") == 0.0 and isinstance(hooks._serde_int("-0"), float)
+    assert hooks._serde_int(str(2**64 - 1)) == 2**64 - 1
+    assert isinstance(hooks._serde_int(str(2**64)), float)
+    assert hooks._serde_int("9" * 400) is hooks.OUT_OF_RANGE
+    assert hooks._serde_int("9" * 5000) is hooks.OUT_OF_RANGE
+
+
+def test_a_large_git_config_still_names_the_remote(tmp_path):
+    common = tmp_path / ".git"
+    common.mkdir()
+    sections = "".join(
+        f'[branch "b{i}"]\n\tremote = origin\n\tmerge = refs/heads/b{i}\n' for i in range(30_000)
+    )
+    (common / "config").write_text('[remote "origin"]\n\turl = https://github.com/o/r.git\n' + sections)
+    assert (common / "config").stat().st_size > 1_000_000
+    assert workspace._remote_urls(str(common)) == ["https://github.com/o/r.git"]

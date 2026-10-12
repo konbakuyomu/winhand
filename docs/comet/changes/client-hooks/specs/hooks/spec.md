@@ -53,7 +53,8 @@ Codex：
 - 链接的 git 工作树（`.git` 是文件）：只有 git 自己的记录都对得上时才算（与 Codex 相同；这些记录只读不超过 64 KiB 的普通文件，不跟随链接，命名管道之类不会让读取卡住）：工作树的 git 文件夹在 `<公共目录>/worktrees/` 下，它的 `gitdir` 指回这个工作树，`commondir` 指向那个公共目录，主检出目录的 `.git` 就是这个公共目录。算作工作树时，按 Codex 的做法，工作树里存在 `.codex` 文件夹的那几级，hooks 从主检出目录里对应的 `.codex` 读取；信任按上一条，依次看工作树的这一级、工作树根、主检出目录。
 - Codex 会整份拒绝的 hooks 文件，其中的 hooks 一个都不运行，在 `context()` 中报出原因。按 Codex 读文件的方式（serde）判断：
   - 整份拒绝：`hooks.json` 顶层有 `description`、`hooks` 以外的键；以 UTF-8 字节顺序标记开头；任一已知事件（不只是 PreToolUse）下的组或 handler 类型不对，例如 handler 没有 `type`、`type` 不认识（如 `http`）、command handler 没有 `command`、`timeout` 不是非负整数、`async` 不是布尔值、mcp_tool handler 没有 `server` 或 `tool`；
-  - 不影响：组和 handler 里 Codex 不认识的键（例如 `description`、`shell`、`args`、`if`）、不认识的事件名、`matcher` 为 null，Codex 都忽略，winhand 也照常读取；可选字段（`commandWindows`、`statusMessage`、`timeout` 等）设为 null，等于没设；
+  - 不影响：组和 handler 里 Codex 不认识的键（例如 `description`、`shell`、`args`、`if`）、不认识的事件名、`matcher` 为 null，Codex 都忽略，winhand 也照常读取（handler 里不认识的键的值除外，见下条“数字”）；可选字段（`commandWindows`、`statusMessage`、`timeout` 等）设为 null，等于没设；
+  - 数字按 serde_json 的读法：`-0` 和超出 64 位整数范围的整数是浮点数（所以不能当 `timeout`）；超出浮点数范围的数（`1e400`、三百多位的整数）只在 Codex 实际读取的地方让整份文件被拒绝，即 handler 里的任何键（包括不认识的）和 mcp_tool 的 `input`；在组里不认识的键、不认识的事件名下面，Codex 只检查语法，winhand 也不管；
   - 只跳过一个 handler：在 Windows 上 `commandWindows` 设为空字符串，或命令只有空白（Codex 跳过这一个）。
 
 Claude Code：
@@ -65,7 +66,7 @@ Claude Code：
 - 托管设置里 `disableAllHooks = true` 时，所有 hooks（包括托管的）都是 `disabled`；其他设置文件里的 `disableAllHooks` 只关掉非托管的。
 
 两种来源都适用：
-- 可选字段设为 null 等于没设。（Claude Code 据其代码会因一个写错的 hook 整份跳过设置文件；winhand 不复刻 Claude Code 的设置校验，这样的文件里的 hooks 照常读取，只会更严。唯一的例外：这样的文件里的 `disableAllHooks` 在 winhand 中仍生效；仓库用一份写对的文件同样能做到，不带来新的绕过。）
+- 可选字段设为 null 等于没设。（Claude Code 据其代码会因一个写错的 hook 整份跳过设置文件；winhand 不复刻 Claude Code 的设置校验，这样的文件里的 hooks 照常读取，只会更严。例外：这样的文件里的 `disableAllHooks` 在 winhand 中仍生效，仓库用一份写对的文件同样能做到，不带来新的绕过；托管设置文件里的 `disableAllHooks`、`allowManagedHooksOnly` 同样仍生效，这些文件只有管理员能写。）
 - `type` 不是 `command` 的 hook、带 `async` 的 hook：`unsupported`，不运行。Claude Code 的 hook 带 `if`、`once`、`asyncRewake` 时同样不运行；这些键 Codex 不认识、直接忽略，所以 Codex 的 hook 照常运行。
 - 字段类型不对的 hook（`command` 不是字符串、`timeout` 不是秒数，Codex 要求整数；`args` 不是列表）、matcher 不是有效正则的 hook：`unsupported`，写明原因，不运行，也不影响其他 hook 和这次调用。
 - 配置文件只读普通文件，最多 4 MB；设备文件、过大的文件按“无法读取”报告。JSON 里的 `NaN`、`Infinity` 不是合法 JSON，整份文件按“无法读取”处理；`timeout` 不能是非有限数。
