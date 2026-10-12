@@ -383,16 +383,60 @@ async def test_a_cache_entry_of_the_wrong_shape_is_no_cache(client, services, wi
 
 
 def test_the_tools_part_holds_its_budget_after_masking(services, monkeypatch):
+    """Each line fits before masking; masked, every secret grows from 7 to 16 characters."""
     from winhand import redact
 
     monkeypatch.setattr(redact, "current", lambda: redact.Redactor(values={"value": ["appleng"]}))
-    tools = [
-        {"name": f"t{i}", "description": "C:\\Users\\appleng\\a appleng appleng " + "x" * 60}
-        for i in range(200)
-    ]
+    tools = [{"name": f"t{i:02}", "description": "appleng " * 18} for i in range(50)]
     local_mcp.remember(services.services["fake"].entry, tools)
     text = local_mcp.session_text(session_bridge.BUDGET_CHARS)
     assert "appleng" not in text and session_bridge._size(text) <= session_bridge.BUDGET_CHARS
+    assert "- t49: «redacted" in text  # every tool still listed with its line
+
+
+def test_a_secret_in_a_long_skill_description_is_counted(home):
+    from winhand import redact, workspace
+
+    write(
+        home / ".agents" / "skills" / "long" / "SKILL.md",
+        f"---\nname: long\ndescription: {'x' * 295} appleng-secret-value {'y' * 40}\n---\n",
+    )
+    redact.remember("appleng-secret-value")
+    try:
+        out = workspace.context(Config())
+    finally:
+        redact.reset()
+    (skill,) = [s for s in out["skills"] if s["name"] == "long"]
+    assert "appleng" not in skill["description"] and out["redacted"] >= 1 and out["redaction_note"]
+
+
+async def test_mcp_tools_returns_what_it_just_listed_even_if_the_cache_cannot_be_written(
+    client, services, monkeypatch
+):
+    local_mcp.remember(services.services["fake"].entry, [{"name": "stale_tool"}])
+
+    def refuse(*args):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(local_mcp.os, "replace", refuse)
+    listed = (await client.call_tool("mcp_tools", {"server": "fake"})).structured_content
+    assert "echo" in {t["name"] for t in listed["tools"]} and "stale_tool" not in str(listed)
+
+
+async def test_a_server_stuck_on_mcp_call_is_restarted(client, services, monkeypatch):
+    monkeypatch.setattr(mcp_bridge, "CHECK_AFTER_S", 0.1)
+    monkeypatch.setattr(mcp_bridge, "PING_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(mcp_bridge, "RESTART_AFTER_S", 0.2)
+    first = (await client.call_tool("mcp_call", {"server": "fake", "tool": "pid"})).structured_content
+    stuck = await client.call_tool(
+        "mcp_call",
+        {"server": "fake", "tool": "freeze", "arguments": {"seconds": 20}, "timeout_s": 0.3},
+        raise_on_error=False,
+    )
+    assert stuck.is_error and services.services["fake"].unanswered  # left for the health check
+    await asyncio.sleep(0.3)
+    again = (await client.call_tool("mcp_call", {"server": "fake", "tool": "pid"})).structured_content
+    assert again["result"] != first["result"]  # a new process answered
 
 
 async def test_a_refused_skill_keeps_its_description_to_itself(home, winhand_home):

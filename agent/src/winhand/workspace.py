@@ -910,7 +910,9 @@ def _collect(cfg: Config, root: str | None, start: str | None, target: str | Non
 # ------------------------------------------------------------------ skills
 
 
-def _skills_in(folder: str, scope: str, refused=None, desc_chars: int = DESCRIPTION_CHARS) -> list[dict]:
+def _skills_in(
+    folder: str, scope: str, refused=None, desc_chars: int = DESCRIPTION_CHARS, mask=None
+) -> list[dict]:
     try:
         entries = sorted(os.scandir(folder), key=lambda e: e.name.lower())
     except OSError:
@@ -931,7 +933,9 @@ def _skills_in(folder: str, scope: str, refused=None, desc_chars: int = DESCRIPT
         description = " ".join(" ".join([meta.get("description", ""), meta.get("when_to_use", "")]).split())
         if len(description) > desc_chars:
             # masked before the cut: a secret cut in two would no longer be recognised
-            description = redact.mask(description)[: desc_chars - 1] + "…"
+            description = (mask or redact.mask)(description)
+            if len(description) > desc_chars:
+                description = description[: desc_chars - 1] + "…"
         skill = {
             "name": meta.get("name") or entry.name,
             "description": description,
@@ -949,10 +953,13 @@ def skill_folders(cfg: Config, root: str | None) -> list[tuple[str, str]]:
     return folders + [(_expand(p), "user") for p in _setting(cfg, "skills", DEFAULT_SKILLS)]
 
 
-def skills(cfg: Config, root: str | None, refused=None, desc_chars: int = DESCRIPTION_CHARS) -> list[dict]:
+def skills(
+    cfg: Config, root: str | None, refused=None, desc_chars: int = DESCRIPTION_CHARS, mask=None
+) -> list[dict]:
+    """`mask`: masks a long description before it is cut (default: redact.mask)."""
     found: dict[str, dict] = {}
     for folder, scope in skill_folders(cfg, root):
-        for skill in _skills_in(folder, scope, refused, desc_chars):
+        for skill in _skills_in(folder, scope, refused, desc_chars, mask):
             found.setdefault(skill["name"].lower(), skill)
     return sorted(found.values(), key=lambda s: (s["scope"] != "project", s["name"].lower()))
 
@@ -1024,8 +1031,8 @@ def skill(cfg: Config, name: str, path: str | None = None, repo: str | None = No
                 text = "".join(lines[:kept])
             else:
                 out["truncated"] = (
-                    f"showing the first {BUDGET_CHARS} characters of its first line, which is longer; "
-                    f"read it with fs_read(path={found['path']!r})"
+                    f"showing the first {BUDGET_CHARS} characters of its first line, which is longer "
+                    f"(the whole file: {found['path']})"
                 )
                 text = text[:BUDGET_CHARS]
         out["content"] = text
@@ -1258,7 +1265,7 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         if unchecked:
             out["rules_not_applied_note"] += f"; {unchecked} of them were not checked (too many patterns)"
 
-    every_skill = mask(skills(cfg, root, rules.refused))
+    every_skill = mask(skills(cfg, root, rules.refused, mask=mask))  # counted in `redacted`
     shown, used = [], 2
     for skill in every_skill:
         cost = _json_len(skill) + 2

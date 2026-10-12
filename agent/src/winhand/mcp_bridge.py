@@ -329,16 +329,25 @@ class Service:
             log.info("mcp server %s started (pid %s)", self.entry.name, process.pid)
 
     async def _internal(self, method: str, params: dict, timeout: float) -> dict:
+        loop = asyncio.get_running_loop()
         uid = next(self._ids)
-        future = asyncio.get_running_loop().create_future()
+        future = loop.create_future()
         self.pending[uid] = _Pending(None, None, None, future=future)
         process = self.process
         assert process is not None
+        deadline = loop.time() + timeout
+        if method not in ("initialize", "ping"):
+            # like a client's request: left unanswered, it gets the server checked and restarted
+            self.unanswered[uid] = time.time()
         try:
-            await asyncio.to_thread(
-                process.send, {"jsonrpc": "2.0", "id": uid, "method": method, "params": params}
+            # the send counts against the timeout too: a stuck server stops reading its stdin
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    process.send, {"jsonrpc": "2.0", "id": uid, "method": method, "params": params}
+                ),
+                timeout,
             )
-            return await asyncio.wait_for(future, timeout)
+            return await asyncio.wait_for(future, max(0.0, deadline - loop.time()))
         except (TimeoutError, asyncio.CancelledError):
             # tell the server to stop (never for initialize, which the spec forbids, or a ping). A
             # thread of its own: a stuck server's full pipe must not block this loop

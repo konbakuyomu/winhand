@@ -92,8 +92,9 @@ def cached(entry: ServerEntry, data: dict | None = None) -> dict | None:
     }
 
 
-def remember(entry: ServerEntry, tools: list, instructions: str | None = None) -> None:
-    """Store a server's tool list (name, description, inputSchema of each)."""
+def remember(entry: ServerEntry, tools: list, instructions: str | None = None) -> dict:
+    """Store a server's tool list (name, description, inputSchema of each); the record kept, also
+    when the file could not be written."""
     kept = []
     for tool in tools:
         if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
@@ -105,14 +106,15 @@ def remember(entry: ServerEntry, tools: list, instructions: str | None = None) -
                 "inputSchema": tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {},
             }
         )
+    record = {
+        "fingerprint": fingerprint(entry),
+        "listed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "instructions": str(instructions or "")[:2000],
+        "tools": kept,
+    }
     with _lock:
         data = _read_all()
-        data[entry.name] = {
-            "fingerprint": fingerprint(entry),
-            "listed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "instructions": str(instructions or "")[:2000],
-            "tools": kept,
-        }
+        data[entry.name] = record
         path = _path()
         # a name of its own: another winhand process (the agent and a stdio one) may write at once
         tmp = path.with_name(f"{CACHE_FILE}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -130,6 +132,7 @@ def remember(entry: ServerEntry, tools: list, instructions: str | None = None) -
         except OSError:
             with contextlib.suppress(OSError):
                 tmp.unlink()
+    return record
 
 
 def services():
@@ -249,8 +252,7 @@ async def list_tools(name: str, timeout: float = 90) -> dict:
                 break
         service = services().get(name)
         instructions = ((service.init_result or {}).get("instructions") if service else None) or ""
-    remember(entry, tools, instructions)
-    return cached(entry) or {"tools": tools, "instructions": instructions}
+    return remember(entry, tools, instructions)  # what was just listed, even if the cache was not written
 
 
 async def call_tool(name: str, tool: str, arguments: dict, timeout: float) -> dict:
