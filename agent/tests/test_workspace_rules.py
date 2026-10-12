@@ -636,3 +636,94 @@ def test_network_paths_and_windows_link_targets():
     assert workspace._network("\\\\?\\UNC\\server\\share\\x.md")
     assert workspace._network("\\\\server\\share\\x.md") and workspace._network("//server/share/x.md")
     assert not workspace._network("C:\\x") and not workspace._network("/home/x")
+
+
+# ------------------------------------------------------------------ round 4
+
+
+def test_a_broken_project_guard_file_cannot_crowd_out_the_rules(tmp_path, home, monkeypatch):
+    codex = tmp_path / "codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    write(codex / "AGENTS.md", "OWNER GLOBAL RULE")
+    root = project(tmp_path)
+    write(root / ".winhand" / "guards.toml", "".join(f"k{i:04d}{'x' * 20} = 1\n" for i in range(4000)))
+    out = ctx(root)
+    assert len(json.dumps(out, ensure_ascii=False)) <= workspace.BUDGET_CHARS
+    assert out["rules"][0]["content"] == "OWNER GLOBAL RULE"
+    (error,) = out["guards"]["errors"]
+    assert len(error["error"]) <= workspace.ERROR_CHARS
+
+
+def test_lossy_names_are_measured_before_the_budget(tmp_path, home):
+    if os.name == "nt":
+        pytest.skip("Windows file names are always Unicode")
+    base = os.fsencode(tmp_path / "work")
+    root_bytes = os.path.join(base, b"\xff" * 200)
+    try:
+        os.makedirs(os.path.join(root_bytes, b".git"))
+    except OSError:
+        pytest.skip("this file system refuses such names")
+    root = os.fsdecode(root_bytes)
+    for i in range(400):
+        with open(os.path.join(root, f"r{i}.md"), "w", encoding="utf-8") as fh:
+            fh.write("x")
+    with open(os.path.join(root, "CLAUDE.md"), "w", encoding="utf-8") as fh:
+        fh.write(" ".join(f"@r{i}.md" for i in range(400)))
+    out = ctx(root, formats=["claude-code"])
+    assert len(json.dumps(out, ensure_ascii=False)) <= workspace.BUDGET_CHARS
+    assert out["rules_omitted"]["count"] > 0
+
+
+def test_rules_of_an_oddly_named_project_are_read(tmp_path, home):
+    if os.name == "nt":
+        pytest.skip("Windows file names are always Unicode")
+    root_bytes = os.path.join(os.fsencode(tmp_path / "work"), b"odd-\xff")
+    try:
+        os.makedirs(os.path.join(root_bytes, b".git"))
+    except OSError:
+        pytest.skip("this file system refuses such names")
+    root = os.fsdecode(root_bytes)
+    os.makedirs(os.path.join(root, ".claude", "rules"))
+    with open(os.path.join(root, ".claude", "rules", "kept.md"), "w", encoding="utf-8") as fh:
+        fh.write("kept even in an oddly named project")
+    out = ctx(root, formats=["claude-code"])
+    assert [r.get("content") for r in out["rules"]] == ["kept even in an oddly named project"]
+
+
+def test_brace_heavy_globs_have_a_budget(tmp_path, home):
+    import time
+
+    root = project(tmp_path)
+    heavy = "{a,b,c,d,e,f,g,h,i,j}{a,b,c,d,e,f,g,h,i,j}{a,b,c,d,e,f,g,h,i,j}/**/" + "*a" * 40 + "*q"
+    for n in range(60):
+        write(root / ".claude" / "rules" / f"r{n:02d}.md", f"---\npaths: ['{heavy}{n}']\n---\nrule {n}")
+    began = time.monotonic()
+    out = ctx(root / "src" / "components" / "Button" / "index.tsx", formats=["claude-code"])
+    assert time.monotonic() - began < 15
+    assert any("unchecked" in r for r in out["rules_not_applied"])
+
+
+def test_glob_details():
+    root = "/p" if os.name != "nt" else "C:\\p"
+    target = os.path.join(root, *["b"] * 10)
+    assert workspace.rule_applies(["/".join(["{b}"] * 10)], root, target)  # ten groups in a row
+    assert not workspace.rule_applies(["/".join(["{a,b}"] * 10)], root, target), "1,024 > 1,000 patterns"
+    assert workspace.rule_applies(["docs/\\[x\\].md"], root, os.path.join(root, "docs", "[x].md"))
+    assert not workspace.rule_applies(["docs/\\[x\\].md"], root, os.path.join(root, "docs", "x.md"))
+
+
+def test_imports_of_an_already_read_global_file_keep_its_scope(tmp_path, home, monkeypatch):
+    codex = tmp_path / "codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    write(codex / "AGENTS.md", "global, see @" + str(home / "private" / "notes.md"))
+    write(home / "private" / "notes.md", "private notes")
+    root = project(tmp_path)
+    write(root / "CLAUDE.md", "@" + str(codex / "AGENTS.md"))
+    out = ctx(root, external_imports=True)
+    notes = next(r for r in out["rules"] if r["path"].endswith("notes.md"))
+    assert notes["scope"] == "global" and notes["imported_by"] == str(codex / "AGENTS.md")
+
+
+def test_a_huge_repo_argument_is_refused(home):
+    with pytest.raises(ValueError, match="too long"):
+        workspace.context(Config(context={"skills": []}), repo="x" * 100_000 + "/o/n")

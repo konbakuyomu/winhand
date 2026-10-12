@@ -46,6 +46,8 @@ MAX_RULE_FILES = 500  # per rules folder
 MAX_LISTED = 30  # imports and skipped imports listed per file
 NOT_APPLIED_CHARS = 8_000
 GUARDS_CHARS = 8_000
+GUARD_ERRORS_CHARS = 3_000
+ERROR_CHARS = 500
 OMITTED_CHARS = 2_500
 MAX_FILE_BYTES = 2_000_000
 BUDGET_CHARS = fs.READ_MAX_CHARS
@@ -298,12 +300,14 @@ def rule_paths(text: str) -> list[str] | None:
 
 
 MAX_GLOB_CHARS = 1_000
+MAX_RULE_PATTERNS = 1_000  # Claude Code's limit per rule file
+GLOB_BUDGET = 20_000  # patterns tried in one context() call
 
 
 def _braces(pattern: str, limit: int = 1000, depth: int = 0) -> list[str]:
     """`src/*.{c,h}` -> ['src/*.c', 'src/*.h']."""
     start = pattern.find("{")
-    if start < 0 or depth > 8:
+    if start < 0 or depth > 32:
         return [pattern]
     level = 0
     for end in range(start, len(pattern)):
@@ -411,19 +415,31 @@ def glob_match(rel: str, pattern: str) -> bool:
     return _wild(rel.split("/"), segments, lambda tokens, seg: _wild(seg, tokens, _one, "*"), "**")
 
 
-def rule_applies(paths: list[str], root: str, target: str | None) -> bool:
-    """Whether a path-scoped rule is in force for `target` (a file or folder) in the project at root."""
+def rule_applies(
+    paths: list[str], root: str, target: str | None, budget: list[int] | None = None
+) -> bool | None:
+    """Whether a path-scoped rule is in force for `target` (a file or folder) in the project at root.
+    A rule's globs expand to at most MAX_RULE_PATTERNS patterns (as in Claude Code); `budget` is what
+    is left for the whole call, and None comes back when it ran out before an answer."""
     if not target or not guard._under(target, root):
         return False
     rel = os.path.relpath(target, root).replace("\\", "/")
     if rel == ".":
         return False
+    left = MAX_RULE_PATTERNS
     for glob in paths:
         if len(glob) > MAX_GLOB_CHARS:
             continue  # nobody writes such a path; do not spend time on it
-        for pattern in _braces(glob.replace("\\", "/").removeprefix("./").lstrip("/")):
+        for pattern in _braces(glob.removeprefix("./").lstrip("/"), left):
+            if budget is not None:
+                if budget[0] <= 0:
+                    return None
+                budget[0] -= 1
             if pattern and glob_match(rel, pattern):
                 return True
+            left -= 1
+            if left <= 0:
+                return False
     return False
 
 
@@ -518,6 +534,7 @@ class _Rules:
         self.seen: set[str] = set()
         self.expanded: set[str] = set()  # files whose @imports were followed
         self.guard_cache: dict = {}
+        self.glob_budget = [GLOB_BUDGET]
         self._approved: bool | None = None
 
     def ordered(self) -> list[dict]:
@@ -610,7 +627,7 @@ class _Rules:
                 continue
             subfolders = []
             for entry in entries:
-                if entry.name.startswith(".") or not _plain_text(entry.path):
+                if entry.name.startswith(".") or not _plain_text(entry.name):
                     continue
                 try:
                     if entry.is_symlink() and (
@@ -662,10 +679,16 @@ class _Rules:
                 except (OSError, ValueError, fs.FsError):
                     text = None  # file() reports the error
             paths = rule_paths(text) if text is not None else None
-            if paths and not (self.root and rule_applies(paths, self.root, self.target)):
-                self.not_applied.append(
-                    {"path": path, "paths": paths, "format": "claude-code", "scope": scope}
-                )
+            applies = (
+                rule_applies(paths, self.root, self.target, self.glob_budget) if paths and self.root else True
+            )
+            if paths and not applies:
+                entry = {"path": path, "paths": paths, "format": "claude-code", "scope": scope}
+                if applies is None:
+                    entry["unchecked"] = (
+                        "too many path patterns to check in one call; ask with path= that file"
+                    )
+                self.not_applied.append(entry)
                 continue
             self.file(path, "claude-code", scope, text, home=home)
 
@@ -677,7 +700,9 @@ class _Rules:
         imported_by: dict | None,
         hops: int,
         text: str | None = None,
+        check: str | None = None,
     ) -> None:
+        """`scope` labels the file; `check` (default: scope) decides which of its imports are outside."""
         self.seen.add(_key(path))
         item: dict = {"path": path, "format": fmt, "scope": scope}
         if imported_by is None:
@@ -693,7 +718,7 @@ class _Rules:
             return
         self.texts[id(item)] = text
         if fmt == "claude-code":
-            self._expand(item, text, scope, hops)
+            self._expand(item, text, check or scope, hops)
 
     def _expand(self, item: dict, text: str, scope: str, hops: int) -> None:
         """Follow the @imports of a file Claude Code reads, as Claude Code does."""
@@ -728,13 +753,13 @@ class _Rules:
                 seen_item = self.by_key.get(key)
                 seen_text = self.texts.get(id(seen_item)) if seen_item else None
                 if why is None and seen_text is not None and key not in self.expanded:
-                    self._expand(seen_item, seen_text, scope, hops + 1)
+                    self._expand(seen_item, seen_text, scope, hops + 1)  # judged as the referrer's
                 continue
             why = why or self.refused(target)
             if why:
                 skipped.append({"import": ref, "path": target, "reason": why})
                 continue
-            self._read(target, "claude-code", scope, item, hops + 1)
+            self._read(target, "claude-code", item["scope"], item, hops + 1, check=scope)
         if imports:
             item["imports"] = imports[:MAX_LISTED]
             if len(imports) > MAX_LISTED:
@@ -837,7 +862,7 @@ def _skills_in(folder: str, scope: str, refused=None) -> list[dict]:
         return []
     out = []
     for entry in entries:
-        if entry.name.startswith(".") or not _plain_text(entry.path) or not entry.is_dir():
+        if entry.name.startswith(".") or not _plain_text(entry.name) or not entry.is_dir():
             continue
         skill_md = os.path.join(entry.path, "SKILL.md")
         if not os.path.isfile(skill_md) or (refused and refused(skill_md)):
@@ -960,6 +985,8 @@ def _under_roots(cfg: Config) -> list[str]:
 
 def find_repo(cfg: Config, repo: str) -> dict:
     """The local checkout of `repo` (owner/name or a remote URL); ValueError when there is none."""
+    if len(repo) > 500:
+        raise ValueError("repo should be owner/name or a git remote URL; this is too long to be one")
     want = repo_key(repo)
     if not want:
         raise ValueError(f"repo should be owner/name or a git remote URL, not {repo!r}")
@@ -1031,6 +1058,7 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
 
     def mask(value):
         nonlocal masked
+        value = _sendable(value)  # before measuring: a lossy name may grow
         if redactor.empty:
             return value
         value, n = redactor.data(value)
@@ -1096,6 +1124,17 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         "names on this machine with run."
     )
     out["guards"] = guards = mask(guard.rules_for(start))
+    errors, used = [], 0
+    for error in guards.get("errors", []):
+        if len(error.get("error", "")) > ERROR_CHARS:
+            error = error | {"error": error["error"][: ERROR_CHARS - 1] + "…"}
+        used += _json_len(error) + 2
+        if used > GUARD_ERRORS_CHARS:
+            guards["errors_more"] = len(guards["errors"]) - len(errors)
+            break
+        errors.append(error)
+    if "errors" in guards:
+        guards["errors"] = errors
     kept, used = [], 0
     for rule in guards["rules"]:
         used += _json_len(rule) + 2

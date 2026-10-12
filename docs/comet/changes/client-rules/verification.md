@@ -66,6 +66,7 @@
 - `agent.yml`（run 38167139121，33aa976）：ubuntu 通过；windows 有 1 个失败：`test_linked_rule_folders_follow_the_same_rules`。
   - 原因：Windows 上 `os.readlink` 把本机目标写成 `\\?\C:\...`，被当成网络路径，项目内的链接全被拒绝。这是真实缺陷，只在 Windows 上出现。
   - 4d6d62c 已修：只有 `\\server\...`、`//server/...`、`\\?\UNC\...` 算网络路径。补了回归测试。
+- `agent.yml`（run 38190762077，4d6d62c）：ubuntu、windows 都通过。
 
 **本机冒烟**（中文 Windows 11，4d6d62c 的临时克隆 `%TEMP%\winhand-p1-smoke`，只读，用真实的 HOME 和 winhand 配置）：
 - 全局：返回 `~/.codex/AGENTS.md`（codex）和 `~/.claude/rules/comet-workflow-guard.md`（claude-code，用户级规则）。没有 `~/.claude/CLAUDE.md`，与设计文档的观察一致。
@@ -78,4 +79,27 @@
 - 在真机上跑 `tests/test_workspace_rules.py`、`tests/test_workspace_context.py`：39 passed，3 skipped。跳过的是需要建符号链接权限的两个测试和只在 Linux 上跑的非 UTF-8 文件名测试，这几项由 GitHub 的 windows、ubuntu runner 覆盖。
 - 临时目录 `%TEMP%\winhand-p1-smoke` 留给用户手动删除（用户规则：不批量删除）。
 
-**独立 Verifier**：（待填）
+**独立 Verifier**（33aa976）：
+- 正式检查：`ruff check`、`ruff format --check` 通过；`pytest` 331 passed，39 skipped。
+- A1–A10 全部通过。第 2 轮的问题 1–10 和疑似项都已修好，只有以下遗留。
+- 新发现：
+
+| # | 问题 | 级别 | 处理（第 4 轮） |
+|---|---|---|---|
+| 1 | 项目自己的 `.winhand/guards.toml` 写坏时，错误信息无上限（列出每个未知键），结果约 11.7 万字符，房主的全局规则被挤进 `rules_omitted` | 阻断 | 每条错误信息最多 500 字符，合计约 3,000 字符，其余计数 |
+| 2 | 非 UTF-8 名字的清理放在预算之后，每个无效字节变成 3 个替换字符，结果超出预算 | 次要 | 清理放在计算长度之前 |
+| 3 | `{}` 展开让单个 glob 的成本乘以最多 1,000 倍，一个规则文件放很多这样的 glob 时，调用耗时几十秒到几分钟 | 次要 | 每个规则文件最多展开 1,000 个模式（Claude Code 的上限），每次调用最多尝试 20,000 个；用完后标 `unchecked` |
+| 4 | 项目文件夹自己的名字不是 UTF-8 时，`.claude/rules` 被整体跳过 | 次要 | 只检查文件名本身 |
+| 小 | 过长的 `repo` 参数被原样回显 | 小 | `repo` 最长 500 字符 |
+
+- 规格含糊之处的决定：
+  - 连续的 `{}` 与嵌套的一样计层数，上限改为 32；
+  - 反斜杠作转义，不再先换成 `/`；
+  - 500 个文件按遍历顺序取；
+  - 已读的全局文件经引用展开时，它引用的文件标全局 scope，是否算外部引用按引用者的 scope 判断；
+  - 被引用的规则文件不按 `paths` 判断；
+  - `rules_not_applied` 放不下时，从第一条放不下的开始只计数。
+
+## 第 4 轮
+
+（待填）
