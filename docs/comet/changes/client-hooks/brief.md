@@ -174,7 +174,7 @@
 - D7：在 Windows 上用 PowerShell 运行 hook 时，把程序的退出码传出来（命令后补 `if ($LASTEXITCODE) { exit $LASTEXITCODE }`）。理由：
   - `pwsh -Command` 会把退出码 2 变成 1，Codex 因此把“拒绝”当成“hook 出错”而放行；
   - 用户的 comet hooks 正是靠退出码 2 拒绝的，在 Codex 的 Windows 环境里实际拦不住；
-  - winhand 让拒绝生效，比 Codex 严格，符合 hook 的本意，也符合“守卫的结论只会更严”。（第 1 轮 CI 和真机核对中发现）
+  - winhand 让拒绝生效，比 Codex 严格，符合 hook 的本意，也符合“守卫的结论只会更严”。只在最后一条命令失败时才补退出码，所以不会让 hook 变宽松（第 2 轮验收后收窄）。（第 1 轮 CI 和真机核对中发现）
 - 决定 D1–D7 由 Claude 代定：用户把推进交给 Claude（“那你继续帮我推进吧，我不会写这些，交给你了”），汇报时说明，尤其是 D2 改变了默认行为。
 
 # Open questions

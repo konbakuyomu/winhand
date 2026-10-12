@@ -19,6 +19,7 @@ import concurrent.futures
 import glob as globlib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -104,11 +105,15 @@ def _load(path: str, kind: str) -> tuple[object, str | None]:
         if len(raw) > MAX_CONFIG_BYTES:
             raise ValueError(f"larger than {MAX_CONFIG_BYTES:,} bytes")
         text = raw.decode("utf-8-sig")
-        data = json.loads(text) if kind == "json" else tomllib.loads(text)
+        data = json.loads(text, parse_constant=_no_constant) if kind == "json" else tomllib.loads(text)
     except (OSError, ValueError, UnicodeDecodeError) as exc:
         error = f"cannot be read: {exc}"
     _files[path] = (stamp, data, error)
     return data, error
+
+
+def _no_constant(name: str):
+    raise ValueError(f"{name} is not JSON")
 
 
 # ------------------------------------------------------------------ hooks
@@ -187,6 +192,10 @@ def _from_file(source: str, path: str, kind: str) -> tuple[list[Hook], list[dict
         return [], [{"file": path, "error": error}]
     if data is None:
         return [], []
+    if source == "codex":
+        problem = _codex_file_problem(data, kind)
+        if problem:  # Codex rejects the whole file, so none of its hooks run there either
+            return [], [{"file": path, "error": f"Codex would not load it: {problem}"}]
     groups = _groups(data)
     if isinstance(groups, str):
         return [], [{"file": path, "error": groups}]
@@ -202,6 +211,68 @@ def _from_file(source: str, path: str, kind: str) -> tuple[list[Hook], list[dict
             if isinstance(handler, dict):
                 out.append(Hook(source, path, g, i, matcher, handler))
     return out, []
+
+
+_CODEX_HANDLER = {
+    "type",
+    "command",
+    "commandWindows",
+    "command_windows",
+    "timeout",
+    "async",
+    "statusMessage",
+    "additionalContextLimit",
+    "server",
+    "tool",
+    "input",
+    "prompt",
+    "model",
+}
+
+
+def _codex_file_problem(data: object, kind: str) -> str | None:
+    """What makes Codex refuse a hooks file (its schema denies unknown fields), None if nothing."""
+    if not isinstance(data, dict):
+        return "the top level is not a table"
+    if kind == "json" and set(data) - {"description", "hooks"}:
+        return f"unknown top-level key(s) {sorted(set(data) - {'description', 'hooks'})}"
+    hooks = data.get("hooks")
+    if hooks is None:
+        return None
+    if not isinstance(hooks, dict):
+        return "`hooks` is not a table"
+    groups = hooks.get("PreToolUse")
+    if groups is None:
+        return None
+    if not isinstance(groups, list):
+        return "`hooks.PreToolUse` is not a list"
+    for g, group in enumerate(groups):
+        if not isinstance(group, dict) or set(group) - {"matcher", "hooks"}:
+            return f"PreToolUse group {g} is not {{matcher, hooks}}"
+        if "matcher" in group and not isinstance(group["matcher"], str):
+            return f"PreToolUse group {g}: matcher is not a string"
+        handlers = group.get("hooks", [])
+        if not isinstance(handlers, list):
+            return f"PreToolUse group {g}: hooks is not a list"
+        for i, handler in enumerate(handlers):
+            if not isinstance(handler, dict) or "type" not in handler:
+                return f"PreToolUse group {g} hook {i} has no type"
+            if set(handler) - _CODEX_HANDLER:
+                return (
+                    f"PreToolUse group {g} hook {i}: unknown key(s) {sorted(set(handler) - _CODEX_HANDLER)}"
+                )
+            if handler.get("type") == "command":
+                for key in ("command", "commandWindows", "command_windows", "statusMessage"):
+                    if key in handler and not isinstance(handler[key], str):
+                        return f"PreToolUse group {g} hook {i}: {key} is not a string"
+                timeout = handler.get("timeout")
+                if timeout is not None and (
+                    isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 0
+                ):
+                    return f"PreToolUse group {g} hook {i}: timeout is not a whole number of seconds"
+                if "async" in handler and not isinstance(handler["async"], bool):
+                    return f"PreToolUse group {g} hook {i}: async is not true or false"
+    return None
 
 
 def _unsupported(hook: Hook) -> str | None:
@@ -223,7 +294,7 @@ def _unsupported(hook: Hook) -> str | None:
     if timeout is not None:
         whole = isinstance(timeout, int) and not isinstance(timeout, bool)
         number = whole or isinstance(timeout, float)
-        if not number or timeout < 0 or (hook.source == "codex" and not whole):
+        if not number or not math.isfinite(timeout) or timeout < 0 or (hook.source == "codex" and not whole):
             return "`timeout` is not a number of seconds" + (
                 " (Codex wants a whole number)" if number else ""
             )
@@ -246,10 +317,17 @@ def _dialect(hook: Hook) -> str:
 def _seconds(hook: Hook, cap: float) -> float:
     """How long a hook may take: its own timeout (Codex: at least 1 s), never more than `cap`."""
     value = hook.handler.get("timeout")
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if (
+        value is None
+        or isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
         value = HOOK_TIMEOUT_S if hook.source != "guards" else cap
-    if hook.source == "codex":
-        value = max(value, 1)
+    elif hook.source == "codex":
+        value = max(value, 1)  # Codex: timeout.max(1)
+    elif value <= 0:
+        value = HOOK_TIMEOUT_S if hook.source != "guards" else cap
     return min(float(value), cap)
 
 
@@ -331,6 +409,15 @@ def _codex_user() -> tuple[dict, dict[str, str], list[dict]]:
     return state, levels, []
 
 
+def _codex_hooks_off() -> bool:
+    """[features] hooks = false (or the old name codex_hooks) in the user's config.toml."""
+    data, _ = _load(os.path.join(workspace.codex_home(), "config.toml"), "toml")
+    features = data.get("features") if isinstance(data, dict) else None
+    if not isinstance(features, dict):
+        return False
+    return features.get("hooks", features.get("codex_hooks")) is False
+
+
 def _codex_folder_trusted(folder: str, root: str, levels: dict[str, str]) -> bool:
     """Whether Codex loads the .codex folder of `folder`: decided for that folder, else for the
     project root; an explicit "untrusted" on either wins."""
@@ -348,6 +435,7 @@ def _codex(root: str, chain: list[str]) -> tuple[list[Hook], list[dict]]:
     managed_only = isinstance(req, dict) and req.get("allow_managed_hooks_only") is True
     state, levels, user_errors = _codex_user()
     errors += user_errors
+    switched_off = _codex_hooks_off()
     home = workspace.codex_home()
     layers: list[tuple[str, str, str, str | None]] = [
         ("managed", requirements, "toml", None),
@@ -370,6 +458,11 @@ def _codex(root: str, chain: list[str]) -> tuple[list[Hook], list[dict]]:
                 _codex_status(hook, layer, folder, root, state, levels, managed_only)
             except Exception as exc:  # a strange file must not stop the others
                 hook.status, hook.reason = "unsupported", f"cannot be read ({exc})"
+            if switched_off and hook.runs:
+                hook.status, hook.reason = (
+                    "disabled",
+                    "hooks are turned off in Codex ([features] hooks = false)",
+                )
             hooks.append(hook)
     return hooks, errors
 
@@ -481,6 +574,20 @@ def _claude(root: str) -> tuple[list[Hook], list[dict]]:
 # ------------------------------------------------------------------ finding them for a folder
 
 
+def _main_checkout(root: str, chain: list[str]) -> tuple[str, list[str]]:
+    """For a linked git worktree, the main checkout and the folders there that match `chain`
+    (Codex takes a worktree's hooks and trust from the main checkout); otherwise unchanged."""
+    if not os.path.isfile(os.path.join(root, ".git")):
+        return root, chain
+    gitdir, common = workspace._git_dirs(root)
+    if not gitdir or not common or os.path.basename(os.path.normpath(common)) != ".git":
+        return root, chain
+    main = os.path.dirname(os.path.normpath(common))
+    if _folder_key(main) == _folder_key(root):
+        return root, chain
+    return main, [os.path.normpath(os.path.join(main, os.path.relpath(f, root))) for f in chain]
+
+
 def discover(folder: str, cfg: dict | None = None) -> tuple[list[Hook], list[dict]]:
     """Every PreToolUse hook that applies in `folder`, with its status, and the files that could
     not be read."""
@@ -490,7 +597,7 @@ def discover(folder: str, cfg: dict | None = None) -> tuple[list[Hook], list[dic
     hooks: list[Hook] = []
     errors: list[dict] = []
     if "codex" in enabled:
-        found, errs = _codex(root, chain)
+        found, errs = _codex(*_main_checkout(root, chain))
         hooks += found
         errors += errs
     if "claude-code" in enabled:
@@ -676,8 +783,9 @@ def _powershell() -> str | None:
 
 def _keep_exit_code(command: str) -> str:
     """`pwsh -Command` turns a program's exit code 2 into 1, and a hook that refuses with 2 would be
-    let through. winhand passes the code on (stricter than Codex on Windows, as the hook meant)."""
-    return command + "\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"
+    let through. When the last command failed, winhand passes its code on (1 when it has none, as
+    pwsh would); a command that succeeded, or that exits itself, is left as it is."""
+    return command + "\nif (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }"
 
 
 def argv(hook: Hook) -> list[str] | str:
@@ -714,10 +822,12 @@ def run(hook: Hook, stdin: dict, cwd: str, timeout: float) -> Run:
     if hook.source == "claude-code":
         env["CLAUDE_PROJECT_DIR"] = cwd
     extra: dict = (
-        {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {"start_new_session": True}
+        {"creationflags": subprocess.CREATE_NO_WINDOW | _CREATE_SUSPENDED}
+        if IS_WINDOWS
+        else {"start_new_session": True}
     )
     with tempfile.TemporaryFile() as fin, tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
-        fin.write(json.dumps(stdin, ensure_ascii=False).encode("utf-8"))
+        fin.write(json.dumps(stdin, ensure_ascii=False).encode("utf-8", "replace"))
         fin.seek(0)
         try:
             child = subprocess.Popen(
@@ -725,7 +835,12 @@ def run(hook: Hook, stdin: dict, cwd: str, timeout: float) -> Run:
             )
         except (OSError, ValueError) as exc:
             return Run(error=f"could not start: {exc}")
-        job = _windows_job(child.pid) if IS_WINDOWS else None
+        job = None
+        if IS_WINDOWS:
+            job = _windows_job(child.pid)  # before it runs: whatever it starts is in the job too
+            if not _resume(child.pid):
+                _end_all(child, job)
+                return Run(error="could not be started (resume failed)")
         try:
             code: int | None = child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -741,6 +856,30 @@ def run(hook: Hook, stdin: dict, cwd: str, timeout: float) -> Run:
 
 
 MAX_OUTPUT_BYTES = 1_000_000
+_CREATE_SUSPENDED = 0x00000004
+
+
+def _resume(pid: int) -> bool:
+    """Let a process started suspended run (Windows)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ntdll = ctypes.WinDLL("ntdll")
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x0800, False, pid)  # PROCESS_SUSPEND_RESUME
+        if not handle:
+            return False
+        try:
+            return ntdll.NtResumeProcess(handle) == 0
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def _end_all(child: subprocess.Popen, job) -> None:

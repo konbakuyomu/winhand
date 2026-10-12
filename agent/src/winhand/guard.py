@@ -20,6 +20,7 @@ an AI that means well, not a sandbox (`run cat .env` reads what a read rule on .
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import threading
@@ -154,6 +155,7 @@ def _rule(path: str, index: int, entry, base: str | None) -> Rule:
     if (
         isinstance(timeout, bool)
         or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
         or timeout < 0
         or (timeout == 0 and command is None)
     ):
@@ -252,9 +254,9 @@ def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
     seen: set[str] = set()
     glob_file = str(global_path())
     glob_key = _norm(glob_file)
-    # the owner's own file in its usual place is never a project file of their home folder, even
-    # when WINHAND_HOME points elsewhere
-    usual = _norm(str(Path.home() / PROJECT_DIR / FILE_NAME))
+    # the global file reached by another spelling (a linked home, a short name) is still the
+    # global file, never a project file of the folder above it
+    glob_real = _norm(os.path.realpath(glob_file))
     if cache is not None and glob_key in cache:
         first = cache[glob_key]
     else:
@@ -269,7 +271,7 @@ def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
         while True:
             candidate = str(d / PROJECT_DIR / FILE_NAME)
             key = _norm(candidate)
-            if key not in seen and key != usual:
+            if key not in seen and _norm(os.path.realpath(candidate)) != glob_real:
                 seen.add(key)
                 if cache is not None and key in cache:
                     found = cache[key]

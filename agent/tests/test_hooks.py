@@ -485,11 +485,13 @@ async def test_a_strange_timeout_does_not_break_anything(env):
     settings.write_text(json.dumps(data))
     async with Client(build_server(Config())) as client:
         result = await client.call_tool("run", {**py_command("DENY"), "cwd": str(root)})
-        listed = (await client.call_tool("context", {"path": str(root)})).structured_content["hooks"]["hooks"]
+        report = (await client.call_tool("context", {"path": str(root)})).structured_content["hooks"]
     assert not result.is_error and calls_made(env) == []
-    reasons = [h["reason"] for h in listed]
-    assert [h["status"] for h in listed] == ["unsupported"] * 3
-    assert "timeout" in reasons[0] and "timeout" in reasons[1] and "regular expression" in reasons[2]
+    listed = report["hooks"]
+    assert [(h["source"], h["status"]) for h in listed] == [("claude-code", "unsupported")] * 2
+    assert "timeout" in listed[0]["reason"] and "regular expression" in listed[1]["reason"]
+    codex_error = report["errors"][0]["error"]  # Codex rejects the whole file over the timeout
+    assert "Codex would not load it" in codex_error and "timeout" in codex_error
 
 
 def test_a_device_is_not_read_as_a_hooks_file(env):
@@ -613,15 +615,93 @@ def test_powershell_commands_pass_the_exit_code_on():
     hook = hooks.Hook("codex", "f", 0, 0, None, {"command": "node x.mjs", "commandWindows": "node x.mjs"})
     line = hooks.argv(hook)
     if os.name == "nt" and isinstance(line, list):
-        assert line[-1] == "node x.mjs\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"
+        assert line[-1].startswith("node x.mjs\nif (-not $?)")
 
 
-def test_the_owners_usual_guard_file_is_never_a_project_file(env, tmp_path, monkeypatch):
+def test_the_global_guard_file_reached_through_a_link_is_still_global(tmp_path, monkeypatch):
     from winhand import guard
 
-    home = Path(os.environ["HOME"])
-    (home / ".winhand").mkdir(parents=True, exist_ok=True)
-    (home / ".winhand" / "guards.toml").write_text('[[guard]]\non = "write"\ncommand = "echo hi"\n')
+    if os.name == "nt":
+        pytest.skip("symbolic links need a privilege on Windows")
+    real = tmp_path / "realhome"
+    (real / ".winhand").mkdir(parents=True)
+    (real / ".winhand" / "guards.toml").write_text('[[guard]]\non = "write"\ncommand = "true"\n')
+    link = tmp_path / "home"
+    os.symlink(real, link)
+    monkeypatch.setenv("WINHAND_HOME", str(link / ".winhand"))
+    files = guard.files_for([str(real / "proj" / "a.txt")])
+    assert [f.error for f in files] == [None]
+
+
+def test_with_winhand_home_elsewhere_the_home_file_is_a_project_file(tmp_path, monkeypatch):
+    from winhand import guard
+
+    home = tmp_path / "home"
+    (home / ".winhand").mkdir(parents=True)
+    (home / ".winhand" / "guards.toml").write_text('[[guard]]\non = "write"\ndecision = "deny"\n')
     monkeypatch.setenv("WINHAND_HOME", str(tmp_path / "elsewhere"))
-    files = guard.files_for([str(home / "work" / "a.txt")])
-    assert all(not f.path.startswith(str(home / ".winhand")) for f in files)
+    files = guard.files_for([str(home / "proj" / "a.txt")])
+    assert any(f.path == str(home / ".winhand" / "guards.toml") for f in files)
+
+
+# ------------------------------------------------------------------ round 3
+
+
+def test_codex_feature_switch_turns_its_hooks_off(env):
+    codex_project_hook(env, "by-command", "Bash")
+    with open(env["tmp"] / "codex" / "config.toml", "a", encoding="utf-8") as fh:
+        fh.write("[features]\nhooks = false\n")
+    (hook,) = [h for h in hooks.discover(str(env["root"]))[0] if h.source == "codex"]
+    assert hook.status == "disabled" and "features" in hook.reason
+
+
+def test_nan_timeouts_never_escape_the_cap(env, winhand_home):
+    root = env["root"]
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"hooks": {"PreToolUse": [{"hooks": [{"command": "x", "timeout": NaN}]}]}}')
+    found, errors = hooks.discover(str(root))
+    assert not [h for h in found if h.source == "claude-code"] and "NaN" in errors[0]["error"]
+    from winhand import guard
+
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    (winhand_home / "guards.toml").write_text('[[guard]]\non = "write"\ncommand = "x"\ntimeout_s = nan\n')
+    assert guard.load(str(winhand_home / "guards.toml")).error
+
+
+def test_codex_timeout_zero_is_one_second():
+    hook = hooks.Hook("codex", "f", 0, 0, None, {"command": "x", "timeout": 0})
+    assert hooks._seconds(hook, 30) == 1.0
+    claude = hooks.Hook("claude-code", "f", 0, 0, None, {"command": "x", "timeout": 0})
+    assert hooks._seconds(claude, 30) == 30.0
+
+
+def test_a_hooks_file_codex_would_reject_is_not_used(env):
+    root = env["root"]
+    codex_project_hook(env, "by-command", "Bash")
+    path = root / ".codex" / "hooks.json"
+    data = json.loads(path.read_text())
+    data["surprise"] = True
+    path.write_text(json.dumps(data))
+    found, errors = hooks.discover(str(root))
+    assert not [h for h in found if h.file == str(path)] and "Codex would not load it" in errors[0]["error"]
+
+
+def test_a_worktree_uses_the_main_checkouts_hooks(env, tmp_path):
+    main = env["root"]
+    codex_project_hook(env, "by-command", "Bash")
+    worktree = tmp_path / "wt"
+    gitdir = main / ".git" / "worktrees" / "wt"
+    gitdir.mkdir(parents=True)
+    (gitdir / "commondir").write_text("../..\n")
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
+    found, _ = hooks.discover(str(worktree))
+    assert [h.file for h in found if h.source == "codex"] == [str(main / ".codex" / "hooks.json")]
+    assert all(h.runs for h in found if h.source == "codex")
+
+
+def test_a_lone_surrogate_does_not_stop_the_hooks(env):
+    claude_project_hook(env, "by-command", "Write")
+    action = Action("write", "fs_write", paths=(str(env["root"] / "a.txt"),))
+    assert hooks.check([action], "fs_write", {"content": "bad \ud800 text"}) == []

@@ -39,6 +39,34 @@
   - 补了 Windows 上的测试（不加 `; exit $LASTEXITCODE` 的 hook，靠退出码 2 也能拒绝）；
   - README 写明 Codex 里的这个坑。
 
-## 第 2 轮
+## 第 2 轮（b9f1635）
+
+**Build 期间的发现**（在用户真机上跑 hook 测试，4 次提交）：
+- 2aa75ed：Windows 上，hook 以退出码 2 拒绝但留下一个子进程时，子进程占着管道，拒绝的理由丢失（拒绝本身仍生效）。hook 的输入输出改为经临时文件传递；Windows 上用作业对象、其他系统用进程组，结束 hook 留下的进程。
+- 2aa75ed 起：守卫向上找项目规则时，不再把全局规则文件当成项目文件。这一处的写法在第 3 轮又改了，见下。
+- b9f1635：用户真机上，shell 输入测试被用户自己的全局 `guards.toml`（禁止批量删除）先拦下了。测试改用中性的词，不再与运行测试的机器上的规则冲突。
+
+**正式检查**
+- 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 399 passed，40 skipped。
+- `agent.yml`（run 38210596957，b9f1635）：ubuntu、windows 都通过。
+- 用户真机（中文 Windows 11）：`tests/test_hooks.py` 52 passed，1 skipped。
+
+**独立 Verifier 结论**：A1–A10 全部通过，第 1 轮的问题 1–7 都已修好。新发现：
+
+| # | 问题 | 级别 | 处理（第 3 轮） |
+|---|---|---|---|
+| 1 | Codex 的 `[features] hooks = false` 被忽略，hooks 仍然运行 | 阻断 | 读取这个开关（旧名 `codex_hooks`），关掉时所有 Codex hooks 为 `disabled` |
+| 2 | `timeout` 为 `NaN` 时绕过上限（JSON 解析接受 NaN）；`guards.toml` 的 `timeout_s = nan` 同样 | 次要 | JSON 不接受 NaN/Infinity，整份文件报错；`timeout`、`timeout_s` 必须是有限数 |
+| 3 | 主目录经符号链接到达时，全局 `guards.toml` 被当成项目文件；里面有 command 规则时，主目录下的动作全被拒绝 | 次要 | 按真实路径识别全局文件 |
+| 4 | 第 2 轮加的“跳过 `~/.winhand/guards.toml`”在 `WINHAND_HOME` 指向别处时违背 R2 | 次要 | 撤销这个跳过，改为第 3 项的真实路径判断 |
+| 5 | Codex 的 `timeout = 0` 被当成默认值，Codex 按 1 秒 | 次要 | 按 Codex：至少 1 秒 |
+| 6 | `fs_write` 内容里有孤立代理字符时，走了“hooks 无法运行”的拒绝路径 | 小 | 交给 hook 的 JSON 用替换字符编码 |
+| 7 | D7 的 PowerShell 尾巴在两种情况下会让 hook 变宽松（沿用旧的退出码；最后一个 cmdlet 失败时退出码变 0） | 次要（只读代码推断） | 收窄为只在最后一条命令失败时传出退出码 |
+| 8 | Windows 上 hook 启动后才放进作业对象，期间启动的孙进程可能逃出 | 疑似 | 挂起启动，放进作业后再恢复运行 |
+| 含糊 | Codex 会整份拒绝的 hooks 文件（不认识的键、缺 `type`、类型不对），winhand 仍运行其中别的 hook | — | 按 Codex：整份不用，报出原因 |
+| 含糊 | 链接的 git 工作树，Codex 从主检出目录读 hooks 和信任 | — | 按 Codex 处理 |
+| 含糊 | hook 正常结束后，它启动的后台进程是否结束 | — | 结束；写进 R5 |
+
+## 第 3 轮
 
 （待填）

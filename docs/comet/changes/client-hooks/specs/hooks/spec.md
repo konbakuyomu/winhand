@@ -35,6 +35,7 @@
 每个 hook 得出一个状态，只有 `managed` 和 `trusted` 的会运行。
 
 Codex：
+- 用户 `config.toml` 的 `[features]` 里 `hooks = false`（旧名 `codex_hooks`）时，所有 Codex hooks 都是 `disabled`。
 - 来自系统层和托管层的：`managed`。
 - `requirements.toml` 中 `allow_managed_hooks_only = true` 时，其余来源都是 `disabled`。
 - 其余每个 hook：
@@ -46,6 +47,8 @@ Codex：
     - 没有 `trusted_hash`：`untrusted`。
 - 项目层的 hook 还要求它所在的 `.codex` 文件夹被 Codex 信任，按 Codex 的方式逐个文件夹判断：先看这一级目录在用户 `config.toml` 的 `[projects]` 里的 `trust_level`，没有时看项目根的；两者有一个是 `untrusted` 就不信任。不满足时为 `untrusted`，原因写明这个文件夹未被信任。
 - `CODEX_HOME` 恰好是某个项目的 `.codex` 时，它只算用户层，不再作为项目层读第二次。
+- 链接的 git 工作树（`.git` 是文件）：按 Codex 的做法，hooks 和信任都从主检出目录里对应的文件夹读取。
+- Codex 会整份拒绝的 hooks 文件（`hooks.json` 有不认识的顶层键、组或 handler 有不认识的键、handler 没有 `type`、字段类型不对），其中的 hooks 一个都不运行，在 `context()` 中报出原因。
 
 Claude Code：
 - 托管层的：`managed`。
@@ -57,7 +60,7 @@ Claude Code：
 两种来源都适用：
 - `type` 不是 `command` 的 hook、带 `async`、`if`、`once` 的 hook：`unsupported`，不运行。
 - 字段类型不对的 hook（`command` 不是字符串、`timeout` 不是秒数，Codex 要求整数；`args` 不是列表）、matcher 不是有效正则的 hook：`unsupported`，写明原因，不运行，也不影响其他 hook 和这次调用。
-- 配置文件只读普通文件，最多 4 MB；设备文件、过大的文件按“无法读取”报告。
+- 配置文件只读普通文件，最多 4 MB；设备文件、过大的文件按“无法读取”报告。JSON 里的 `NaN`、`Infinity` 不是合法 JSON，整份文件按“无法读取”处理；`timeout` 不能是非有限数。
 
 ### R3 Codex 的哈希
 
@@ -103,7 +106,8 @@ Scenario: (A4) 与 Codex 的测试值一致
 - 工作目录：动作所在项目的根目录；没有项目时，为锚点目录。
 - Codex：
   - Windows 上依次尝试 `pwsh.exe -NoProfile -Command <命令>`、`powershell.exe -NoProfile -Command <命令>`、`cmd.exe /C <命令>`，用找到的第一个；
-  - 经 PowerShell 运行时，命令后补一行 `if ($LASTEXITCODE) { exit $LASTEXITCODE }`，让程序的退出码（例如 2）原样传出；Codex 本身不这样做，退出码 2 会变成 1（D7）。Claude Code 的 `shell = "powershell"` 和 `guards.toml` 的 `command` 规则同样处理；
+  - 经 PowerShell 运行时，命令后补一行 `if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }`：只有最后一条命令失败时才把它的退出码（例如 2）原样传出，没有退出码时按 1，与 pwsh 本身一致；成功结束或自己 `exit` 的命令不受影响。Codex 本身不这样做，退出码 2 会变成 1（D7）。Claude Code 的 `shell = "powershell"` 和 `guards.toml` 的 `command` 规则同样处理；
+  - Windows 上 hook 以挂起状态启动，放进作业对象后再运行，它启动的任何进程都在同一个作业里；
   - 其他系统用 `$SHELL -c <命令>`，没有 `$SHELL` 时用 `/bin/sh`。
 - Claude Code：
   - 有 `args` 时，把 `command` 作为程序、`args` 作为参数直接运行；
@@ -112,8 +116,8 @@ Scenario: (A4) 与 Codex 的测试值一致
   - 环境变量加上 `CLAUDE_PROJECT_DIR=<项目根>`。
 - 环境变量继承 winhand 的环境。
 - 同一个动作匹配到的 hooks 并行运行。
-- 超时：取 hook 自己的 `timeout`（秒，默认 600；Codex 至少 1 秒）与 `[hooks] timeout_s`（默认 30）中较小的一个。超时后结束整个进程树；在 Linux、macOS 上连同它的整个进程组。
-- hook 已经退出、只是它启动的进程还占着输出时，按它的退出码和输出判断，不算超时。
+- 超时：取 hook 自己的 `timeout`（秒，默认 600；Codex 的 0 按 1 秒）与 `[hooks] timeout_s`（默认 30）中较小的一个。超时后结束整个进程树；在 Linux、macOS 上连同它的整个进程组。
+- hook 的输入输出经临时文件传递。hook 退出后按它的退出码和输出判断，不受它留下的进程影响；hook 结束（或超时）后，它启动的进程一并结束。
 - 运行时不弹出窗口。
 
 ### R6 结论
