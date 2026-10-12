@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import textwrap
 
 import pytest
@@ -170,7 +171,11 @@ async def test_a_client_listing_through_the_gateway_fills_the_cache(winhand_home
     try:
         async with Client(f"http://127.0.0.1:{port}/mcp/fake") as c:
             await c.list_tools()
-        item = local_mcp.cached(every.services["fake"].entry)
+        for _ in range(100):  # written by a thread of its own
+            item = local_mcp.cached(every.services["fake"].entry)
+            if item:
+                break
+            await asyncio.sleep(0.05)
         assert item and "echo" in {t["name"] for t in item["tools"]}
         assert item["instructions"] == "A fake server for the tests."
         echo = next(t for t in item["tools"] if t["name"] == "echo")
@@ -352,3 +357,116 @@ async def test_the_tasks_left_behind_do_not_leak(services):
     await asyncio.sleep(0.01)
     local_mcp._forget_old()
     assert "m1" not in local_mcp._calls
+
+
+# ------------------------------------------------------------------ round 1 of the verification
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        [1, 2],
+        ["echo"],
+        [{"description": "x"}],
+        [{"name": "x", "description": 3}],
+        [{"name": "x", "inputSchema": []}],
+    ],
+)
+async def test_a_cache_entry_of_the_wrong_shape_is_no_cache(client, services, winhand_home, tools):
+    fake = services.services["fake"].entry
+    entry = {"fingerprint": local_mcp.fingerprint(fake), "tools": tools}
+    write(winhand_home / "cache" / "mcp-tools.json", json.dumps({"fake": entry}))
+    assert local_mcp.cached(fake) is None
+    assert "## fake\n(not listed yet" in local_mcp.session_text(session_bridge.BUDGET_CHARS)
+    listed = (await client.call_tool("mcp_tools", {})).structured_content
+    assert listed["servers"][0]["tools"] is None
+
+
+def test_the_tools_part_holds_its_budget_after_masking(services, monkeypatch):
+    from winhand import redact
+
+    monkeypatch.setattr(redact, "current", lambda: redact.Redactor(values={"value": ["appleng"]}))
+    tools = [
+        {"name": f"t{i}", "description": "C:\\Users\\appleng\\a appleng appleng " + "x" * 60}
+        for i in range(200)
+    ]
+    local_mcp.remember(services.services["fake"].entry, tools)
+    text = local_mcp.session_text(session_bridge.BUDGET_CHARS)
+    assert "appleng" not in text and session_bridge._size(text) <= session_bridge.BUDGET_CHARS
+
+
+async def test_a_refused_skill_keeps_its_description_to_itself(home, winhand_home):
+    write(
+        home / ".agents" / "skills" / "officecli" / "SKILL.md",
+        "---\nname: officecli\ndescription: TOP SECRET DESCRIPTION\n---\n",
+    )
+    write(
+        winhand_home / "guards.toml",
+        '[[guard]]\non = "read"\npath = ["**/officecli/**"]\ndecision = "deny"\n',
+    )
+    async with Client(build_server(Config())) as c:
+        found = (await c.call_tool("skill", {"name": "officecli"})).structured_content
+    assert found["content"] is None and "description" not in found and "SECRET" not in json.dumps(found)
+
+
+async def test_a_skill_with_enormous_lines_is_shown_in_part(home):
+    from winhand import fs
+
+    skills = home / ".agents" / "skills"
+    write(skills / "cr" / "SKILL.md", "---\rname: cr\r---\r" + "y" * (fs.READ_MAX_CHARS + 10))
+    write(skills / "one" / "SKILL.md", "z" * (fs.READ_MAX_CHARS + 10))
+    async with Client(build_server(Config())) as c:
+        cr = (await c.call_tool("skill", {"name": "cr"})).structured_content
+        one = (await c.call_tool("skill", {"name": "one"})).structured_content
+    assert (
+        cr["content"] == "---\rname: cr\r---\r" and "offset=4" in cr["truncated"]
+    )  # lines as fs_read counts them
+    assert one["content"] == "z" * fs.READ_MAX_CHARS and "first line" in one["truncated"]
+
+
+async def test_history_knows_the_id_of_a_call_still_running(client, services, monkeypatch):
+    monkeypatch.setattr(local_mcp, "ANSWER_WITHIN_S", 0.05)
+    first = (
+        await client.call_tool("mcp_call", {"server": "fake", "tool": "slow", "arguments": {"steps": 20}})
+    ).structured_content
+    calls = (await client.call_tool("history", {})).structured_content
+    entry = next(e for e in calls["calls"] if e["tool"] == "mcp_call")
+    assert entry["status"] == "still_running" and entry["run_id"] == first["call_id"]
+    assert first["call_id"] in entry["summary"]
+    monkeypatch.setattr(local_mcp, "ANSWER_WITHIN_S", 30)
+    await client.call_tool("mcp_call", {"call_id": first["call_id"]})
+
+
+async def test_two_waits_on_one_call_get_one_result(services, monkeypatch):
+    monkeypatch.setattr(local_mcp, "ANSWER_WITHIN_S", 0.01)
+    result, key = await local_mcp.start_call("fake", "slow", {"steps": 10}, 30)
+    assert result is None and key.startswith("m") and len(key) == 13
+    outcomes = await asyncio.gather(
+        local_mcp.wait_call(key, 30), local_mcp.wait_call(key, 30), return_exceptions=True
+    )
+    assert sum(isinstance(o, tuple) and o[0] is not None for o in outcomes) == 1
+    assert sum(isinstance(o, ValueError) for o in outcomes) == 1
+
+
+async def test_an_http_server_past_its_timeout_says_so(winhand_home):
+    port = _free_port()
+    every = Services([ServerEntry(name="self", url=f"http://127.0.0.1:{port}/mcp")])
+    server, task = await serve_local(compose_app(build_server(Config()).http_app(), every), port)
+    try:
+        async with Client(f"http://127.0.0.1:{port}/mcp") as c:
+            script = "import time; time.sleep(3)"
+            late = await c.call_tool(
+                "mcp_call",
+                {
+                    "server": "self",
+                    "tool": "run",
+                    "arguments": {"command": sys.executable, "args": ["-c", script]},
+                    "timeout_s": 0.5,
+                },
+                raise_on_error=False,
+            )
+        assert late.is_error and "self did not answer tools/call within 0.5 s" in text_of(late)
+    finally:
+        await every.close()
+        server.should_exit = True
+        await task

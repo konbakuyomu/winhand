@@ -59,10 +59,11 @@ Scenario: (A1) 名字都在
 - 按名字找技能（不区分大小写），找不到时按技能文件夹名找。有 `path` 或 `repo` 时先找那个项目的技能（找项目根的方法同 `context`）。
 - 返回：
   - `name`、`scope`（project 或 user）、`folder`、`skill_md`、`description`；
-  - `content`：SKILL.md 全文；超过 60,000 字符时截到整行，并在 `truncated` 里说明用 `fs_read` 从哪一行接着读；
+  - `content`：SKILL.md 全文。超过 60,000 字符时按 `fs_read` 的分行方式（`\n`、`\r\n`、`\r` 都算）截到整行，`truncated` 说明用 `fs_read` 从哪一行接着读；第一行就超过 60,000 字符时给出它的前 60,000 字符，`truncated` 说明这一点；
   - `files`：技能文件夹里的文件（相对路径和字节数），跳过以点开头的目录和 `node_modules` 之类，最多 50 个；更多时 `files_more` 提示用 `fs_list`；
   - `note`：照 content 做，路径相对 folder，脚本在这台电脑上运行。
-- 守卫的 `read` 规则拒绝（deny 或 ask）这个 SKILL.md 时：`content` 为 null，`refused` 写明哪个规则文件、第几条和理由；其余字段照常。
+- 守卫的 `read` 规则拒绝（deny 或 ask）这个 SKILL.md 时：`content` 为 null，`refused` 写明哪个规则文件、第几条和理由；`description` 也来自这个文件，同样不返回；其余字段照常。
+- 描述需要截断时先脱敏再截断（技能段、`context()` 同样如此），被截成两半的秘密值不会漏出前半截。
 - 找不到时返回工具错误，列出最多 8 个相近的名字和技能总数。
 - 结果经过脱敏。
 
@@ -90,7 +91,9 @@ Scenario: (A2) 项目优先
   - `fingerprint`：服务的 kind、command、args、url、cwd、env 的 SHA-256；
   - `listed_at`、`instructions`（服务初始化时给的说明，最多 2,000 字符）；
   - `tools`：每个工具的 `name`、`description`、`inputSchema`。
-- 缓存写入是原子的（先写临时文件再替换）；读不了、不是 JSON、结构不对或指纹不符的条目当作没有缓存，不报错。
+- 缓存写入是原子的：先写本进程、本线程专用的临时文件，再替换（Windows 上替换遇到占用时稍后重试两次，仍失败就放弃这次更新）。
+- 读不了、不是 JSON、指纹不符的条目当作没有缓存，不报错。结构不对也一样：每个工具必须是对象，`name` 是字符串，`description`（可缺）是字符串，`inputSchema`（可缺）是对象，否则整个条目当作没有缓存。
+- 经网关得到的工具清单在单独的线程里写入缓存，不占用 agent 的事件循环。
 - 更新缓存的时机：
   1. 客户端经 `/mcp/<name>` 列出一个 stdio 服务的工具：`tools/list` 请求没有 cursor，回答里也没有 `nextCursor` 时（HTTP 服务由 winhand 原样转发，不在此列）；
   2. `mcp_tools(server)`；
@@ -99,6 +102,8 @@ Scenario: (A2) 项目优先
   - 第一行：`Local MCP servers on this PC. Call a tool with mcp_call(server, tool, arguments); mcp_tools(server) gives each tool's full parameters.`
   - 每个启用的服务一块：`## <server>`；有缓存时，服务说明的第一行（最多 300 字符），然后每个工具 `- <tool>: <描述第一个非空行，最多 150 字符>`；没有缓存时 `(not listed yet: mcp_tools("<server>") starts it and lists its tools)`。
   - 放不下一整块时，这个服务只列工具名；还放不下就跳过，末尾说明跳过了几个服务。
+  - 每一块先脱敏再计算长度，所以预算对发出去的文字成立；最后仍超出时截断正文。
+  - 每个服务的那一块来自同一次读取的配置和缓存，其他写入同时发生也不出错。
   - 没有启用的服务时说明“none are enabled”。
   - 正文经过脱敏。
 - 生成工具段只读缓存和配置，不启动任何服务。
@@ -129,8 +134,10 @@ Scenario: (A4) 缓存损坏
 - `mcp_call(server, tool, arguments={}, timeout_s=120, call_id=None)`：
   - 必要时启动服务（启动时间按服务的 `startup_timeout_s`，不计入 `timeout_s`），发送 `tools/call`；
   - 结果原样返回：`content`（文字、图片等）和 `structuredContent`；服务的 `isError` 为真时作为工具错误返回，内容照样带上；
-  - 约 40 秒内没有结果时返回 `still_running`、`call_id` 和 `next`；`mcp_call(call_id=...)` 再等最多约 40 秒；结果只交出一次；没人取的结果 10 分钟后丢弃；
-  - 超过 `timeout_s` 仍没有回答时返回工具错误（`did not answer tools/call within … s`），并给服务发 `notifications/cancelled`；服务继续可用；
+  - 约 40 秒内没有结果时返回 `still_running`、`call_id` 和 `next`；`mcp_call(call_id=...)` 再等最多约 40 秒；
+  - `call_id` 是 `m` 加 12 位随机十六进制数，winhand 重启后旧的 id 不会对上新的调用；`history()` 把它记为这次调用的 `run_id`，连接出错后可以从那里找回；
+  - 结果只交出一次：同时有两个等待时，一个拿到结果，另一个得到“已经交出”的工具错误；没人取的结果 10 分钟后丢弃；
+  - 超过 `timeout_s` 仍没有回答时返回工具错误（`<server> did not answer tools/call within … s`，stdio 和 HTTP 服务相同）；stdio 服务还会收到 `notifications/cancelled`（在单独的线程里发送，卡住的服务不会拖住 agent；ping 和 initialize 不发）；服务继续可用；
   - 服务不存在或已停用：工具错误，列出启用的服务；没给 `server`/`tool` 也没给 `call_id`：工具错误；`call_id` 不存在：工具错误；`timeout_s` 不大于 0：工具错误。
 - 服务在 `mcp_call` 期间向客户端发起的请求（sampling、elicitation、roots）：没有客户端经 `/mcp/<name>` 连着这个服务时回答“没有客户端可以回答”；有时交给那个客户端（与独立地址原有的行为相同）。
 - HTTP 服务：列出工具时用一个连接跟随全部分页并取服务说明；每次调用单独连接。
@@ -158,7 +165,7 @@ Scenario: (A5) 超时
 - `mcp_call`（不带 `call_id`）是一个动作：类型 `mcp`，文字 `<server>.<tool> <arguments JSON>`（键排序，非 ASCII 原样），没有路径和工作目录。
   - 因此只有全局 `guards.toml` 的规则适用；`path` 规则不匹配它；
   - 动作说明（确认框、拒绝信息）为 `mcp_call → mcp: <文字>`，最长 300 字符。
-- 带 `call_id` 的 `mcp_call` 和 `mcp_tools` 不是动作（等待和列出不执行新的工具）。
+- 带 `call_id` 的 `mcp_call` 和 `mcp_tools` 不是动作（等待和列出不执行新的工具）。因此 `on = "mcp"` 的规则拦不住 `mcp_tools(server)` 启动服务、列出工具（D6）。
 - `guards.toml` 的 `on` 接受 `mcp`；没写 `mcp` 的已有规则不受影响。
 - 本机 PreToolUse hooks（Claude Code 和 Codex）看到的 `tool_name` 是 `mcp__<server>__<tool>`，`tool_input` 是参数对象，matcher 按这个名字匹配。hook 的工作目录按没有路径的动作处理（winhand 的当前目录）。
 - 守卫或 hook 拒绝时不启动服务，不发送调用。

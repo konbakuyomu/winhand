@@ -930,7 +930,8 @@ def _skills_in(folder: str, scope: str, refused=None, desc_chars: int = DESCRIPT
         # as Claude Code lists a skill: its description, then when_to_use, cut together
         description = " ".join(" ".join([meta.get("description", ""), meta.get("when_to_use", "")]).split())
         if len(description) > desc_chars:
-            description = description[: desc_chars - 1] + "…"
+            # masked before the cut: a secret cut in two would no longer be recognised
+            description = redact.mask(description)[: desc_chars - 1] + "…"
         skill = {
             "name": meta.get("name") or entry.name,
             "description": description,
@@ -1001,21 +1002,32 @@ def skill(cfg: Config, name: str, path: str | None = None, repo: str | None = No
         )
     folder = os.path.dirname(found["path"])
     out = {"name": found["name"], "scope": found["scope"], "folder": folder, "skill_md": found["path"]}
-    if found.get("description"):
-        out["description"] = found["description"]
     why = rules.refused(found["path"])
-    if why:
+    if why:  # its description comes from the same file: withheld too
         out["content"] = None
         out["refused"] = why
     else:
+        if found.get("description"):
+            out["description"] = found["description"]
         try:
             text, _ = fs.read_text(found["path"])
         except (OSError, ValueError, fs.FsError) as exc:
             raise ValueError(f"cannot read {found['path']}: {exc}") from None
         if len(text) > BUDGET_CHARS:
-            shown = text[:BUDGET_CHARS].count("\n")
-            out["truncated"] = _truncated(found["path"], shown, text.count("\n") + 1)
-            text = "\n".join(text.splitlines()[:shown])
+            lines = text.splitlines(keepends=True)
+            kept, used = 0, 0
+            while kept < len(lines) and used + len(lines[kept]) <= BUDGET_CHARS:
+                used += len(lines[kept])
+                kept += 1
+            if kept:
+                out["truncated"] = _truncated(found["path"], kept, len(lines))
+                text = "".join(lines[:kept])
+            else:
+                out["truncated"] = (
+                    f"showing the first {BUDGET_CHARS} characters of its first line, which is longer; "
+                    f"read it with fs_read(path={found['path']!r})"
+                )
+                text = text[:BUDGET_CHARS]
         out["content"] = text
     out["files"], more = _skill_files(folder)
     if more:

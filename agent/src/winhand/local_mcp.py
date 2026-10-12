@@ -12,11 +12,11 @@ import asyncio
 import atexit
 import contextlib
 import hashlib
-import itertools
 import json
 import os
 import threading
 import time
+import uuid
 from typing import Any
 
 from . import config, redact
@@ -59,14 +59,37 @@ def _read_all() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def cached(entry: ServerEntry) -> dict | None:
-    """The cached list for this server, None when there is none for its current configuration."""
-    item = _read_all().get(entry.name)
+def _good_tool(tool) -> bool:
+    return (
+        isinstance(tool, dict)
+        and isinstance(tool.get("name"), str)
+        and isinstance(tool.get("description", ""), str)
+        and isinstance(tool.get("inputSchema", {}), dict)
+    )
+
+
+def cached(entry: ServerEntry, data: dict | None = None) -> dict | None:
+    """The cached list for this server, None when there is none for its current configuration (or
+    the entry is not what remember() writes). `data`: the whole cache, already read."""
+    item = (_read_all() if data is None else data).get(entry.name)
     if not isinstance(item, dict) or item.get("fingerprint") != fingerprint(entry):
         return None
-    if not isinstance(item.get("tools"), list):
+    tools = item.get("tools")
+    if not isinstance(tools, list) or not all(_good_tool(t) for t in tools):
         return None
-    return item
+    instructions = item.get("instructions")
+    return {
+        "listed_at": str(item.get("listed_at") or ""),
+        "instructions": instructions if isinstance(instructions, str) else "",
+        "tools": [
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "inputSchema": t.get("inputSchema", {}),
+            }
+            for t in tools
+        ],
+    }
 
 
 def remember(entry: ServerEntry, tools: list, instructions: str | None = None) -> None:
@@ -91,11 +114,22 @@ def remember(entry: ServerEntry, tools: list, instructions: str | None = None) -
             "tools": kept,
         }
         path = _path()
-        with contextlib.suppress(OSError):
+        # a name of its own: another winhand process (the agent and a stdio one) may write at once
+        tmp = path.with_name(f"{CACHE_FILE}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp, path)
+            for attempt in range(3):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:  # Windows: a reader has the file open for a moment
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.02)
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
 
 def services():
@@ -174,23 +208,29 @@ def _http_client(entry: ServerEntry, timeout: float):
 
 
 async def _http_request(entry: ServerEntry, method: str, params: dict, timeout: float) -> dict:
-    async with asyncio.timeout(timeout), _http_client(entry, timeout) as client:
-        result = await client.call_tool_mcp(params["name"], params.get("arguments") or {})
-        return result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    try:
+        async with asyncio.timeout(timeout), _http_client(entry, timeout) as client:
+            result = await client.call_tool_mcp(params["name"], params.get("arguments") or {})
+            return result.model_dump(mode="json", by_alias=True, exclude_none=True)
+    except TimeoutError:
+        raise TimeoutError(f"{entry.name} did not answer {method} within {timeout:g} s") from None
 
 
 async def _http_list(entry: ServerEntry, timeout: float) -> tuple[list, str]:
     """All the tools of a server reached over HTTP, and its instructions (one connection)."""
     tools: list = []
-    async with asyncio.timeout(timeout), _http_client(entry, timeout) as client:
-        cursor = None
-        for _ in range(50):
-            page = await client.list_tools_mcp(cursor=cursor)
-            tools += [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in page.tools]
-            cursor = page.next_cursor
-            if not cursor:
-                break
-        return tools, client.instructions or ""
+    try:
+        async with asyncio.timeout(timeout), _http_client(entry, timeout) as client:
+            cursor = None
+            for _ in range(50):
+                page = await client.list_tools_mcp(cursor=cursor)
+                tools += [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in page.tools]
+                cursor = page.next_cursor
+                if not cursor:
+                    break
+            return tools, client.instructions or ""
+    except TimeoutError:
+        raise TimeoutError(f"{entry.name} did not answer tools/list within {timeout:g} s") from None
 
 
 async def list_tools(name: str, timeout: float = 90) -> dict:
@@ -221,7 +261,6 @@ async def call_tool(name: str, tool: str, arguments: dict, timeout: float) -> di
 
 _calls: dict[str, tuple[asyncio.Task, float]] = {}  # call id -> (task, when it finished or started)
 _listings: dict[str, asyncio.Task] = {}  # server -> its tools/list in flight
-_ids = itertools.count(1)
 
 
 def _forget_old() -> None:
@@ -243,17 +282,22 @@ async def start_call(name: str, tool: str, arguments: dict, timeout: float, wait
     """Call a tool; (result, None) when it answers within wait_s, else (None, call id)."""
     _entry(name)
     _forget_old()
+    # unique across restarts: an id from before one never finds another call's result
+    key = "m" + uuid.uuid4().hex[:12]
     task = asyncio.ensure_future(call_tool(name, tool, arguments, timeout))
-    if await _within(task, wait_s):
-        return task.result(), None
-    key = f"m{next(_ids)}"
+    # registered before waiting: if this answer is lost (the client gave up), the call is still kept
     _calls[key] = (task, time.time())
 
     def finished(t: asyncio.Task) -> None:
+        if not t.cancelled():
+            t.exception()  # retrieved: a failure nobody came back for is not logged as unhandled
         if key in _calls:
             _calls[key] = (t, time.time())  # kept KEEP_UNCLAIMED_S from now
 
     task.add_done_callback(finished)
+    if await _within(task, wait_s):
+        _calls.pop(key, None)
+        return task.result(), None
     return None, key
 
 
@@ -265,7 +309,8 @@ async def wait_call(key: str, wait_s: float | None = None):
     task = _calls[key][0]
     if not await _within(task, wait_s):
         return None, key
-    _calls.pop(key, None)
+    if _calls.pop(key, None) is None:  # another wait on the same id took it first
+        raise ValueError(f"the result of {key!r} was already handed out")
     return task.result(), None
 
 
@@ -291,20 +336,31 @@ async def listing(name: str, wait_s: float | None = None) -> dict | None:
 # ------------------------------------------------------------------ describing them
 
 
+def _rows() -> list[tuple[ServerEntry, dict | None]]:
+    """Each enabled server and its cached list, from one reading of the configuration and the cache."""
+    data = _read_all()
+    return [(entry, cached(entry, data)) for entry in enabled_entries()]
+
+
+def _masker():
+    redactor = redact.current()
+    return (lambda text: text) if redactor.empty else (lambda text: redactor.data(text)[0])
+
+
 def overview() -> list[dict]:
     """Each enabled server: its state and what the cache knows of its tools."""
+    mask = _masker()  # before cutting: a secret cut in two would no longer be recognised
     out = []
     status = {s["name"]: s for s in services().snapshot()}
-    for entry in enabled_entries():
-        item = cached(entry)
+    for entry, item in _rows():
         row: dict[str, Any] = {"server": entry.name, "state": status.get(entry.name, {}).get("state")}
         if item is None:
             row["tools"] = None
             row["note"] = f'not listed yet: mcp_tools("{entry.name}") starts it and lists its tools'
         else:
-            row["listed_at"] = item.get("listed_at")
+            row["listed_at"] = item["listed_at"]
             row["tools"] = [
-                {"name": t["name"], "description": _first_line(t["description"], TOOL_LINE_CHARS)}
+                {"name": t["name"], "description": _first_line(mask(t["description"]), TOOL_LINE_CHARS)}
                 for t in item["tools"]
             ]
         out.append(row)
@@ -312,36 +368,36 @@ def overview() -> list[dict]:
 
 
 def session_text(budget: int) -> str:
-    """The tools part of a cloud session's start: every enabled server and its tools, one line each."""
+    """The tools part of a cloud session's start: every enabled server and its tools, one line each.
+    Masked before it is measured, so the budget holds for what is sent."""
     from .session_bridge import _size
 
-    rows = overview()
-    head = (
+    mask = _masker()
+    head = mask(
         "Local MCP servers on this PC. Call a tool with mcp_call(server, tool, arguments); "
         "mcp_tools(server) gives each tool's full parameters."
     )
+    rows = _rows()
     if not rows:
         return head + "\n(none are enabled in winhand)"
     parts = [head]
     used = _size(head)
     cut = 0
-    for row in rows:
-        entry = next(e for e in enabled_entries() if e.name == row["server"])
-        item = cached(entry)
-        lines = [f"## {row['server']}"]
+    for entry, item in rows:
+        name = mask(entry.name)
         if item is None:
-            lines.append(f'(not listed yet: mcp_tools("{row["server"]}") starts it and lists its tools)')
+            block = short = f'## {name}\n(not listed yet: mcp_tools("{name}") starts it and lists its tools)'
         else:
-            if item.get("instructions"):
-                lines.append(_first_line(item["instructions"], INSTRUCTIONS_CHARS))
-            lines += [
-                f"- {t['name']}: {t['description']}" if t["description"] else f"- {t['name']}"
-                for t in row["tools"]
+            tools = [
+                (mask(t["name"]), _first_line(mask(t["description"]), TOOL_LINE_CHARS)) for t in item["tools"]
             ]
-        block = "\n".join(lines)
+            lines = [f"## {name}"]
+            if item["instructions"]:
+                lines.append(_first_line(mask(item["instructions"]), INSTRUCTIONS_CHARS))
+            lines += [f"- {tool}: {line}" if line else f"- {tool}" for tool, line in tools]
+            block = "\n".join(lines)
+            short = f"## {name}\n" + (", ".join(tool for tool, _ in tools) or "(no tools)")
         if used + _size(block) + 2 > budget - 80:
-            names = ", ".join(t["name"] for t in row["tools"] or [])
-            short = f"## {row['server']}\n" + (names or "(not listed yet)")
             if used + _size(short) + 2 > budget - 80:
                 cut += 1
                 continue
@@ -351,5 +407,6 @@ def session_text(budget: int) -> str:
     if cut:
         parts.append(f"{cut} more server(s) left out for lack of room; mcp_tools() lists them all.")
     text = "\n\n".join(parts)
-    redactor = redact.current()
-    return text if redactor.empty else redactor.data(text)[0]
+    while _size(text) > budget:  # only a single enormous name gets here
+        text = text[: -max(1, (_size(text) - budget + 1) // 2)]
+    return text

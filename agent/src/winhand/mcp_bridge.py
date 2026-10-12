@@ -80,6 +80,11 @@ def _is_response(m: dict) -> bool:
 # ---------------------------------------------------------------- process
 
 
+def _quietly(function, *args) -> None:
+    with contextlib.suppress(Exception):
+        function(*args)
+
+
 class StdioProcess:
     """One running stdio MCP server: newline-delimited JSON-RPC on stdin/stdout. Threads do
     the pipe work (asyncio pipes differ between event loops on Windows)."""
@@ -335,10 +340,12 @@ class Service:
             )
             return await asyncio.wait_for(future, timeout)
         except (TimeoutError, asyncio.CancelledError):
-            if method != "initialize" and process.alive():  # the spec forbids cancelling initialize
+            # tell the server to stop (never for initialize, which the spec forbids, or a ping). A
+            # thread of its own: a stuck server's full pipe must not block this loop
+            if method not in ("initialize", "ping") and process.alive():
                 cancelled = {"requestId": uid, "reason": "the caller stopped waiting"}
-                with contextlib.suppress(Exception):
-                    process.send({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": cancelled})
+                message = {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": cancelled}
+                threading.Thread(target=_quietly, args=(process.send, message), daemon=True).start()
             raise
         finally:
             self.pending.pop(uid, None)
@@ -442,8 +449,10 @@ class Service:
             return
         from . import local_mcp
 
-        with contextlib.suppress(Exception):
-            local_mcp.remember(self.entry, result["tools"], (self.init_result or {}).get("instructions"))
+        # off this loop: the cache file is read and written whole
+        instructions = (self.init_result or {}).get("instructions")
+        args = (local_mcp.remember, self.entry, result["tools"], instructions)
+        threading.Thread(target=_quietly, args=args, daemon=True).start()
 
     def _time_out(self, uid: int) -> None:
         """A tool call ran past call_timeout_s: answer the client and tell the server to stop."""

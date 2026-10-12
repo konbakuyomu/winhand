@@ -346,7 +346,7 @@ timeout_s = 30                       # 每个 hook 最多等多久
 - **技能**：每个技能的名字和描述（`description`，有 `when_to_use` 时接在后面），和本机 Claude Code 列技能的方式一样。放不下时均匀缩短每条描述，最短 80 字符；仍放不下时其余的只列名字。要用时调用 `skill(name)`；
 - **本机 MCP 工具**：每个启用的本机 MCP 服务的说明和工具清单（每个工具一行说明）。内容来自电脑上的工具清单缓存，开场**不会启动任何服务**；从没列出过工具的服务只写“尚未列出”。调用用 `mcp_call`，完整参数用 `mcp_tools(server)`。
 
-电脑不在线时，每段只有一句说明。0.4.7 生成的单个 hook 仍然可用（规矩加技能名单），重新执行 `winhand bridge init --write` 换成三段。
+电脑不在线时，每段只有一句说明。0.4.7 生成的单个 hook 仍然可用（规矩加技能名单）。升级时先把电脑上的 winhand 更新到 0.4.8，再重新执行 `winhand bridge init --write` 换成三段：电脑还是 0.4.7 时，三段 hook 会各自拿到一份完整的规矩。
 
 设置三步：
 
@@ -375,7 +375,7 @@ hook 令牌只能取开场上下文：中转只为 `/hook/session-start` 认它�
 - `mcp_tools("pyocd-debug")`：必要时启动它，列出每个工具的说明和参数（inputSchema），并更新缓存；
 - `mcp_call("pyocd-debug", "read_memory", {...})`：必要时启动服务并调用，原样返回文字和图片；服务报错时作为工具错误返回。约 40 秒内没有结果时先返回 `call_id`，用 `mcp_call(call_id=...)` 接着等。`timeout_s`（默认 120 秒）之后放弃这次调用并通知服务取消。
 
-`mcp_call` 和其他工具一样受守卫（动作类型 `mcp`）和本机 hooks 约束；本机 hooks 看到的工具名是 `mcp__<服务>__<工具>`，和 Claude Code、Codex 的命名相同，所以写给它们的 matcher（例如 `mcp__pyocd-debug__.*`）同样生效。守卫拒绝时不会启动服务。
+`mcp_call` 和其他工具一样受守卫（动作类型 `mcp`）和本机 hooks 约束；本机 hooks 看到的工具名是 `mcp__<服务>__<工具>`，和 Claude Code、Codex 的命名相同，所以写给它们的 matcher（例如 `mcp__pyocd-debug__.*`）同样生效。守卫拒绝时不会启动服务。`mcp_tools(服务名)` 只列出工具，不受守卫判断：它仍会启动服务。不想让 AI 启动某个服务时，在托盘应用里停用它。
 
 工具清单缓存在 `~/.winhand/cache/mcp-tools.json`，以下三种情况会更新它：任何客户端经下面的独立地址列出工具时、`mcp_tools(服务名)`、托盘应用的“测试”按钮或 `winhand mcp test`。服务的启动命令、参数、地址、工作目录或环境变量改了以后，旧的缓存不再使用。缓存里只有工具清单，没有调用参数和结果。
 
