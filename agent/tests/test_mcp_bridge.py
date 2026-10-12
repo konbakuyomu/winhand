@@ -59,6 +59,7 @@ async def test_a_local_server_is_its_own_endpoint(site):
             "ask",
             "crash",
             "freeze",
+            "fail",
             "pid",
         }  # not renamed, nothing else mixed in
         result = await client.call_tool("echo", {"text": "你好"})

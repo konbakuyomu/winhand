@@ -143,7 +143,7 @@ MCP 看不到三个时机：**用户发消息**、**回答结束**、**上下文
    - `client-rules`（已实现并归档：`docs/comet/archive/2026-10-12-client-rules/`，现行规格见 `docs/comet/specs/workspace-context/spec.md`）：按 Codex、Claude Code 的读法读规矩，`context(repo=…)`，以及 P0 的两处预算遗留；
    - `client-hooks`（已实现并归档：`docs/comet/archive/2026-10-12-client-hooks/`，现行规格见 `docs/comet/specs/hooks/spec.md`、`action-guard`、`workspace-context`）：Claude Code、Codex hooks 翻译成守卫，信任机制。
 3. **P2**：生命周期桥，以及各客户端的配置生成。先做 `session-bridge`（已实现并归档：`docs/comet/archive/2026-10-12-session-bridge/`，现行规格见 `docs/comet/specs/session-bridge/spec.md`，0.4.7 发布）：云端 Claude Code 会话开场（含压缩后）自动带上本机规矩和技能名单；用户发消息、回答结束这两个时机暂不做，理由见其 brief 的 D1。
-4. **P3**：resources 和 prompts 出口；跟随本机 MCP 配置；可选导出到 GitHub。
+4. **P3**：resources 和 prompts 出口；跟随本机 MCP 配置；可选导出到 GitHub。其中经主连接调用本机 MCP（`mcp_tools`、`mcp_call`）和开场带上技能描述、本机 MCP 工具清单，由 `local-skills-tools` 先做（进行中：`docs/comet/changes/local-skills-tools/`）。
 
 ## 待定
 

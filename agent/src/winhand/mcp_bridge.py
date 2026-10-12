@@ -961,7 +961,7 @@ async def probe(entry: ServerEntry, timeout: float | None = None) -> dict:
                 with contextlib.suppress(Exception):
                     local_mcp.remember(
                         entry,
-                        [t.model_dump(mode="json", exclude_none=True) for t in tools],
+                        [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in tools],
                         init.instructions,
                     )
                 if init.capabilities.prompts:

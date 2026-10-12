@@ -191,8 +191,8 @@ def _mcp_result(result: dict) -> ToolResult:
         return ToolResult(content=[_text(text)], is_error=bool(result.get("isError")))
     return ToolResult(
         content=list(parsed.content) or [_text("(the tool returned no content)")],
-        structured_content=parsed.structuredContent,
-        is_error=parsed.isError,
+        structured_content=parsed.structured_content,
+        is_error=parsed.is_error,
     )
 
 

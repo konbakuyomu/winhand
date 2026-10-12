@@ -40,9 +40,10 @@
 - `mcp_tools(server=None)`：
   - 不给 server：列出所有启用的服务、状态和缓存里的工具名；
   - 给 server：必要时启动它，列出工具的名字、描述和参数 schema，并更新缓存。
-- `mcp_call(server, tool, arguments={}, timeout_s=100)`：
+- `mcp_call(server, tool, arguments={}, timeout_s=120, call_id=None)`：
   - 必要时启动服务，调用工具，原样返回内容（文字、图片）；
-  - 服务报错（`isError`）时作为工具错误返回。
+  - 服务报错（`isError`）时作为工具错误返回；
+  - 约 40 秒内没有结果时先返回 `call_id`，`mcp_call(call_id=...)` 接着等（客户端约 60 秒就放弃一个工具调用，与 `run` 的做法相同）；`mcp_tools(server)` 启动慢时同样先返回，再次调用接着等。
 
 **守卫和 hooks**
 - `mcp_call` 描述成新的动作类型 `mcp`，文字为 `<server>.<tool> <参数 JSON>`。
@@ -103,6 +104,8 @@
 - **D2 不为开场启动服务**：开场只读缓存。代价是从没用过的服务开场只有名字，但不会因为开场意外拉起 FreeCAD、摄像头或长时间下载。
 - **D3 经主连接调用本机 MCP**：一个 winhand 连接就能用所有本机 MCP，不必为每个服务单独授权；原有的 `/mcp/<name>` 单独连接器保留。
 - **D4 动作类型 `mcp` 和 hooks 的工具名**：沿用 Claude Code 的 `mcp__server__tool` 命名，本机已有的 hooks 不用改就能匹配。
+- **D5 长调用先返回**（Build 时补充）：客户端约 60 秒放弃一个工具调用，有的服务启动就要几分钟。`mcp_call` 和 `mcp_tools(server)` 约 40 秒内先回答，未完成的在后台继续，凭 `call_id` 或再次调用接着等。`timeout_s` 默认 120 秒，只计调用本身，不计启动。
+- **D6 列出不算动作**（Build 时补充）：`mcp_tools` 只取工具清单，不经守卫判断；等待 `call_id` 也不再判断。
 
 # Open questions
 

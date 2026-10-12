@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Any
 
-from . import config
+from . import config, redact
 from .config import ServerEntry
 
 CACHE_FILE = "mcp-tools.json"
@@ -107,6 +107,7 @@ def services():
         from .mcp_bridge import Services
 
         _own = Services(config.load().servers)
+        atexit.unregister(_stop_own)
         atexit.register(_stop_own)
     return _own
 
@@ -165,33 +166,49 @@ async def _request(name: str, method: str, params: dict, timeout: float) -> dict
     return answer.get("result") or {}
 
 
-async def _http_request(entry: ServerEntry, method: str, params: dict, timeout: float) -> dict:
+def _http_client(entry: ServerEntry, timeout: float):
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
-    transport = StreamableHttpTransport(entry.url, headers=entry.headers or None)
-    async with asyncio.timeout(timeout):
-        async with Client(transport, timeout=timeout) as client:
-            if method == "tools/list":
-                tools = await client.list_tools_mcp()
-                return tools.model_dump(mode="json", exclude_none=True)
-            result = await client.call_tool_mcp(params["name"], params.get("arguments") or {})
-            return result.model_dump(mode="json", exclude_none=True)
+    return Client(StreamableHttpTransport(entry.url, headers=entry.headers or None), timeout=timeout)
+
+
+async def _http_request(entry: ServerEntry, method: str, params: dict, timeout: float) -> dict:
+    async with asyncio.timeout(timeout), _http_client(entry, timeout) as client:
+        result = await client.call_tool_mcp(params["name"], params.get("arguments") or {})
+        return result.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+async def _http_list(entry: ServerEntry, timeout: float) -> tuple[list, str]:
+    """All the tools of a server reached over HTTP, and its instructions (one connection)."""
+    tools: list = []
+    async with asyncio.timeout(timeout), _http_client(entry, timeout) as client:
+        cursor = None
+        for _ in range(50):
+            page = await client.list_tools_mcp(cursor=cursor)
+            tools += [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in page.tools]
+            cursor = page.next_cursor
+            if not cursor:
+                break
+        return tools, client.instructions or ""
 
 
 async def list_tools(name: str, timeout: float = 90) -> dict:
     """Start the server if need be, list its tools (all pages) and remember them."""
     entry = _entry(name)
-    tools: list = []
-    cursor = None
-    for _ in range(50):
-        result = await _request(name, "tools/list", {"cursor": cursor} if cursor else {}, timeout)
-        tools += result.get("tools") or []
-        cursor = result.get("nextCursor")
-        if not cursor:
-            break
-    service = services().get(name)
-    instructions = ((service.init_result or {}).get("instructions") if service else None) or ""
+    if entry.kind == "http":
+        tools, instructions = await _http_list(entry, timeout)
+    else:
+        tools = []
+        cursor = None
+        for _ in range(50):
+            result = await _request(name, "tools/list", {"cursor": cursor} if cursor else {}, timeout)
+            tools += result.get("tools") or []
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+        service = services().get(name)
+        instructions = ((service.init_result or {}).get("instructions") if service else None) or ""
     remember(entry, tools, instructions)
     return cached(entry) or {"tools": tools, "instructions": instructions}
 
@@ -216,13 +233,13 @@ def _forget_old() -> None:
                 task.result()  # retrieved: no "exception was never retrieved" warning
 
 
-async def _within(task: asyncio.Task, wait_s: float) -> bool:
-    """Wait for `task` up to wait_s without cancelling it; whether it is done."""
-    await asyncio.wait({task}, timeout=max(0.0, wait_s))
+async def _within(task: asyncio.Task, wait_s: float | None) -> bool:
+    """Wait for `task` up to wait_s (default ANSWER_WITHIN_S) without cancelling it; whether it is done."""
+    await asyncio.wait({task}, timeout=max(0.0, ANSWER_WITHIN_S if wait_s is None else wait_s))
     return task.done()
 
 
-async def start_call(name: str, tool: str, arguments: dict, timeout: float, wait_s: float = ANSWER_WITHIN_S):
+async def start_call(name: str, tool: str, arguments: dict, timeout: float, wait_s: float | None = None):
     """Call a tool; (result, None) when it answers within wait_s, else (None, call id)."""
     _entry(name)
     _forget_old()
@@ -240,7 +257,7 @@ async def start_call(name: str, tool: str, arguments: dict, timeout: float, wait
     return None, key
 
 
-async def wait_call(key: str, wait_s: float = ANSWER_WITHIN_S):
+async def wait_call(key: str, wait_s: float | None = None):
     """A call that was still running: (result, None) once done, else (None, key) again."""
     _forget_old()
     if key not in _calls:
@@ -252,7 +269,7 @@ async def wait_call(key: str, wait_s: float = ANSWER_WITHIN_S):
     return task.result(), None
 
 
-async def listing(name: str, wait_s: float = ANSWER_WITHIN_S) -> dict | None:
+async def listing(name: str, wait_s: float | None = None) -> dict | None:
     """list_tools(name) within wait_s; None while it is still starting (call again to keep waiting)."""
     _entry(name)
     task = _listings.get(name)
@@ -333,4 +350,6 @@ def session_text(budget: int) -> str:
         used += _size(block) + 2
     if cut:
         parts.append(f"{cut} more server(s) left out for lack of room; mcp_tools() lists them all.")
-    return "\n\n".join(parts)
+    text = "\n\n".join(parts)
+    redactor = redact.current()
+    return text if redactor.empty else redactor.data(text)[0]

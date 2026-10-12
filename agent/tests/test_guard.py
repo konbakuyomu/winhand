@@ -47,6 +47,21 @@ NO_BATCH_DELETE = """\
 # ------------------------------------------------------------------ actions
 
 
+def test_a_local_mcp_call_is_an_mcp_action():
+    (call,) = actions.describe(
+        "mcp_call", {"server": "pyocd-debug", "tool": "flash", "arguments": {"b": 1, "a": "固件"}}
+    )
+    assert call == actions.Action("mcp", "mcp_call", text='pyocd-debug.flash {"a": "固件", "b": 1}')
+    assert call.label() == 'mcp_call → mcp: pyocd-debug.flash {"a": "固件", "b": 1}'
+    assert actions.describe("mcp_call", {"call_id": "m1"}) == []  # waiting runs nothing new
+    assert actions.describe("mcp_tools", {"server": "x"}) == []
+    rule = guard._rule(
+        "g.toml", 1, {"on": "mcp", "match": "^pyocd-debug\\.(flash|erase) ", "decision": "ask"}, None
+    )
+    assert guard.matches(rule, call)
+    assert not guard.matches(rule, actions.describe("mcp_call", {"server": "pyocd-debug", "tool": "read"})[0])
+
+
 def test_describe_maps_tools_to_actions(tmp_path):
     d = str(tmp_path)
     run = actions.describe("run", {"command": "git", "args": ["push"], "cwd": d})

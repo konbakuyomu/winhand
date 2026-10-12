@@ -1025,3 +1025,36 @@ def test_a_large_git_config_still_names_the_remote(tmp_path):
     (common / "config").write_text('[remote "origin"]\n\turl = https://github.com/o/r.git\n' + sections)
     assert (common / "config").stat().st_size > 1_000_000
     assert workspace._remote_urls(str(common)) == ["https://github.com/o/r.git"]
+
+
+# ------------------------------------------------------------------ local-skills-tools A6
+
+
+async def test_a_hook_on_an_mcp_tool_sees_the_call_as_claude_code_names_it(env, monkeypatch):
+    from winhand import local_mcp
+    from winhand.mcp_bridge import Services
+
+    from .test_mcp_bridge import fake_entry
+
+    claude_project_hook(env, "by-command", "mcp__fake__.*")
+    monkeypatch.chdir(env["root"])  # a local MCP call has no folder of its own: winhand's applies
+    services = Services([fake_entry()])
+    monkeypatch.setattr(local_mcp, "active", services)
+    try:
+        async with Client(build_server(Config())) as client:
+            denied = await client.call_tool(
+                "mcp_call",
+                {"server": "fake", "tool": "echo", "arguments": {"text": "DENY"}},
+                raise_on_error=False,
+            )
+            assert denied.is_error and "the hook says no" in text_of(denied)
+            assert services.services["fake"].process is None
+            fine = await client.call_tool(
+                "mcp_call", {"server": "fake", "tool": "echo", "arguments": {"text": "ok"}}
+            )
+            assert text_of(fine) == "echo: ok"
+    finally:
+        await services.close()
+    seen = calls_made(env)
+    assert {c["tool_name"] for c in seen} == {"mcp__fake__echo"}
+    assert seen[0]["tool_input"] == {"text": "DENY"}
