@@ -776,3 +776,29 @@ def test_a_name_too_long_for_the_file_system_falls_back(tmp_path, home):
 def test_other_extended_paths_count_as_remote():
     assert workspace._network("\\\\?\\GLOBALROOT\\Device\\Mup\\srv\\share\\x.md")
     assert not workspace._network("\\\\?\\D:\\x.md")
+
+
+# ------------------------------------------------------------------ round 6
+
+
+def test_the_time_limit_holds_for_very_deep_paths(tmp_path, home, monkeypatch):
+    import time
+
+    monkeypatch.setattr(workspace, "RULES_TIME_S", 1.0)
+    root = project(tmp_path)
+    glob = "**/" + "{a,*}/" * 10 + "a/" * 400 + "b"
+    write(root / ".claude" / "rules" / "deep.md", f"---\npaths:\n  - '{glob[:990]}'\n---\nx")
+    deep = root.joinpath(*(["a"] * 150))
+    began = time.monotonic()
+    out = ctx(deep / "x.c", formats=["claude-code"])
+    assert time.monotonic() - began < 6
+    assert "incomplete" in out or out["rules_not_applied"]
+
+
+def test_empty_brace_alternatives_and_the_depth_limit():
+    root = "/r" if os.name != "nt" else "C:\\r"
+    glob = ["docs/{,internal/}*.md"]
+    assert workspace.rule_applies(glob, root, os.path.join(root, "docs", "a.md"))
+    assert workspace.rule_applies(glob, root, os.path.join(root, "docs", "internal", "a.md"))
+    assert workspace._braces("{a" * 16 + "}" * 16) == ["a" * 16]
+    assert "{" in workspace._braces("{a" * 17 + "}" * 17)[0]

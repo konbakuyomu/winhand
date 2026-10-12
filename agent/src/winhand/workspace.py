@@ -241,6 +241,8 @@ def _split_top(value: str, escapes: bool = False) -> list[str]:
             continue
         current.append(ch)
     parts.append("".join(current).strip())
+    if escapes:  # a {} group: an empty alternative means "nothing here"
+        return parts
     return [p for p in parts if p]
 
 
@@ -315,7 +317,7 @@ CHECKOUTS_CHARS = 4_000
 def _braces(pattern: str, limit: int = 1000, depth: int = 0) -> list[str]:
     """`src/*.{c,h}` -> ['src/*.c', 'src/*.h']; `\\{`, `\\}` and `\\,` are literal."""
     start = _unescaped(pattern, "{")
-    if start < 0 or depth > 16:
+    if start < 0 or depth >= 16:
         return [pattern]
     level = 0
     i = start
@@ -460,6 +462,8 @@ def rule_applies(
         if late is not None and late():
             return None
         for pattern in _braces(glob.removeprefix("./").lstrip("/"), left):
+            if late is not None and late():
+                return None
             if budget is not None:
                 if budget[0] <= 0:
                     return None
@@ -875,13 +879,15 @@ def _collect(cfg: Config, root: str | None, start: str | None, target: str | Non
 
     def claude_files(folder: str) -> list[str]:
         paths = [os.path.join(folder, n) for n in CLAUDE_FILES]
-        return [p for p in paths if _key(p) not in user_files]
+        return [p for p in paths if os.path.lexists(p) and _key(p) not in user_files]
 
     # with Claude Code's reading alone, AGENTS.md stands in when no CLAUDE file is in sight
     agents_for_claude = formats == ["claude-code"] and not any(
         os.path.isfile(p) for d in levels for p in claude_files(d)
     )
     for folder in levels:
+        if rules.late():
+            break
         in_project = os.path.normcase(folder) in project
         home = root if in_project else folder  # where a file found here may really be
         for fmt in formats:
