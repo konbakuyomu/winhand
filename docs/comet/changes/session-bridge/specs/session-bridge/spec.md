@@ -7,12 +7,14 @@
 - 入口：`POST /hook/<event>`。`<event>` 目前只有 `session-start`；其他值返回 404。方法不是 POST 时返回 405。
 - 只在中转配置了密钥 `HOOK_TOKEN` 时存在；没配置时 `/hook/` 下一律 404。
 - 认证：请求头 `X-Winhand-Hook-Token` 与 `HOOK_TOKEN` 比较，用 SHA-256 摘要后常量时间比较。
-  - 没带或不对：401，并按来源 IP 计数；同一 IP 15 分钟内累计 20 次后，一律 429，直到计数过期。
-- 请求体最多 64 KiB，超出返回 413。
+  - 没带：401，不计数（多半是没设置令牌的环境，例如仓库的克隆；不占 KV 写入）。
+  - 带错：401，按来源 IP 计数；同一 IP 15 分钟内错满 20 次后，带错的一律 429，直到计数过期。带对的令牌不受影响，主人不会被别人锁在外面（令牌是 256 位，计数只为挡住大量猜测对 KV 的消耗）。
+- 请求体最多 64 KiB，超出返回 413；没有 `content-length` 的分块正文边读边数，超出即停。
 - 通过后经现有隧道转给电脑：路径 `/hook/<event>`，身份 `x-winhand-user: hook`。客户端自己带的 `x-winhand-user` 不被采用。
-- 电脑离线（等待宽限期后仍不在）、超时或回 5xx 时，中转回 200，正文为：
+- 等电脑的时间比 MCP 请求短：电脑不在时最多等 5 秒（宽限期更短时按宽限期），等回答最多 15 秒。这样在 hook 的 curl（25 秒）放弃之前就有答复，电脑关机时会话开场也只多等几秒。
+- 电脑离线、超时或回 5xx 时，中转回 200，正文为：
   `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<一句说明>"}}`
-  说明写明：winhand 不在线或没有回答，这次没带上本机规矩；电脑在线后可调用 `context(repo=…)`。
+  说明写明：winhand 不在线、没有及时回答或出错（附 HTTP 状态），这次没带上本机规矩；电脑在线后可调用 `context(repo=…)`。
 
 Scenario: (A1) 正确的令牌
 - 设置：中转配置了 `HOOK_TOKEN`，电脑在线。
@@ -57,11 +59,11 @@ Scenario: (A3) 身份不对
 - 找本机目录：用 `context(repo=…)` 的同一套办法（Codex、Claude Code 记录的项目和 `[context] repo_roots`）。找到时项目根就是那个检出目录；找不到或没给时没有项目。
 - 正文按顺序：
   1. 开头一段说明（不超过约 600 字符）：
-     - 这些内容来自哪台电脑（主机名）和哪个本机目录；
+     - 这些内容来自哪台电脑（主机名）和哪个本机目录；仓库只以 `owner/name` 的形式出现，远端地址里的凭据不会写进来；
      - 技能和其中的脚本在这台电脑上，要经 winhand 的工具读取和运行；
      - 完整内容用 `context(repo="<仓库>")`。
   2. 全局规矩：与 `context()` 相同的读法，受 `[context] formats`、`rules` 设置控制；每份带路径。
-  3. 项目规矩中，本机检出目录里**没被 git 跟踪**的规则文件（例如被忽略的 `CLAUDE.local.md`、`AGENTS.md`）。已跟踪的不放：云端仓库里有它们。判断用 `git ls-files`；本机没有 git 或命令失败时，把项目规矩都当作没跟踪。
+  3. 项目规矩中，本机检出目录里**没被 git 跟踪**的规则文件（例如被忽略的 `CLAUDE.local.md`、`AGENTS.md`），`@` 引用进来的文件同样判断。已跟踪的不放：云端仓库里有它们。判断用 `git ls-files`（最多 5 秒）；本机没有 git 或命令失败时，把项目规矩都当作没跟踪。
   4. 技能名单：只有名字，一行列完，同名去重。
 - 格式：纯文本，每份规矩以 `## <路径>` 开头。
 - 读的每个文件先过守卫的 `read` 规则；被拒绝的不读，只列路径和“被守卫拒绝”。全文经过 `[redact]` 脱敏。
@@ -74,7 +76,8 @@ Scenario: (A4) 开场带上规矩
 
 ### R5 预算和找不到时
 
-- `additionalContext` 总长不超过 9,000 字符（按脱敏后的长度）。
+- `additionalContext` 总长不超过 9,000 字符：按脱敏后的长度，并按 Claude Code 的算法计数（JavaScript 字符串长度，BMP 以外的字符算 2 个）。
+- 技能名单先留出最多 2,500 字符；规矩放完后还有剩余，技能名单可以用掉剩余部分。
 - 放不下时依次处理：
   - 技能名单截断，末尾写“另有 N 个”；
   - 规矩从后往前改为只列路径，并注明“未放入，用 context() 读”；
@@ -105,7 +108,9 @@ Scenario: (A5) 找不到仓库
   - `CLAUDE_CODE_REMOTE` 不是 `true` 时退出 0；
   - 用 `git -C "$CLAUDE_PROJECT_DIR" remote get-url origin` 取仓库地址，取不到时用空值；
   - `curl -sS --max-time 25` 把 stdin 原样 POST 到 `https://<中转>/hook/session-start`，带 `content-type: application/json`、`X-Winhand-Repo`；`WINHAND_HOOK_TOKEN` 非空时再带 `X-Winhand-Hook-Token`；
-  - curl 成功（HTTP 2xx）时输出它收到的正文；否则不输出，退出 0。
+  - 远端地址里 `@` 之前的部分（凭据）去掉后再发；
+  - 回答先写到临时文件，HTTP 状态是 2xx 时才输出（3xx 的登录页之类不会进入会话）；其他情况不输出，退出 0。
+  - 命令是 POSIX sh；Windows 上本机的 Claude Code 用 Git Bash 运行 hook，命令在那里因 `CLAUDE_CODE_REMOTE` 不是 `true` 直接退出。
 - `--write <仓库目录>`：把片段合并进 `<仓库目录>/.claude/settings.json`：
   - 文件不存在时新建；
   - 保留已有的键和其他 hooks；

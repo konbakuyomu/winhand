@@ -362,7 +362,7 @@ timeout_s = 30                       # 每个 hook 最多等多久
    - 推荐用 Network secrets（Pro/Max 才有）：网站填中转的域名，自定义请求头 `X-Winhand-Hook-Token`，前缀留空。令牌由代理在请求离开容器后加上，不进容器；
    - 没有 Network secrets 时：Network access 里放行中转的域名，再设环境变量 `WINHAND_HOOK_TOKEN`。使用这个环境的人都能看到这个变量。
 
-hook 令牌只能取开场上下文：中转只为 `/hook/session-start` 认它，不能调用任何工具，也打不开 `/mcp`。内容与 `context()` 一样经过守卫的 `read` 规则和脱敏。本机的 Claude Code 不受影响：hook 只在 `CLAUDE_CODE_REMOTE=true`（云端）时运行，出任何错都安静退出，不打断会话。多仓库的云端会话不读仓库的 hooks，这个功能不生效。
+hook 令牌只能取开场上下文：中转只为 `/hook/session-start` 认它，不能调用任何工具，也打不开 `/mcp`。生成的配置里写着中转的域名，提交后看得到仓库的人都能看到它，建议只用于私有仓库；没有令牌的请求会被拒绝。内容与 `context()` 一样经过守卫的 `read` 规则和脱敏。本机的 Claude Code 不受影响：hook 只在 `CLAUDE_CODE_REMOTE=true`（云端）时运行，出任何错都安静退出，不打断会话。多仓库的云端会话不读仓库的 hooks，这个功能不生效。
 
 ## 本机的其他 MCP 服务
 

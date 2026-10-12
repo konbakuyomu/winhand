@@ -197,12 +197,13 @@ def test_token_is_new_each_time(capsys):
 
 class _Relay(http.server.BaseHTTPRequestHandler):
     seen: list = []
+    status = 200
 
     def do_POST(self):  # noqa: N802
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
         _Relay.seen.append((self.path, dict(self.headers), body))
         answer = b'{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"RULES"}}'
-        self.send_response(200)
+        self.send_response(_Relay.status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(answer)))
         self.end_headers()
@@ -255,7 +256,64 @@ def test_the_generated_command_behaves(tmp_path):
     _Relay.seen.clear()
     done = run({})
     assert done.returncode == 0 and done.stdout == b"" and not _Relay.seen
+
+    _Relay.status = 302  # a login page in the way: nothing of it reaches the session
+    done = run({"CLAUDE_CODE_REMOTE": "true"})
+    assert done.returncode == 0 and done.stdout == b""
+    _Relay.status = 200
+
+    git("remote", "set-url", "origin", "https://someone:s3cret@github.com/owner/name", cwd=repo)
+    done = run({"CLAUDE_CODE_REMOTE": "true"})
+    assert _Relay.seen[-1][1]["X-Winhand-Repo"] == "github.com/owner/name"
     server.shutdown()
 
     done = run({"CLAUDE_CODE_REMOTE": "true"})  # nothing listens now
     assert done.returncode == 0 and done.stdout == b""
+
+
+# ------------------------------------------------------------------ round 2
+
+
+def test_tracked_imported_rules_are_left_out_too(checkout):
+    write(checkout / "CLAUDE.md", "@docs/rules.md")
+    write(checkout / "docs" / "rules.md", "TRACKED IMPORTED RULE")
+    git("add", "CLAUDE.md", "docs/rules.md", cwd=checkout)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "imports", cwd=checkout)
+    text = session_bridge.session_start("owner/name", Config())
+    assert "TRACKED IMPORTED RULE" not in text and "UNTRACKED LOCAL RULE" in text
+
+
+def test_many_skills_all_named_when_there_is_room(checkout, home):
+    for i in range(150):
+        write(
+            home / ".agents" / "skills" / f"skill-{i:03}" / "SKILL.md",
+            f"---\nname: skill-{i:03}\ndescription: d\n---\n",
+        )
+    text = session_bridge.session_start("owner/name", Config())
+    assert "skill-149" in text and "more)" not in text
+
+
+def test_the_budget_counts_as_claude_code_does(checkout, home):
+    write(home / ".codex" / "AGENTS.md", "\U0001f600" * 6_000)  # each is two UTF-16 units
+    text = session_bridge.session_start("owner/name", Config())
+    assert session_bridge._size(text) <= session_bridge.BUDGET_CHARS
+
+
+def test_the_opening_note_stays_short(checkout):
+    text = session_bridge.session_start("https://github.com/owner/name" + "/x" * 300, Config())
+    assert len(text.split("\n\n")[0]) < 700
+
+
+def test_a_rule_not_read_says_so_once(checkout, home, monkeypatch):
+    real = workspace._collect
+
+    def collect(*args):
+        rules = real(*args)
+        rules.items.append(
+            {"path": "/x/AGENTS.md", "format": "codex", "scope": "global", "skipped": "not read: test"}
+        )
+        return rules
+
+    monkeypatch.setattr(workspace, "_collect", collect)
+    text = session_bridge.session_start("owner/name", Config())
+    assert "(not read: test)" in text and "not read: not read" not in text

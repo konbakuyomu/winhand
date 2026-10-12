@@ -24,6 +24,10 @@ type Pending = {
 };
 
 const HEAD_TIMEOUT_MS = 120_000;
+// A session-start hook gives up after 25 s (its curl): the relay answers well before that, so the
+// session is told why it got no rules, and a PC that is off delays a session start only briefly.
+const HOOK_HEAD_TIMEOUT_MS = 15_000;
+const HOOK_GRACE_MS = 5_000;
 // The agent drops off for seconds at a time (winhand restarting or updating, the PC's network
 // switching). A request arriving then waits this long for it to come back before failing.
 const DEFAULT_GRACE_S = 20;
@@ -68,8 +72,8 @@ export class Bridge extends DurableObject<Env> {
     return (Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_GRACE_S) * 1000;
   }
 
-  /** The agent's socket, waiting up to the grace period for it to (re)connect. */
-  private async waitForAgent(): Promise<WebSocket | undefined> {
+  /** The agent's socket, waiting up to the grace period (or `limitMs`) for it to (re)connect. */
+  private async waitForAgent(limitMs?: number): Promise<WebSocket | undefined> {
     const socket = this.agent();
     if (socket) return socket;
     await new Promise<void>((resolve) => {
@@ -80,7 +84,7 @@ export class Bridge extends DurableObject<Env> {
       const timer = setTimeout(() => {
         this.waiters = this.waiters.filter((w) => w !== done);
         resolve();
-      }, this.graceMs());
+      }, Math.min(this.graceMs(), limitMs ?? Infinity));
       this.waiters.push(done);
     });
     return this.agent();
@@ -136,8 +140,10 @@ export class Bridge extends DurableObject<Env> {
     const rpc = requestIds(request.method, mcp ? body : null);
     const reply = errorReply(rpc);
 
-    const socket = await this.waitForAgent();
+    const hook = path.startsWith("/hook/");
+    const socket = await this.waitForAgent(hook ? HOOK_GRACE_MS : undefined);
     if (!socket) return reply(await this.offlineMessage(), 503);
+    const headTimeout = hook ? HOOK_HEAD_TIMEOUT_MS : HEAD_TIMEOUT_MS;
 
     const id = crypto.randomUUID();
     const headers = forwardableRequestHeaders(request.headers);
@@ -147,12 +153,12 @@ export class Bridge extends DurableObject<Env> {
         this.pending.delete(id);
         resolve(
           reply(
-            `winhand on the PC did not answer within ${HEAD_TIMEOUT_MS / 1000} s; the call may still be running there. ` +
+            `winhand on the PC did not answer within ${headTimeout / 1000} s; the call may still be running there. ` +
               "Check history() before resending it.",
             504,
           ),
         );
-      }, HEAD_TIMEOUT_MS);
+      }, headTimeout);
       this.pending.set(id, {
         socket,
         started: false,

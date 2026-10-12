@@ -21,6 +21,7 @@ from . import config, redact, workspace
 EVENTS = ("session-start",)
 BUDGET_CHARS = 9_000  # Claude Code keeps 10,000 characters of additionalContext
 LEFT_OUT_CHARS = 600  # room kept for naming the rules that do not fit
+SKILLS_CHARS = 2_500  # room first kept for skill names; more when the rules leave some
 HOOK_USER = "hook"
 
 
@@ -33,7 +34,7 @@ def _tracked(root: str, paths: list[str]) -> set[str]:
         done = subprocess.run(
             ["git", "-C", root, "ls-files", "-z", "--", *inside],
             capture_output=True,
-            timeout=10,
+            timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -55,6 +56,29 @@ def _inside(path: str, root: str) -> bool:
         return False
 
 
+def _size(text: str) -> int:
+    """Length as Claude Code counts it (JavaScript strings: UTF-16 code units)."""
+    return len(text) + sum(1 for c in text if ord(c) > 0xFFFF)
+
+
+def _skills_line(names: list[str], room: int) -> str:
+    """'Skills on the PC: a, b, ...' in at most `room` characters, saying how many were left out."""
+    if not names:
+        return ""
+    head = "Skills on the PC: "
+    full = head + ", ".join(names)
+    if _size(full) <= room:
+        return full
+    kept: list[str] = []
+    used = _size(head) + 30  # " (and N more)"
+    for name in names:
+        if used + _size(name) + 2 > room:
+            break
+        kept.append(name)
+        used += _size(name) + 2
+    return head + ", ".join(kept) + f" (and {len(names) - len(kept)} more)" if kept or room >= 40 else ""
+
+
 def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
     """The additionalContext for a session of `repo` (a remote URL or owner/name; may be empty)."""
     cfg = cfg or config.load()
@@ -65,60 +89,56 @@ def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
         return text if redactor.empty else redactor.data(text)[0]
 
     machine = socket.gethostname() or "this PC"
-    checkout, missing = None, None
+    named = (workspace.repo_key(repo) or repo[:100]) if repo else None  # owner/name, never a credential
+    checkout, missing = None, False
     if repo:
         try:
             checkout = workspace.find_repo(cfg, repo)["checkout"]
         except ValueError:
-            missing = repo
+            missing = True
     root = workspace.project_root(checkout) if checkout else None
     rules = workspace._collect(cfg, root, checkout, checkout)
+    ordered = rules.ordered()  # imported files too
     project_files = [
-        i["path"] for i in rules.items if i.get("scope") == "project" and root and _inside(i["path"], root)
+        i["path"] for i in ordered if i.get("scope") == "project" and root and _inside(i["path"], root)
     ]
     in_cloud = _tracked(root, project_files) if root else set()
 
     lines = [
         f"Rules and skills of the PC {machine!r}, sent by winhand at session start"
-        + (f" (local checkout of this repository: {checkout})." if checkout else "."),
+        + (f" (its checkout of {named}: {checkout})." if checkout else "."),
     ]
     if missing:
-        lines.append(f"This PC has no checkout of {missing}; only its own rules and skills follow.")
+        lines.append(f"This PC has no checkout of {named}; only its own rules and skills follow.")
     elif not repo:
         lines.append("The repository was not named; only the PC's own rules and skills follow.")
     lines.append(
         "Skills and their scripts are on that PC: read them and run them with the winhand tools. "
         + (
-            f'For everything (and the rules of other folders) call context(repo="{repo}").'
-            if repo
+            f'For everything (and the rules of other folders) call context(repo="{named}").'
+            if named
             else "For everything, call context()."
         )
     )
     intro = mask("\n".join(lines))
 
     sections: list[tuple[str, str | None, str]] = []  # (path, text or None, why it has no text)
-    for item in rules.ordered():
+    for item in ordered:
         if item.get("scope") == "project" and item["path"] in in_cloud:
             continue  # the cloud checkout has it
         text = rules.texts.get(id(item))
-        why = item.get("skipped") or item.get("error") or ""
-        sections.append((mask(item["path"]), None if text is None else mask(text), mask(str(why))))
+        why = str(item.get("skipped") or item.get("error") or "")
+        sections.append((mask(item["path"]), None if text is None else mask(text), mask(why)))
 
-    names = sorted({s["name"] for s in workspace.skills(cfg, root, rules.refused)}, key=str.lower)
-    skills_line = mask("Skills on the PC: " + ", ".join(names)) if names else ""
+    names = [
+        mask(n)
+        for n in sorted({s["name"] for s in workspace.skills(cfg, root, rules.refused)}, key=str.lower)
+    ]
 
-    budget = BUDGET_CHARS - len(intro) - 2
+    budget = BUDGET_CHARS - _size(intro) - 2
     parts = [intro]
-    skills_part = skills_line
-    if len(skills_part) > min(budget // 3, 2_500):  # keep room for the rules
-        kept, used = [], len("Skills on the PC: ")
-        for name in names:
-            if used + len(name) + 2 > min(budget // 3, 2_500) - 40:
-                break
-            kept.append(name)
-            used += len(name) + 2
-        skills_part = mask("Skills on the PC: " + ", ".join(kept) + f" (and {len(names) - len(kept)} more)")
-    budget -= len(skills_part) + 2 if skills_part else 0
+    skills_room = min(_size(_skills_line(names, 10**9)), SKILLS_CHARS)  # held back for now
+    budget -= skills_room + 2 if names else 0
     left_out_room = min(LEFT_OUT_CHARS, max(budget, 0))  # kept for naming what does not fit
     budget -= left_out_room
 
@@ -126,32 +146,41 @@ def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
     for path, text, why in sections:
         head = f"## {path}"
         if text is None:
-            entry = f"{head}\n(not read: {why})" if why else head
+            entry = f"{head}\n({why if why.startswith('not read') else 'not read: ' + why})" if why else head
         else:
             entry = f"{head}\n{text}"
-        if len(entry) + 2 <= budget:
+        if _size(entry) + 2 <= budget:
             parts.append(entry)
-            budget -= len(entry) + 2
+            budget -= _size(entry) + 2
             continue
         note = "\n[cut here: read the rest with context() or fs_read]"
-        room = budget - len(head) - len(note) - 3
+        room = budget - _size(head) - _size(note) - 3
         if text is not None and room >= 400 and not left_out:
-            parts.append(f"{head}\n{text[:room]}{note}")
-            budget -= len(head) + room + len(note) + 3
+            cut = text[:room]
+            while _size(cut) > room:
+                cut = cut[: -max(1, (_size(cut) - room))]
+            parts.append(f"{head}\n{cut}{note}")
+            budget -= _size(head) + _size(cut) + _size(note) + 3
             continue
         left_out.append(path)
     if left_out:
         tail = "Not included for lack of room (read them with context() or fs_read): "
         listed: list[str] = []
         for path in left_out:
-            if len(tail) + sum(len(p) + 2 for p in listed) + len(path) + 30 > left_out_room:
+            if _size(tail) + sum(_size(p) + 2 for p in listed) + _size(path) + 30 > left_out_room:
                 break
             listed.append(path)
         more = f" and {len(left_out) - len(listed)} more" if len(listed) < len(left_out) else ""
         parts.append(tail + "; ".join(listed) + more)
-    if skills_part:
-        parts.append(skills_part)
-    return "\n\n".join(parts)[:BUDGET_CHARS]
+        budget += left_out_room - _size(parts[-1]) - 2
+    else:
+        budget += left_out_room
+    if names:
+        parts.append(_skills_line(names, skills_room + max(budget, 0)))  # whatever room is left
+    text = "\n\n".join(p for p in parts if p)
+    while _size(text) > BUDGET_CHARS:  # never past the budget, whatever the arithmetic above
+        text = text[: -max(1, _size(text) - BUDGET_CHARS)]
+    return text
 
 
 async def endpoint(request):
@@ -211,16 +240,20 @@ def relay_origin(url: str) -> str:
 
 
 def hook_command(origin: str) -> str:
-    """The SessionStart command for a repository's .claude/settings.json: in a cloud session only,
-    POST the hook input to the relay with the repository's remote; quiet whatever happens. The
-    token comes from a Network secret (added by the egress proxy) or WINHAND_HOOK_TOKEN."""
+    """The SessionStart command for a repository's .claude/settings.json (POSIX sh): in a cloud
+    session only, POST the hook input to the relay with the repository's remote (credentials cut
+    off), and print the answer only when it is a 2xx; quiet and exit 0 whatever happens. The token
+    comes from a Network secret (added by the egress proxy) or WINHAND_HOOK_TOKEN."""
     return (
         '[ "$CLAUDE_CODE_REMOTE" = true ] || exit 0; '
-        'repo=$(git -C "${CLAUDE_PROJECT_DIR:-.}" remote get-url origin 2>/dev/null); '
-        "curl -fsS --max-time 25 -X POST -H 'content-type: application/json' "
+        'repo=$(git -C "${CLAUDE_PROJECT_DIR:-.}" remote get-url origin 2>/dev/null); repo=${repo##*@}; '
+        "out=$(mktemp) || exit 0; "
+        "code=$(curl -sS --max-time 25 -o \"$out\" -w '%{http_code}' -X POST "
+        "-H 'content-type: application/json' "
         '-H "X-Winhand-Repo: $repo" '
         '${WINHAND_HOOK_TOKEN:+-H "X-Winhand-Hook-Token: $WINHAND_HOOK_TOKEN"} '
-        f"--data-binary @- '{origin}{HOOK_MARK}' 2>/dev/null || true"
+        f"--data-binary @- '{origin}{HOOK_MARK}' 2>/dev/null); "
+        'case "$code" in 2??) cat "$out";; esac; rm -f "$out"; exit 0'
     )
 
 

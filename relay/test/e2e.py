@@ -157,9 +157,13 @@ async def main() -> None:
         check(as_mcp.status_code == 401, f"the hook token does not open /mcp ({as_mcp.status_code})")
         as_agent = await http.get(f"{BASE}/agent", headers={"X-Winhand-Hook-Token": HOOK_TOKEN, "Upgrade": "websocket"})
         check(as_agent.status_code == 401, f"the hook token does not open /agent ({as_agent.status_code})")
+        as_local = await http.post(f"{BASE}/mcp/fake", headers={"X-Winhand-Hook-Token": HOOK_TOKEN}, json={})
+        check(as_local.status_code == 401, f"the hook token does not open /mcp/<name> ({as_local.status_code})")
+        none = await http.post(hook_url, content=start)
+        check(none.status_code == 401, f"hook without a token refused ({none.status_code})")
         away = await http.post(hook_url, content=start, headers={"X-Winhand-Hook-Token": HOOK_TOKEN})
         said = away.json()["hookSpecificOutput"]["additionalContext"] if away.status_code == 200 else ""
-        check("offline or did not answer" in said, f"PC offline: the session is told so ({away.status_code} {away.text[:120]})")
+        check("offline, did not answer in time, or failed" in said, f"PC offline: the session is told so ({away.status_code} {away.text[:120]})")
 
         await dropped_mid_stream(http, rpc_headers, ws_url)
 

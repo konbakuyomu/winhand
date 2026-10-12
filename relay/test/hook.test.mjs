@@ -8,7 +8,7 @@ import test from 'node:test';
 
 const source = stripTypeScriptTypes(fs.readFileSync(new URL('../src/hook.ts', import.meta.url), 'utf8'))
   .replace(/^export /gm, '');
-const sandbox = { Response, Request, Headers, URL, TextEncoder, Uint8Array, Number, String, Set, Promise,
+const sandbox = { Response, Request, Headers, URL, TextEncoder, Uint8Array, Number, String, Set, Promise, Infinity,
   crypto: { subtle: Object.assign(Object.create(webcrypto.subtle), {
     digest: (...a) => webcrypto.subtle.digest(...a),
     // the Workers runtime has timingSafeEqual; node's webcrypto does not
@@ -58,14 +58,19 @@ test('only POST', async () => {
   assert.equal(response.headers.get('allow'), 'POST');
 });
 
-test('a missing or wrong token is refused and counted; 20 failures lock the address out', async () => {
+test('a missing token is refused without being counted', async () => {
   const env = { HOOK_TOKEN: 'right-token', OAUTH_KV: kv() };
-  assert.equal((await call(env, { token: null })).response.status, 401);
-  assert.equal((await call(env, { token: 'wrong' })).response.status, 401);
-  for (let i = 0; i < 18; i++) await call(env, { token: 'wrong' });
-  const locked = await call(env, { token: 'right-token' });
-  assert.equal(locked.response.status, 429);
-  assert.equal(locked.forwarded.length, 0);
+  for (let i = 0; i < 30; i++) assert.equal((await call(env, { token: null })).response.status, 401);
+  assert.equal(env.OAUTH_KV.stored.size, 0);
+});
+
+test('wrong tokens are counted; after 20 they get 429, the right token still gets in', async () => {
+  const env = { HOOK_TOKEN: 'right-token', OAUTH_KV: kv() };
+  for (let i = 0; i < 20; i++) assert.equal((await call(env, { token: 'wrong' })).response.status, 401);
+  assert.equal((await call(env, { token: 'wrong' })).response.status, 429);
+  const owner = await call(env, { token: 'right-token' });
+  assert.equal(owner.response.status, 200);
+  assert.equal(owner.forwarded.length, 1);
 });
 
 test('the right token forwards as the hook identity, without the token', async () => {
@@ -88,13 +93,33 @@ test('a body over 64 KiB is refused', async () => {
   assert.equal(forwarded.length, 0);
 });
 
+test('a chunked body over 64 KiB is refused while reading', async () => {
+  const env = { HOOK_TOKEN: 'right-token', OAUTH_KV: kv() };
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (sent > 200 * 1024) return controller.close();
+      sent += 16 * 1024;
+      controller.enqueue(new Uint8Array(16 * 1024));
+    },
+  });
+  const request = new Request('https://relay.example/hook/session-start', {
+    method: 'POST', body: stream, duplex: 'half', headers: { 'x-winhand-hook-token': 'right-token' },
+  });
+  const forwarded = [];
+  const response = await hookRequest(request, env, 'session-start', async (r) => { forwarded.push(r); return new Response('x'); });
+  assert.equal(response.status, 413);
+  assert.equal(forwarded.length, 0);
+  assert.ok(sent < 200 * 1024, 'stopped reading early');
+});
+
 test('when the PC cannot answer, the session gets one line saying so', async () => {
   const env = { HOOK_TOKEN: 'right-token', OAUTH_KV: kv(), reply: () => new Response('offline', { status: 503 }) };
   const { response } = await call(env);
   assert.equal(response.status, 200);
   const out = await response.json();
   assert.equal(out.hookSpecificOutput.hookEventName, 'SessionStart');
-  assert.match(out.hookSpecificOutput.additionalContext, /offline or did not answer \(HTTP 503\)/);
+  assert.match(out.hookSpecificOutput.additionalContext, /offline, did not answer in time, or failed \(HTTP 503\)/);
 });
 
 test('a refusal from the PC passes through', async () => {
