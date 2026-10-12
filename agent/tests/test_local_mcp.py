@@ -523,9 +523,10 @@ async def test_a_long_call_still_awaited_does_not_make_the_server_look_stuck(ser
     monkeypatch.setattr(mcp_bridge, "CHECK_AFTER_S", 0.05)
     monkeypatch.setattr(mcp_bridge, "PING_TIMEOUT_S", 0.2)
     monkeypatch.setattr(mcp_bridge, "RESTART_AFTER_S", 0.1)
+    fake = services.services["fake"]
+    await fake.ensure_started()  # running already: the call itself is what is in flight
     result, key = await local_mcp.start_call("fake", "freeze", {"seconds": 1.5}, 20, wait_s=0.3)
     assert result is None
-    fake = services.services["fake"]
     pid = fake.process.pid
     assert not fake.unanswered  # its caller still waits within timeout_s
     assert await fake.check_health(before_call=True) is None
@@ -560,3 +561,14 @@ async def test_a_server_that_stopped_reading_is_judged_and_stopped_without_hangi
             break
         await asyncio.sleep(0.05)
     assert not process.alive() and time.monotonic() - started < 8
+
+
+async def test_a_call_that_gives_up_while_its_server_is_stopped_is_forgotten(services):
+    fake = services.services["fake"]
+    await fake.ensure_started()
+    task = asyncio.ensure_future(local_mcp.call_tool("fake", "freeze", {"seconds": 6}, 0.5))
+    await asyncio.sleep(0.2)
+    await fake.stop()  # the frozen server ignores EOF: stop waits, and the call times out meanwhile
+    with pytest.raises(Exception):  # noqa: B017 - timed out or failed with the stop, either way
+        await task
+    assert not fake.unanswered  # nothing left to make the next start look stuck

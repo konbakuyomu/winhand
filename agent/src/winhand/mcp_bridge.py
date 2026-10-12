@@ -387,7 +387,8 @@ class Service:
             # still awaited is not a sign of a stuck server): if no answer comes, the health check
             # pings the server and restarts it. Never for initialize (the spec forbids cancelling it)
             # or a ping (the health check's own)
-            if method not in ("initialize", "ping") and process.alive():
+            # (and only for the process still serving: one being stopped is forgotten with its requests)
+            if method not in ("initialize", "ping") and self.process is process and process.alive():
                 self.unanswered[uid] = sent_at
                 cancelled = {"requestId": uid, "reason": "the caller stopped waiting"}
                 message = {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": cancelled}
