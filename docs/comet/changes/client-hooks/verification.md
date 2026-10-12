@@ -31,6 +31,10 @@
 - Claude Code 退出码 2 时仍以 stderr 为理由（与规格一致）；
 - 另加一条测试：hooks 开启、但没有任何 hook 文件时，`fs_write`、`fs_read`、`run` 的结果与以前相同。
 
+**CI**（run 38195189706，519b980）：ubuntu 通过；windows 有 1 个失败：`test_a_trusted_codex_project_hook_refuses_a_write`。
+- 原因：Codex 和 winhand 都用 `pwsh -NoProfile -Command <命令>` 运行 hook，PowerShell 会把程序的退出码 2 变成 1。在用户真机（PowerShell 7.6.5）上核对过：不加 `; exit $LASTEXITCODE` 时得到 1，加上后得到 2。
+- 结论：winhand 与 Codex 的行为一致，是测试里的 hook 命令写法不对。测试改为在 `commandWindows` 末尾加 `; exit $LASTEXITCODE`，README 写明了这个坑。
+
 ## 第 2 轮
 
 （待填）

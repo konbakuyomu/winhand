@@ -58,7 +58,7 @@ def codex_command(mode: str) -> dict:
     return {
         "type": "command",
         "command": f'"{py}" "{SCRIPT}" {mode}',
-        "commandWindows": f"& '{py}' '{SCRIPT}' {mode}",
+        "commandWindows": f"& '{py}' '{SCRIPT}' {mode}; exit $LASTEXITCODE",
     }
 
 
@@ -280,7 +280,7 @@ async def test_context_lists_hooks_and_why_they_do_not_run(env):
 async def test_a_global_command_rule_decides(env, winhand_home):
     script = f'"{sys.executable}" "{SCRIPT}" by-command'
     if os.name == "nt":
-        script = f"& '{sys.executable}' '{SCRIPT}' by-command"
+        script = f"& '{sys.executable}' '{SCRIPT}' by-command; exit $LASTEXITCODE"
     winhand_home.mkdir(parents=True, exist_ok=True)
     (winhand_home / "guards.toml").write_text(
         f'[[guard]]\non = "command"\ncommand = {json.dumps(script)}\n', encoding="utf-8"

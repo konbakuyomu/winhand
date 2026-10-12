@@ -315,6 +315,7 @@ reason = "要改守卫规则"
   - hook 想改写这次调用（`updatedInput`）：拒绝，并告诉模型按 hook 的意思改了再发；
   - hook 超时、出错：照常执行并附注，与两个工具的做法一致。
 - hook 的结论和 `guards.toml` 一起裁决，只会更严：hook 说 allow 也放不过 `guards.toml` 拒绝的动作。
+- **Windows 上的退出码**：Codex 和 winhand 都用 `pwsh -NoProfile -Command <命令>` 运行 hook。PowerShell 会把程序的退出码 2 变成 1，靠退出码 2 拒绝的 hook 要在命令末尾加 `; exit $LASTEXITCODE`（或改用输出 JSON 的 deny）。`guards.toml` 的 `command` 规则也一样。
 
 `guards.toml` 也可以把判断交给一个命令，协议与 Claude Code 的 PreToolUse hook 相同：
 
