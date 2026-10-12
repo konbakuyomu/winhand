@@ -5,7 +5,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc",
-    "test": "node --disable-warning=ExperimentalWarning --test test/bridge.test.mjs"
+    "test": "node --disable-warning=ExperimentalWarning --test test/bridge.test.mjs test/hook.test.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.1.0"

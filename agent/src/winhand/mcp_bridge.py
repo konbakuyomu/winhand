@@ -857,18 +857,27 @@ class Services:
 
 
 def compose_app(mcp_app, services: Services | None):
-    """winhand's own MCP app at /mcp, one endpoint per local server at /mcp/<name>, and the
-    one-time file links at /transfer/<token> (see transfer.py)."""
+    """winhand's own MCP app at /mcp, one endpoint per local server at /mcp/<name>, the one-time
+    file links at /transfer/<token> (see transfer.py) and the session-start hook at /hook/<event>
+    (see session_bridge.py), which alone the relay's hook identity may reach."""
     from starlette.applications import Starlette
+    from starlette.middleware import Middleware
     from starlette.routing import Mount, Route
 
-    from . import transfer
+    from . import session_bridge, transfer
 
-    routes = [Route("/transfer/{token}", transfer.endpoint, methods=["GET", "PUT", "POST"])]
+    routes = [
+        Route("/transfer/{token}", transfer.endpoint, methods=["GET", "PUT", "POST"]),
+        Route("/hook/{event}", session_bridge.endpoint, methods=["POST"]),
+    ]
     if services is not None:
         routes.append(Route("/mcp/{name}", services.endpoint, methods=["GET", "POST", "DELETE"]))
     routes.append(Mount("/", app=mcp_app))
-    return Starlette(routes=routes, lifespan=mcp_app.lifespan)
+    return Starlette(
+        routes=routes,
+        lifespan=mcp_app.lifespan,
+        middleware=[Middleware(session_bridge.HookIdentityOnly)],
+    )
 
 
 # ---------------------------------------------------------------- testing a configuration

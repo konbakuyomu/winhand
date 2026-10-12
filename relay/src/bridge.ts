@@ -129,8 +129,9 @@ export class Bridge extends DurableObject<Env> {
 
   private async forward(request: Request, path: string, user: string): Promise<Response> {
     // MCP calls are small JSON-RPC bodies: read them, so a failure can be answered as a JSON-RPC
-    // error for the same id, which every client shows to the model. File transfers stream.
-    const mcp = !path.startsWith("/transfer/");
+    // error for the same id, which every client shows to the model. File transfers stream, and a
+    // session-start hook (/hook/...) is not JSON-RPC: a failure there is a plain 5xx.
+    const mcp = !path.startsWith("/transfer/") && !path.startsWith("/hook/");
     const body = mcp && request.body ? new Uint8Array(await request.arrayBuffer()) : null;
     const rpc = requestIds(request.method, mcp ? body : null);
     const reply = errorReply(rpc);

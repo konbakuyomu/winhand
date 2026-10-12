@@ -4,6 +4,7 @@ winhand stdio                 serve MCP over stdio (Claude Desktop, Codex, Claud
 winhand http [--port 8765]    serve MCP over streamable HTTP on localhost
 winhand connect               connect out to the relay so claude.ai can reach this machine
 winhand mcp list|import|test  local MCP servers offered at <relay>/mcp/<name>
+winhand bridge init|token     cloud Claude Code sessions start with this machine's rules
 winhand doctor                print what winhand sees on this machine
 winhand profiles              list session profiles
 """
@@ -56,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
     mcp = sub.add_parser("mcp", help="local MCP servers offered through the relay at /mcp/<name>")
     mcp.add_argument("action", choices=["list", "import", "test"])
     mcp.add_argument("names", nargs="*", help="import: which ones (default all); test: which to test")
+    bridge = sub.add_parser("bridge", help="cloud Claude Code sessions start with this machine's rules")
+    bridge.add_argument("action", choices=["init", "token"])
+    bridge.add_argument("--relay", help="relay URL (default: [relay] url in config.toml)")
+    bridge.add_argument(
+        "--write", metavar="REPO", help="init: merge the hook into REPO/.claude/settings.json"
+    )
     sub.add_parser("doctor", help="show environment diagnostics")
     sub.add_parser("profiles", help="list session profiles")
     sub.add_parser("desktop-backend", help="engine for the tray app (JSON lines over stdio)")
@@ -128,6 +135,39 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"{entry.name}: {status} ({result['duration_ms']} ms) {len(result.get('tools', []))} tools {tools}"
             )
+        return 0
+    if cmd == "bridge":
+        from . import config, session_bridge
+
+        if args.action == "token":
+            print(session_bridge.token_text(session_bridge.new_token()))
+            return 0
+        url = args.relay or config.load().relay_url
+        if not url:
+            parser.error("no relay: pass --relay https://<relay host> or set [relay] url in config.toml")
+        try:
+            origin = session_bridge.relay_origin(url)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.write:
+            target = os.path.join(args.write, ".claude", "settings.json")
+            try:
+                session_bridge.merge_settings(target, origin)
+            except (ValueError, OSError) as exc:
+                print(f"winhand: {exc}", file=sys.stderr)
+                return 2
+            print(f"已写入 {target}（提交并推送后，云端会话才会用到它）\n")
+        else:
+            print("放进仓库的 .claude/settings.json（已有内容时合并进去，或用 --write <仓库目录>）：\n")
+            print(
+                json.dumps(
+                    {"hooks": {"SessionStart": [session_bridge.hook_group(origin)]}},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            print()
+        print(session_bridge.setup_text(origin))
         return 0
     if cmd == "doctor":
         from . import config, proc

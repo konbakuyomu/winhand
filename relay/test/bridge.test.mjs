@@ -242,6 +242,17 @@ test('a call that outlasts the grace period gets a JSON-RPC error and the offlin
   assert.equal(status.offlineSince, since);
 });
 
+test('a session-start hook that outlasts the grace period gets a 5xx, not a JSON-RPC answer', async () => {
+  const h = harness({AGENT_GRACE_S: '5'});
+  const target = new URL('https://bridge/forward');
+  target.searchParams.set('path', '/hook/session-start');
+  const response = h.object.fetch(new Request(target, {method: 'POST', body: '{"source":"startup"}', headers: {'x-winhand-user': 'hook'}}));
+  await settle();
+  [...h.timers.values()][0].fn();
+  const answer = await response;
+  assert.equal(answer.status, 503);
+});
+
 test('a replaced connection closing does not mark the PC offline', async () => {
   const h = await replacement();
   await h.object.webSocketClose(h.old, 4000, 'replaced by a new agent connection');

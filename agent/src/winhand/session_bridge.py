@@ -1,0 +1,302 @@
+"""What a cloud Claude Code session gets when it starts (and after /clear, a resume or a compaction):
+this machine's rules and skill names, as the SessionStart hook's additionalContext.
+
+The repository's .claude/settings.json runs a command hook (see `winhand bridge init`) that POSTs the
+hook input to the relay's /hook/session-start with a hook token; the relay forwards it here as the
+`hook` identity. That identity reaches only this endpoint, which only reads files: it runs no tool
+and no command but `git ls-files`. Rules the cloud checkout already has (files git tracks) are left
+out; Claude Code reads those there itself.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import socket
+import subprocess
+
+from . import config, redact, workspace
+
+EVENTS = ("session-start",)
+BUDGET_CHARS = 9_000  # Claude Code keeps 10,000 characters of additionalContext
+LEFT_OUT_CHARS = 600  # room kept for naming the rules that do not fit
+HOOK_USER = "hook"
+
+
+def _tracked(root: str, paths: list[str]) -> set[str]:
+    """The paths among `paths` (inside `root`) that git tracks there; none when git cannot say."""
+    inside = {os.path.relpath(p, root): p for p in paths}
+    if not inside:
+        return set()
+    try:
+        done = subprocess.run(
+            ["git", "-C", root, "ls-files", "-z", "--", *inside],
+            capture_output=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return set()
+    if done.returncode != 0:
+        return set()
+    listed = {
+        os.path.normcase(os.path.normpath(p)) for p in done.stdout.decode("utf-8", "replace").split("\0") if p
+    }
+    return {full for rel, full in inside.items() if os.path.normcase(os.path.normpath(rel)) in listed}
+
+
+def _inside(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath(
+            [os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(root))]
+        ) == os.path.normcase(os.path.abspath(root))
+    except ValueError:
+        return False
+
+
+def session_start(repo: str | None, cfg: config.Config | None = None) -> str:
+    """The additionalContext for a session of `repo` (a remote URL or owner/name; may be empty)."""
+    cfg = cfg or config.load()
+    redactor = redact.current()
+
+    def mask(text: str) -> str:
+        text = workspace._sendable(text)
+        return text if redactor.empty else redactor.data(text)[0]
+
+    machine = socket.gethostname() or "this PC"
+    checkout, missing = None, None
+    if repo:
+        try:
+            checkout = workspace.find_repo(cfg, repo)["checkout"]
+        except ValueError:
+            missing = repo
+    root = workspace.project_root(checkout) if checkout else None
+    rules = workspace._collect(cfg, root, checkout, checkout)
+    project_files = [
+        i["path"] for i in rules.items if i.get("scope") == "project" and root and _inside(i["path"], root)
+    ]
+    in_cloud = _tracked(root, project_files) if root else set()
+
+    lines = [
+        f"Rules and skills of the PC {machine!r}, sent by winhand at session start"
+        + (f" (local checkout of this repository: {checkout})." if checkout else "."),
+    ]
+    if missing:
+        lines.append(f"This PC has no checkout of {missing}; only its own rules and skills follow.")
+    elif not repo:
+        lines.append("The repository was not named; only the PC's own rules and skills follow.")
+    lines.append(
+        "Skills and their scripts are on that PC: read them and run them with the winhand tools. "
+        + (
+            f'For everything (and the rules of other folders) call context(repo="{repo}").'
+            if repo
+            else "For everything, call context()."
+        )
+    )
+    intro = mask("\n".join(lines))
+
+    sections: list[tuple[str, str | None, str]] = []  # (path, text or None, why it has no text)
+    for item in rules.ordered():
+        if item.get("scope") == "project" and item["path"] in in_cloud:
+            continue  # the cloud checkout has it
+        text = rules.texts.get(id(item))
+        why = item.get("skipped") or item.get("error") or ""
+        sections.append((mask(item["path"]), None if text is None else mask(text), mask(str(why))))
+
+    names = sorted({s["name"] for s in workspace.skills(cfg, root, rules.refused)}, key=str.lower)
+    skills_line = mask("Skills on the PC: " + ", ".join(names)) if names else ""
+
+    budget = BUDGET_CHARS - len(intro) - 2
+    parts = [intro]
+    skills_part = skills_line
+    if len(skills_part) > min(budget // 3, 2_500):  # keep room for the rules
+        kept, used = [], len("Skills on the PC: ")
+        for name in names:
+            if used + len(name) + 2 > min(budget // 3, 2_500) - 40:
+                break
+            kept.append(name)
+            used += len(name) + 2
+        skills_part = mask("Skills on the PC: " + ", ".join(kept) + f" (and {len(names) - len(kept)} more)")
+    budget -= len(skills_part) + 2 if skills_part else 0
+    left_out_room = min(LEFT_OUT_CHARS, max(budget, 0))  # kept for naming what does not fit
+    budget -= left_out_room
+
+    left_out: list[str] = []
+    for path, text, why in sections:
+        head = f"## {path}"
+        if text is None:
+            entry = f"{head}\n(not read: {why})" if why else head
+        else:
+            entry = f"{head}\n{text}"
+        if len(entry) + 2 <= budget:
+            parts.append(entry)
+            budget -= len(entry) + 2
+            continue
+        note = "\n[cut here: read the rest with context() or fs_read]"
+        room = budget - len(head) - len(note) - 3
+        if text is not None and room >= 400 and not left_out:
+            parts.append(f"{head}\n{text[:room]}{note}")
+            budget -= len(head) + room + len(note) + 3
+            continue
+        left_out.append(path)
+    if left_out:
+        tail = "Not included for lack of room (read them with context() or fs_read): "
+        listed: list[str] = []
+        for path in left_out:
+            if len(tail) + sum(len(p) + 2 for p in listed) + len(path) + 30 > left_out_room:
+                break
+            listed.append(path)
+        more = f" and {len(left_out) - len(listed)} more" if len(listed) < len(left_out) else ""
+        parts.append(tail + "; ".join(listed) + more)
+    if skills_part:
+        parts.append(skills_part)
+    return "\n\n".join(parts)[:BUDGET_CHARS]
+
+
+async def endpoint(request):
+    """Starlette handler for POST /hook/{event}, for the relay's `hook` identity only."""
+    from starlette.responses import JSONResponse, PlainTextResponse
+
+    if request.headers.get("x-winhand-user") != HOOK_USER:
+        return PlainTextResponse("forbidden", status_code=403)
+    event = request.path_params.get("event")
+    if event not in EVENTS:
+        return PlainTextResponse("not found", status_code=404)
+    raw = await request.body()
+    try:
+        hook_input = json.loads(raw or b"{}")
+    except ValueError:
+        hook_input = {}
+    repo = (request.headers.get("x-winhand-repo") or "").strip()[:500] or None
+    del hook_input  # startup, resume, clear and compact all get the same rules
+    text = await asyncio.to_thread(session_start, repo)
+    return JSONResponse({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}})
+
+
+class HookIdentityOnly:
+    """ASGI middleware: the relay's `hook` identity reaches /hook/... and nothing else."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            users = {
+                v.decode("latin-1") for k, v in scope.get("headers", []) if k.lower() == b"x-winhand-user"
+            }
+            if HOOK_USER in users and not scope.get("path", "").startswith("/hook/"):
+                from starlette.responses import PlainTextResponse
+
+                await PlainTextResponse("forbidden", status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+# ------------------------------------------------------------------ winhand bridge init / token
+
+HOOK_MARK = "/hook/session-start"
+MATCHER = "startup|resume|clear|compact"
+
+
+def relay_origin(url: str) -> str:
+    """https://<host> of the relay, from its agent URL (wss://<host>/agent) or any URL on it."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("wss", "https", "ws", "http") or not parts.hostname:
+        raise ValueError(f"not a relay URL: {url!r}")
+    scheme = "https" if parts.scheme in ("wss", "https") else "http"
+    return f"{scheme}://{parts.netloc}"
+
+
+def hook_command(origin: str) -> str:
+    """The SessionStart command for a repository's .claude/settings.json: in a cloud session only,
+    POST the hook input to the relay with the repository's remote; quiet whatever happens. The
+    token comes from a Network secret (added by the egress proxy) or WINHAND_HOOK_TOKEN."""
+    return (
+        '[ "$CLAUDE_CODE_REMOTE" = true ] || exit 0; '
+        'repo=$(git -C "${CLAUDE_PROJECT_DIR:-.}" remote get-url origin 2>/dev/null); '
+        "curl -fsS --max-time 25 -X POST -H 'content-type: application/json' "
+        '-H "X-Winhand-Repo: $repo" '
+        '${WINHAND_HOOK_TOKEN:+-H "X-Winhand-Hook-Token: $WINHAND_HOOK_TOKEN"} '
+        f"--data-binary @- '{origin}{HOOK_MARK}' 2>/dev/null || true"
+    )
+
+
+def hook_group(origin: str) -> dict:
+    return {
+        "matcher": MATCHER,
+        "hooks": [{"type": "command", "timeout": 30, "command": hook_command(origin)}],
+    }
+
+
+def merge_settings(path: str, origin: str) -> dict:
+    """Put the SessionStart hook into a .claude/settings.json, keeping everything else and replacing
+    an earlier copy of it. Raises ValueError (and writes nothing) when the file is not a JSON object."""
+    data: dict = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8-sig") as fh:
+            try:
+                data = json.load(fh)
+            except ValueError as exc:
+                raise ValueError(f"{path} is not valid JSON ({exc}); fix it first") from exc
+        if not isinstance(data, dict):
+            raise ValueError(f"{path} is not a JSON object")
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f'"hooks" in {path} is not an object')
+    groups = hooks.setdefault("SessionStart", [])
+    if not isinstance(groups, list):
+        raise ValueError(f'"hooks.SessionStart" in {path} is not a list')
+    kept = []
+    for group in groups:
+        if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+            ours = [
+                h for h in group["hooks"] if isinstance(h, dict) and HOOK_MARK in str(h.get("command", ""))
+            ]
+            if ours:
+                rest = [h for h in group["hooks"] if h not in ours]
+                if not rest:
+                    continue
+                group = {**group, "hooks": rest}
+        kept.append(group)
+    kept.append(hook_group(origin))
+    hooks["SessionStart"] = kept
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    return data
+
+
+def setup_text(origin: str) -> str:
+    """What the person sets up in the cloud environment, printed by `winhand bridge init`."""
+    host = origin.split("://", 1)[1]
+    return f"""云端环境里还要做一次设置（会话标题栏的云环境菜单 → Edit）：
+
+1. 推荐：Network secrets（Pro/Max 才有）里加一条
+   - 网站：{host}
+   - 类型：自定义请求头，名称 X-Winhand-Hook-Token，前缀留空
+   - 值：hook 令牌（winhand bridge token 生成，与中转的 HOOK_TOKEN 相同）
+   令牌由代理在请求离开容器后加上，不进容器。
+2. 没有 Network secrets 时：
+   - Network access 的 Allowed domains 加上 {host}；
+   - Environment variables 里设 WINHAND_HOOK_TOKEN=<hook 令牌>（使用这个环境的人都能看到）。
+两种方式只用一种。之后新开的会话，开场就会带上这台电脑的规矩和技能名单。"""
+
+
+def new_token() -> str:
+    import secrets
+
+    return secrets.token_urlsafe(32)
+
+
+def token_text(token: str) -> str:
+    return f"""hook 令牌（只显示这一次，电脑上不保存）：
+
+{token}
+
+1. 在中转目录执行 npx wrangler secret put HOOK_TOKEN，粘贴上面的值，再 npx wrangler deploy；
+2. 在云端环境里设同一个值（winhand bridge init 会说明在哪里设）。
+换令牌时两处都要换。"""
