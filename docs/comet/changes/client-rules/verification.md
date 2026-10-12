@@ -59,6 +59,23 @@
 - 批准记录可在项目根到 path 之间任何一级；
 - `formats` 里不认识的值忽略，结果的 `formats` 字段显示实际生效的格式。
 
-## 第 3 轮
+## 第 3 轮（33aa976，4d6d62c）
 
-（待填）
+**正式检查**
+- 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 331 passed，39 skipped（33aa976）。
+- `agent.yml`（run 38167139121，33aa976）：ubuntu 通过；windows 有 1 个失败：`test_linked_rule_folders_follow_the_same_rules`。
+  - 原因：Windows 上 `os.readlink` 把本机目标写成 `\\?\C:\...`，被当成网络路径，项目内的链接全被拒绝。这是真实缺陷，只在 Windows 上出现。
+  - 4d6d62c 已修：只有 `\\server\...`、`//server/...`、`\\?\UNC\...` 算网络路径。补了回归测试。
+
+**本机冒烟**（中文 Windows 11，4d6d62c 的临时克隆 `%TEMP%\winhand-p1-smoke`，只读，用真实的 HOME 和 winhand 配置）：
+- 全局：返回 `~/.codex/AGENTS.md`（codex）和 `~/.claude/rules/comet-workflow-guard.md`（claude-code，用户级规则）。没有 `~/.claude/CLAUDE.md`，与设计文档的观察一致。
+- 6 个带规则文件的 Codex 项目：
+  - 每个都返回项目根的 AGENTS.md；
+  - kicad-tools、easyeda-agent 同时有 CLAUDE.md，两份都返回（D3）；
+  - 每次调用 0.05–0.08 秒，结果 2.1 万–3.6 万字符。
+- `context(repo="konbakuyomu/winhand")` 从 Codex 的项目记录找到 `d:\dev\20_个人项目\winhand`；`nobody/none` 返回的错误写明查过 24 个 Codex 项目、0 个 Claude Code 项目。
+- 用户的 `~/.claude.json` 没有 `projects` 记录，因此 `hasClaudeMdExternalIncludesApproved` 无法在真机上核对。它的效果由测试覆盖（A10）。
+- 在真机上跑 `tests/test_workspace_rules.py`、`tests/test_workspace_context.py`：39 passed，3 skipped。跳过的是需要建符号链接权限的两个测试和只在 Linux 上跑的非 UTF-8 文件名测试，这几项由 GitHub 的 windows、ubuntu runner 覆盖。
+- 临时目录 `%TEMP%\winhand-p1-smoke` 留给用户手动删除（用户规则：不批量删除）。
+
+**独立 Verifier**：（待填）
