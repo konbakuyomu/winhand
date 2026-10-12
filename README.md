@@ -337,6 +337,33 @@ timeout_s = 30                       # 每个 hook 最多等多久
 
 守卫按工具的参数判断，**不是沙箱**。它适合拦住善意的 AI 犯错，挡不住刻意绕路：`run` 里的程序自己去读写什么（例如 `run("type .env")`）、正则没覆盖到的写法、`proc_kill` 和桌面工具，它都管不到。真正需要隔离时，用系统权限或单独的账户。
 
+### 云端会话开场就带上本机规矩
+
+云端 Claude Code 会话本来要靠模型自己想起来调用 `context()`。在仓库里加一个 SessionStart hook，会话一开始（以及 `/clear`、恢复、压缩上下文之后）就会自动带上这台电脑上的：
+
+- 全局规矩（与 `context()` 的读法相同）；
+- 这个仓库在本机的检出目录里、**没提交到仓库**的规则文件，例如 `CLAUDE.local.md`。已提交的文件云端仓库里有，不重复；
+- 技能名单。
+
+合计不超过 9,000 字符（Claude Code 对开场上下文的上限是 10,000）。放不下的部分列出路径，提示用 `context()` 读。电脑不在线时，开场只有一句说明。
+
+设置三步：
+
+1. 生成 hook 令牌，设到中转上：
+
+   ```
+   winhand bridge token                 # 生成令牌，只显示一次
+   npx wrangler secret put HOOK_TOKEN   # 在中转目录执行，粘贴令牌
+   npx wrangler deploy
+   ```
+
+2. 把 hook 放进仓库：`winhand bridge init --write <仓库目录>`，然后提交并推送。它会合并进 `.claude/settings.json`，保留已有内容；只想看片段时去掉 `--write`。所有仓库用同一份配置：仓库由云端的 `git remote get-url origin` 决定，本机按仓库名找到检出目录（同 `context(repo=…)`）。
+3. 在云端环境里放令牌（会话标题栏的云环境菜单 → Edit），`winhand bridge init` 会打印具体做法：
+   - 推荐用 Network secrets（Pro/Max 才有）：网站填中转的域名，自定义请求头 `X-Winhand-Hook-Token`，前缀留空。令牌由代理在请求离开容器后加上，不进容器；
+   - 没有 Network secrets 时：Network access 里放行中转的域名，再设环境变量 `WINHAND_HOOK_TOKEN`。使用这个环境的人都能看到这个变量。
+
+hook 令牌只能取开场上下文：中转只为 `/hook/session-start` 认它，不能调用任何工具，也打不开 `/mcp`。生成的配置里写着中转的域名，提交后看得到仓库的人都能看到它，建议只用于私有仓库；没有令牌的请求会被拒绝。内容与 `context()` 一样经过守卫的 `read` 规则和脱敏。本机的 Claude Code 不受影响：hook 只在 `CLAUDE_CODE_REMOTE=true`（云端）时运行，出任何错都安静退出，不打断会话。多仓库的云端会话不读仓库的 hooks，这个功能不生效。
+
 ## 本机的其他 MCP 服务
 
 电脑上已有的 MCP 服务（pyocd-debug、usb-camera、FreeCAD …）不会混进 winhand 的工具列表，而是**各自成为一个独立的远程 MCP 地址**：

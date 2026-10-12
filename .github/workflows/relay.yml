@@ -35,7 +35,7 @@ jobs:
       - name: End-to-end (OAuth + tunnel + MCP) against wrangler dev
         working-directory: relay
         run: |
-          printf 'OWNER_PASSPHRASE="test-passphrase-123"\nAGENT_TOKEN="test-agent-token-456"\nAGENT_GRACE_S="4"\n' > .dev.vars
+          printf 'OWNER_PASSPHRASE="test-passphrase-123"\nAGENT_TOKEN="test-agent-token-456"\nHOOK_TOKEN="test-hook-token-789"\nAGENT_GRACE_S="4"\n' > .dev.vars
           npx wrangler dev --port 8787 --ip 127.0.0.1 > wrangler.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/ >/dev/null && break; sleep 1; done
           uv run --project ../agent python test/e2e.py || (cat wrangler.log; exit 1)

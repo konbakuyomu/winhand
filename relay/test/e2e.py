@@ -34,6 +34,7 @@ from winhand.server import build_server
 BASE = os.environ.get("RELAY", "http://127.0.0.1:8787")
 PASSPHRASE = os.environ.get("OWNER_PASSPHRASE", "test-passphrase-123")
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "test-agent-token-456")
+HOOK_TOKEN = os.environ.get("HOOK_TOKEN", "test-hook-token-789")
 GRACE_S = float(os.environ.get("AGENT_GRACE_S", "4"))  # must match .dev.vars
 REDIRECT = "http://127.0.0.1:9/callback"
 
@@ -143,6 +144,27 @@ async def main() -> None:
         note = await http.post(f"{BASE}/mcp", headers=rpc_headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
         check(note.status_code == 202, "a notification while offline is simply accepted")
         ws_url = BASE.replace("http", "ws", 1) + "/agent"
+
+        # session-start hooks: a token of their own, for /hook/* only
+        hook_url = f"{BASE}/hook/session-start"
+        start = b'{"source":"startup","hook_event_name":"SessionStart"}'
+        wrong = await http.post(hook_url, content=start, headers={"X-Winhand-Hook-Token": "nope"})
+        check(wrong.status_code == 401, f"hook with a wrong token refused ({wrong.status_code})")
+        other = await http.post(f"{BASE}/hook/stop", content=start, headers={"X-Winhand-Hook-Token": HOOK_TOKEN})
+        check(other.status_code == 404, f"only session-start exists ({other.status_code})")
+        as_mcp = await http.post(f"{BASE}/mcp", headers={"X-Winhand-Hook-Token": HOOK_TOKEN},
+                                 json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        check(as_mcp.status_code == 401, f"the hook token does not open /mcp ({as_mcp.status_code})")
+        as_agent = await http.get(f"{BASE}/agent", headers={"X-Winhand-Hook-Token": HOOK_TOKEN, "Upgrade": "websocket"})
+        check(as_agent.status_code == 401, f"the hook token does not open /agent ({as_agent.status_code})")
+        as_local = await http.post(f"{BASE}/mcp/fake", headers={"X-Winhand-Hook-Token": HOOK_TOKEN}, json={})
+        check(as_local.status_code == 401, f"the hook token does not open /mcp/<name> ({as_local.status_code})")
+        none = await http.post(hook_url, content=start)
+        check(none.status_code == 401, f"hook without a token refused ({none.status_code})")
+        away = await http.post(hook_url, content=start, headers={"X-Winhand-Hook-Token": HOOK_TOKEN})
+        said = away.json()["hookSpecificOutput"]["additionalContext"] if away.status_code == 200 else ""
+        check("offline, did not answer in time, or failed" in said, f"PC offline: the session is told so ({away.status_code} {away.text[:120]})")
+
         await dropped_mid_stream(http, rpc_headers, ws_url)
 
         # a call made while the agent is (re)connecting waits for it instead of failing
@@ -164,6 +186,12 @@ async def main() -> None:
                 break
             await asyncio.sleep(0.1)
         check("电脑在线" in (await http.get(f"{BASE}/")).text, "status page shows the agent online")
+
+        hooked = await http.post(hook_url, content=start, headers={
+            "X-Winhand-Hook-Token": HOOK_TOKEN, "X-Winhand-Repo": "nobody/none", "content-type": "application/json"})
+        given = hooked.json().get("hookSpecificOutput", {}) if hooked.status_code == 200 else {}
+        check(given.get("hookEventName") == "SessionStart" and "Rules and skills of the PC" in given.get("additionalContext", ""),
+              f"session start gets the PC's rules through the tunnel ({hooked.status_code} {hooked.text[:120]})")
 
         transport = StreamableHttpTransport(f"{BASE}/mcp", headers={"Authorization": f"Bearer {token}"})
         async with Client(transport) as mcp:

@@ -1,5 +1,6 @@
 import { AuthorizationError, type AuthRequest, OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { Bridge } from "./bridge";
+import { HOOK_PATH, hookRequest } from "./hook";
 import { consentPage, statusPage } from "./pages";
 
 export { Bridge };
@@ -218,6 +219,8 @@ export default {
     if (url.pathname === "/oauth/token" && request.method === "POST") request = await singleClientAuth(request);
     const link = url.pathname.match(TRANSFER_PATH);
     if (link) return transferLink(request, env, link[1]);
+    const hook = url.pathname.match(HOOK_PATH);
+    if (hook) return hookRequest(request, env, hook[1], (forwarded) => bridge(env).fetch(forwarded));
     if (url.pathname === "/agent") {
       const auth = request.headers.get("authorization") ?? "";
       const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";

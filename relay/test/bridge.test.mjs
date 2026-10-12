@@ -242,6 +242,32 @@ test('a call that outlasts the grace period gets a JSON-RPC error and the offlin
   assert.equal(status.offlineSince, since);
 });
 
+test('a session-start hook waits at most 5 s for the PC, then gets a 5xx, not a JSON-RPC answer', async () => {
+  const h = harness({AGENT_GRACE_S: '20'});
+  const target = new URL('https://bridge/forward');
+  target.searchParams.set('path', '/hook/session-start');
+  const response = h.object.fetch(new Request(target, {method: 'POST', body: '{"source":"startup"}', headers: {'x-winhand-user': 'hook'}}));
+  await settle();
+  const grace = [...h.timers.values()][0];
+  assert.equal(grace.ms, 5_000);
+  grace.fn();
+  const answer = await response;
+  assert.equal(answer.status, 503);
+});
+
+test('a session-start hook waits 15 s for the answer, not 120', async () => {
+  const h = harness(), socket = new h.Socket();
+  h.ctx.sockets = [socket];
+  const target = new URL('https://bridge/forward');
+  target.searchParams.set('path', '/hook/session-start');
+  const response = h.object.fetch(new Request(target, {method: 'POST', body: '{}', headers: {'x-winhand-user': 'hook'}}));
+  await settle();
+  const head = [...h.timers.values()].find(t => t.ms === 15_000);
+  assert.ok(head, 'a 15 s head timer');
+  head.fn();
+  assert.equal((await response).status, 504);
+});
+
 test('a replaced connection closing does not mark the PC offline', async () => {
   const h = await replacement();
   await h.object.webSocketClose(h.old, 4000, 'replaced by a new agent connection');

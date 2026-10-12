@@ -20,4 +20,6 @@
   // Serve on your own domain (workers.dev is often unreachable from mainland China):
   // "routes": [{ "pattern": "mcp.example.com", "custom_domain": true }]
   // Secrets (never in this file): `npx wrangler secret put OWNER_PASSPHRASE` and `... AGENT_TOKEN`
+  // Optional: `... HOOK_TOKEN` lets cloud Claude Code sessions fetch this machine's rules at
+  // session start (see `winhand bridge init`).
 }
