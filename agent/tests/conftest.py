@@ -35,6 +35,11 @@ def _no_hooks_of_this_machine(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "settings", lambda: {"sources": []})
     monkeypatch.setattr(hooks, "codex_system_dir", lambda: str(tmp_path / "no-codex-system"))
     monkeypatch.setattr(hooks, "claude_managed_dir", lambda: str(tmp_path / "no-claude-managed"))
+    monkeypatch.setattr(
+        hooks,
+        "codex_legacy_managed_config",
+        lambda: str(tmp_path / "no-codex-system" / "managed_config.toml"),
+    )
 
 
 @pytest.fixture

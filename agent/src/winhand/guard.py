@@ -271,12 +271,15 @@ def files_for(anchors: list[str], cache: dict | None = None) -> list[RuleFile]:
         while True:
             candidate = str(d / PROJECT_DIR / FILE_NAME)
             key = _norm(candidate)
-            if key not in seen and _norm(os.path.realpath(candidate)) != glob_real:
+            if key not in seen:
                 seen.add(key)
                 if cache is not None and key in cache:
                     found = cache[key]
                 else:
-                    found = load(candidate, base=str(d))
+                    if os.path.lexists(candidate) and _norm(os.path.realpath(candidate)) == glob_real:
+                        found = None  # the global file, already in
+                    else:
+                        found = load(candidate, base=str(d))
                     if cache is not None:
                         cache[key] = found
                 if found is not None:

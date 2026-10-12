@@ -145,7 +145,7 @@
 - **A8** `guards.toml` 的 command 规则：全局规则 `on = "command"`、`command = "<脚本>"`，脚本输出 `permissionDecision: deny` 时，`run` 被拒绝，理由来自脚本。
 - **A9** 项目里的 `.winhand/guards.toml` 写了 `command`：该项目内的动作被拒绝，错误说明 command 规则只能写在全局文件中。
 - **A10** 开关与兼容：
-  - `[hooks] sources = []` 时，任何 hook 都不运行；
+  - `[hooks] sources = []` 时，任何 Codex、Claude Code 的 hook 都不运行（`guards.toml` 的 command 规则是 winhand 自己的规则，不受影响）；
   - 没有任何 hooks 配置时，行为与 0.4.5 完全一致，原有测试全部通过。
 
 # Constraints and invariants

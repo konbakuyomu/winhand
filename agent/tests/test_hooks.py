@@ -244,7 +244,8 @@ async def test_a_line_typed_into_a_shell_is_shown_to_hooks(env):
             assert refused.is_error and "no forbidden word" in text_of(refused)
             ok = await client.call_tool("session_send", {"id": sid, "text": "echo fine", "submit": True})
             assert (
-                "fine" in ok.structured_content["output"] and "rm -rf" not in ok.structured_content["output"]
+                "fine" in ok.structured_content["output"]
+                and "FORBIDDEN-WORD" not in ok.structured_content["output"]
             )
         finally:
             await client.call_tool("session_stop", {"id": sid, "force": True})
@@ -455,6 +456,7 @@ def trust_levels(env, levels: dict) -> None:
         ("root", {"sub": "trusted"}, False),
         ("sub", {"sub": "trusted"}, True),
         ("sub", {"root": "trusted"}, True),
+        ("sub", {"root": "untrusted", "sub": "trusted"}, True),  # Codex: the folder's own decision first
     ],
 )
 def test_codex_trust_is_decided_for_each_codex_folder(env, hook_in, levels, runs):
@@ -687,21 +689,185 @@ def test_a_hooks_file_codex_would_reject_is_not_used(env):
     assert not [h for h in found if h.file == str(path)] and "Codex would not load it" in errors[0]["error"]
 
 
-def test_a_worktree_uses_the_main_checkouts_hooks(env, tmp_path):
-    main = env["root"]
-    codex_project_hook(env, "by-command", "Bash")
-    worktree = tmp_path / "wt"
-    gitdir = main / ".git" / "worktrees" / "wt"
+def make_worktree(main: Path, worktree: Path) -> None:
+    gitdir = main / ".git" / "worktrees" / worktree.name
     gitdir.mkdir(parents=True)
     (gitdir / "commondir").write_text("../..\n")
     worktree.mkdir()
     (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
+
+
+def test_a_worktree_uses_the_main_checkouts_hooks(env, tmp_path):
+    main = env["root"]
+    codex_project_hook(env, "by-command", "Bash")
+    worktree = tmp_path / "wt"
+    make_worktree(main, worktree)
+    found, _ = hooks.discover(str(worktree))
+    assert not [h for h in found if h.source == "codex"]  # Codex needs the worktree's own .codex folder
+    (worktree / ".codex").mkdir()
     found, _ = hooks.discover(str(worktree))
     assert [h.file for h in found if h.source == "codex"] == [str(main / ".codex" / "hooks.json")]
-    assert all(h.runs for h in found if h.source == "codex")
+    assert all(h.runs for h in found if h.source == "codex")  # the main checkout is trusted
+    trust_levels(env, {worktree: "untrusted"})  # the worktree's own decision comes first
+    found, _ = hooks.discover(str(worktree))
+    assert [h.status for h in found if h.source == "codex"] == ["untrusted"]
+
+
+def test_claude_code_trust_of_a_worktree_is_the_main_checkouts(env, tmp_path):
+    main = env["root"]
+    claude_project_hook(env, "by-command", "Bash")  # trusts the main checkout
+    worktree = main / ".claude" / "worktrees" / "w1"
+    worktree.parent.mkdir(parents=True)
+    make_worktree(main, worktree)
+    (worktree / ".claude").mkdir()
+    (worktree / ".claude" / "settings.json").write_text((main / ".claude" / "settings.json").read_text())
+    found, _ = hooks.discover(str(worktree))
+    assert [h.status for h in found if h.source == "claude-code"] == ["trusted"]
 
 
 def test_a_lone_surrogate_does_not_stop_the_hooks(env):
     claude_project_hook(env, "by-command", "Write")
     action = Action("write", "fs_write", paths=(str(env["root"] / "a.txt"),))
     assert hooks.check([action], "fs_write", {"content": "bad \ud800 text"}) == []
+
+
+# ------------------------------------------------------------------ round 4
+
+
+def codex_file(env, data, raw: bytes | None = None) -> Path:
+    """A trusted project's .codex/hooks.json holding `data`, each command handler trusted by hash."""
+    root = env["root"]
+    path = root / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw if raw is not None else json.dumps(data).encode())
+    trust_levels(env, {root: "trusted"})
+    with open(env["tmp"] / "codex" / "config.toml", "a", encoding="utf-8") as fh:
+        for g, group in enumerate(data["hooks"].get("PreToolUse", [])):
+            for i, handler in enumerate(group.get("hooks") or []):
+                key = f"{path}:pre_tool_use:{g}:{i}"
+                digest = hooks.codex_hash(group.get("matcher"), handler)
+                fh.write(f'[hooks.state.{json.dumps(key)}]\ntrusted_hash = "{digest}"\n')
+    return path
+
+
+def test_keys_codex_ignores_do_not_stop_its_hooks(env):
+    handler = {**codex_command("deny-src"), "shell": "bash", "args": ["x"], "if": "never"}
+    codex_file(
+        env,
+        {
+            "description": "comet",
+            "hooks": {
+                "PreToolUse": [{"matcher": None, "description": "phase guard", "hooks": [handler]}],
+                "Notification": "not an event Codex knows",
+            },
+        },
+    )
+    found, errors = hooks.discover(str(env["root"]))
+    assert errors == [] and [h.status for h in found if h.source == "codex"] == ["trusted"]
+    action = Action("write", "fs_write", paths=(str(env["root"] / "src" / "a.c"),))
+    (finding,) = hooks.check([action], "fs_write", {"content": "x"})
+    assert finding.decision == "deny" and "no writes in src/" in finding.text
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda d: d["hooks"]["PreToolUse"][0]["hooks"].append({"type": "http", "url": "x"}),
+        lambda d: d["hooks"]["PreToolUse"][0]["hooks"].append({"type": "command"}),
+        lambda d: d["hooks"]["PreToolUse"][0]["hooks"].append(
+            {"type": "command", "command": "x", "timeout": 1.5}
+        ),
+        lambda d: d["hooks"]["PreToolUse"][0]["hooks"].append({"type": "mcp_tool", "tool": "t"}),
+        lambda d: d["hooks"].update(PostToolUse=[{"hooks": [{"type": "command", "command": 5}]}]),
+        lambda d: d.update(description=3),
+        lambda d: d["hooks"]["PreToolUse"][0].update(hooks=None),
+    ],
+)
+def test_files_codex_rejects_are_not_used(env, change):
+    data = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [codex_command("by-command")]}]}}
+    change(data)
+    path = codex_file(env, data)
+    found, errors = hooks.discover(str(env["root"]))
+    assert not [h for h in found if h.file == str(path)] and "Codex would not load it" in errors[0]["error"]
+
+
+def test_a_byte_order_mark_is_refused_as_codex_does(env):
+    data = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [codex_command("by-command")]}]}}
+    path = codex_file(env, data, raw=b"\xef\xbb\xbf" + json.dumps(data).encode())
+    found, errors = hooks.discover(str(env["root"]))
+    assert not [h for h in found if h.file == str(path)] and "byte order mark" in errors[0]["error"]
+
+
+@pytest.mark.parametrize(
+    ("user", "project", "pinned", "on"),
+    [
+        ("hooks = false", "hooks = true", None, True),
+        ("hooks = true", "hooks = false", None, False),
+        (None, "hooks = false\ncodex_hooks = true", None, False),
+        ("hooks = true", None, "hooks = false", False),
+        ("hooks = false", None, "codex_hooks = true", True),
+    ],
+)
+def test_codex_feature_switch_follows_its_layers(env, tmp_path, monkeypatch, user, project, pinned, on):
+    codex_project_hook(env, "by-command", "Bash")
+    if user:
+        with open(env["tmp"] / "codex" / "config.toml", "a", encoding="utf-8") as fh:
+            fh.write(f"[features]\n{user}\n")
+    if project:
+        (env["root"] / ".codex" / "config.toml").write_text(f"[features]\n{project}\n")
+    if pinned:
+        system = tmp_path / "codex-system"
+        system.mkdir()
+        (system / "requirements.toml").write_text(f"[features]\n{pinned}\n")
+        monkeypatch.setattr(hooks, "codex_system_dir", lambda: str(system))
+    (hook,) = [h for h in hooks.discover(str(env["root"]))[0] if h.source == "codex"]
+    assert hook.runs is on
+
+
+def test_an_untrusted_projects_features_do_not_count(env):
+    codex_project_hook(env, "by-command", "Bash")
+    sub = env["root"] / "sub"
+    (sub / ".codex").mkdir(parents=True)
+    (sub / ".codex" / "config.toml").write_text("[features]\nhooks = false\n")
+    trust_levels(env, {sub: "untrusted"})
+    (hook,) = [h for h in hooks.discover(str(sub))[0] if h.source == "codex"]
+    assert hook.runs
+
+
+def test_the_legacy_managed_config_holds_managed_hooks(env, monkeypatch, tmp_path):
+    legacy = tmp_path / "managed_config.toml"
+    command = codex_command("by-command")["command"].replace("\\", "\\\\").replace('"', '\\"')
+    legacy.write_text(
+        f'[[hooks.PreToolUse]]\nmatcher = "Bash"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = "{command}"\n'
+    )
+    monkeypatch.setattr(hooks, "codex_legacy_managed_config", lambda: str(legacy))
+    (hook,) = [h for h in hooks.discover(str(env["root"]))[0] if h.source == "codex"]
+    assert hook.status == "managed"
+
+
+def test_codex_matchers_are_compared_as_written():
+    def hook(matcher):
+        return hooks.Hook("codex", "f", 0, 0, matcher, {"command": "x"})
+
+    assert not hooks.matches(hook(" "), ("Bash",))
+    assert not hooks.matches(hook("Bash "), ("Bash",))
+    assert hooks.matches(hook("Write|Bash"), ("Bash",))
+    claude = hooks.Hook("claude-code", "f", 0, 0, " ", {"command": "x"})
+    assert hooks.matches(claude, ("Bash",))
+
+
+def test_an_empty_command_windows_is_what_codex_runs():
+    assert hooks._codex_windows_command({"command": "x", "commandWindows": ""}) == ""
+    assert hooks._codex_windows_command({"command": "x"}) == "x"
+
+
+def test_context_stays_small_when_a_hooks_file_is_huge(env):
+    path = env["root"] / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({f"key{i}": i for i in range(8000)} | {"hooks": {}}))
+    report = hooks.describe(str(env["root"]))
+    assert len(json.dumps(report)) < 12_000 and "Codex would not load it" in report["errors"][0]["error"]
+
+
+def test_a_strange_hooks_timeout_falls_back(monkeypatch):
+    assert hooks.timeout_cap({"timeout_s": float("inf")}) == hooks.DEFAULT_TIMEOUT_S

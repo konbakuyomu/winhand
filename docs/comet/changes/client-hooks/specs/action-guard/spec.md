@@ -56,7 +56,7 @@ winhand 在执行会读写这台机器的工具调用前，先把调用描述成
   | `decision` | 没有 `command` 时必填 | `deny`、`ask` 或 `note` |
   | `command` | 否 | 交给一个命令判断（见 R13），不能与 `decision` 同时写；只能写在全局规则文件里 |
   | `reason` | 否 | 给模型和人看的说明 |
-  | `timeout_s` | 否 | 仅 ask 规则，等待确认的秒数，默认 40，超过 50 按 50 计（客户端约 60 秒放弃一次工具调用）；必须是有限的数，`nan`、`inf` 按“写错了”处理 |
+  | `timeout_s` | 否 | ask 规则：等待确认的秒数，默认 40，超过 50 按 50 计（客户端约 60 秒放弃一次工具调用）；command 规则：命令的超时，见 R13。必须是有限的数，`nan`、`inf` 按“写错了”处理 |
 
 - 规则编号从 1 开始，按文件里出现的顺序计算。
 - 文件修改后，下一次调用即生效，不需要重启 winhand；即使修改前后大小和修改时间都相同也一样。
@@ -200,7 +200,7 @@ Scenario: (A13) 没有规则时行为不变
   - `additionalContext`：附注；
   - 失败（超时、其他退出码、无效输出）：放行并附注失败原因。
 - 运行方式：Windows 上用 `pwsh -NoProfile -Command`（找不到时用 `powershell.exe`），其他系统用 `sh -c`；工作目录为动作所在项目的根目录。
-- 超时：`timeout_s`，默认取 `[hooks] timeout_s`（30 秒）。
+- 超时：`timeout_s`，没写时取 `[hooks] timeout_s`（默认 30 秒）；写了也不超过 `[hooks] timeout_s`。
 - 项目规则文件里写了 `command`：整个文件按 R10 处理（失败即关闭），错误说明 command 规则只能写在全局文件里。理由：仓库里的文件不能让 winhand 执行命令。
 
 Scenario: (A8) 全局 command 规则拒绝

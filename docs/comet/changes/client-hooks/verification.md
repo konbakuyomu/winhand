@@ -67,6 +67,45 @@
 | 含糊 | 链接的 git 工作树，Codex 从主检出目录读 hooks 和信任 | — | 按 Codex 处理 |
 | 含糊 | hook 正常结束后，它启动的后台进程是否结束 | — | 结束；写进 R5 |
 
-## 第 3 轮
+## 第 3 轮（3769fed，文档 f9e9e9f）
+
+**正式检查**
+- 云端 Linux：`ruff check`、`ruff format --check` 通过；`pytest` 406 passed，40 skipped。
+- `agent.yml`（run 38212031588，3769fed）：ubuntu、windows 都通过。
+
+**独立 Verifier 结论**：A1–A10 全部通过。Verifier 从 openai/codex 的 main 分支（2026-10-12）取了源码，把 Codex 的 serde 类型放进一个小 Rust 程序，逐个核对文件是否被接受、哈希是否一致（6 个 handler 的哈希与 Codex 算出的完全相同）。
+
+第 2 轮问题的核对：2、3、4、5、6 已修好；7（PowerShell 尾巴）、8（挂起启动加作业对象）只读代码判断为已修好；1（features 开关）、工作树部分修好，整份拒绝修错了，见下表。
+
+| # | 问题 | 级别 | 处理（第 4 轮） |
+|---|---|---|---|
+| N1 | 整份拒绝比 Codex 严：Codex 只有 `hooks.json` 顶层拒绝不认识的键，组和 handler 里不认识的键（`description`、`shell`、`args`）、`matcher: null` 都照常读。winhand 却整份不用，已信任、会拒绝的 hook 被跳过（Verifier 实际跑出：写进 `src/` 没被拦下） | 阻断 | 按 Codex 的 serde 定义重写整份拒绝的判断：只有顶层拒绝不认识的键；组、handler、事件名里不认识的都忽略；`matcher` 可为 null（研究笔记 §1 本来就这样写，第 3 轮的实现与它相反） |
+| N1b | 反过来，Codex 会整份拒绝、winhand 却部分使用的：不认识的 `type`（如 `http`）、command 没有 `command`、`description` 或 `additionalContextLimit` 类型不对、别的事件下的组写错、mcp_tool 缺 `server`、UTF-8 字节顺序标记 | 次要（更严） | 对 12 个已知事件全部按 serde 规则检查；Codex 的 `hooks.json` 不接受字节顺序标记 |
+| N2 | `.codex` 文件夹的信任：Codex 取第一个有记录的（这一级、项目根、主检出目录），winhand 是“有一个 untrusted 就不信任” | 次要（更松） | 按 Codex：取第一个有记录的；`[projects]` 也读系统层 `config.toml` |
+| N3 | `[features]` 只读用户文件；Codex 合并系统层、用户层、受信任的项目层，再由 `requirements.toml` 强制 | 次要 | 按 Codex 合并（含旧式托管文件），同一张表里 `hooks` 优先于 `codex_hooks`，`requirements.toml` 最后强制；命令行参数看不到，写进规格 |
+| N4 | 工作树：Codex 的信任先看工作树自己；Codex 要求工作树这一级有 `.codex` 文件夹；Claude Code 的工作区信任记在主检出目录上 | 次要 | 三处都按来源工具处理 |
+| N5 | `context()` 里 hooks 的错误部分没有大小上限（8000 个顶层键时返回 23 万字符，挤掉了其他内容） | 次要 | 每条错误最多 300 字符，错误也计入 hooks 部分的大小预算 |
+| N6 | 守卫找项目规则时，每一级都算一次真实路径，即使缓存里已有（`fs_search` 过滤 2000 个文件夹时慢了约一倍） | 疑似（性能） | 只在候选文件存在、且缓存里没有时才算真实路径 |
+| 小 | Claude Code hook 的超时提示里出现“Codex wants a whole number” | 小 | 只对 Codex 的 hook 这样提示 |
+| 小 | `[hooks] timeout_s = inf` 被接受 | 小 | 必须是有限数 |
+| 小 | action-guard 规格里 command 规则的超时与代码不一致 | 小 | 规格改为：没写时取 `[hooks] timeout_s`，写了也不超过它 |
+| 小 | Codex 的 matcher 被去掉空白后比较（`" "` 在 winhand 里匹配全部，在 Codex 里什么也不匹配） | 小（更严） | 按写的原样比较 |
+| 小 | 旧式托管文件 `managed_config.toml` 里的 hooks 没有读 | 小 | 按托管来源读取（路径与 Codex 相同） |
+| 小 | `SetInformationJobObject` 的返回值没检查；失败时结束不了 hook 留下的进程 | 小（只读代码） | 失败时不用作业对象，退回按进程树结束 |
+| 小 | A6 的测试仍断言 `rm -rf` 不在输出里，第 2 轮换词后它什么也证明不了 | 小 | 改为断言被拒的那一行没有发出 |
+| 另 | Codex 不认识的 `if`、`once`、`asyncRewake` 让 Codex 的 hook 被列为不支持（修 N1 时发现） | 次要（更松） | 这几个键只对 Claude Code 的 hook 生效 |
+| 另 | Windows 上 `commandWindows` 为空字符串时，Codex 跳过这个 hook，winhand 却改用 `command`（修 N1 时发现） | 小 | 按 Codex：设了就用它，为空时这个 hook 不运行 |
+
+**Verifier 指出的含糊处**
+- `[hooks] sources = []` 时 `guards.toml` 的 command 规则是否还运行：照常运行，它是 winhand 自己的规则。brief A10 和 hooks 规格已写明。
+- 会话输入交给 Codex hook 时作为 `Bash`：按 brief 的表，有意为之（Codex 的 `write_stdin` 本身没有 PreToolUse）。
+- “Codex 会运行什么”以 openai/codex main 分支 2026-10-12 的源码为准。
+
+**留下的、不处理的差异**（都是 winhand 更严，或者极少见）
+- 同一张表里重复的键：Codex（serde）整份拒绝，Python 取最后一个。
+- 组或 handler 写成 JSON 数组的位置形式：serde 接受，winhand 整份不用。
+- Codex 的正则语法与 Python 的个别差异。
+
+## 第 4 轮
 
 （待填）

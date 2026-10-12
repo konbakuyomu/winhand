@@ -74,25 +74,26 @@ def sources(cfg: dict | None = None) -> list[str]:
 
 def timeout_cap(cfg: dict | None = None) -> float:
     value = (settings() if cfg is None else cfg).get("timeout_s", DEFAULT_TIMEOUT_S)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return DEFAULT_TIMEOUT_S
     return max(1.0, float(value))
 
 
 # ------------------------------------------------------------------ reading configuration files
 
-_files: dict[str, tuple[tuple, object, str | None]] = {}
+_files: dict[tuple[str, str], tuple[tuple, object, str | None]] = {}
 
 
 def _load(path: str, kind: str) -> tuple[object, str | None]:
     """(data, error) of a JSON or TOML file; (None, None) when it does not exist. Cached by size and
-    modification time."""
+    modification time. Kind "codex-json" is JSON read as Codex reads it: a byte order mark is an
+    error there (serde_json does not skip it)."""
     try:
         st = os.stat(path)
     except (OSError, ValueError):
         return None, None
     stamp = (st.st_mtime_ns, st.st_size)
-    cached = _files.get(path)
+    cached = _files.get((path, kind))
     if cached and cached[0] == stamp:
         return cached[1], cached[2]
     data: object = None
@@ -104,16 +105,28 @@ def _load(path: str, kind: str) -> tuple[object, str | None]:
             raw = fh.read(MAX_CONFIG_BYTES + 1)
         if len(raw) > MAX_CONFIG_BYTES:
             raise ValueError(f"larger than {MAX_CONFIG_BYTES:,} bytes")
-        text = raw.decode("utf-8-sig")
-        data = json.loads(text, parse_constant=_no_constant) if kind == "json" else tomllib.loads(text)
+        if kind == "codex-json":
+            text = raw.decode("utf-8")
+            if text.startswith("\ufeff"):
+                raise ValueError("it starts with a byte order mark, which Codex does not accept")
+        else:
+            text = raw.decode("utf-8-sig")
+        if kind == "toml":
+            data = tomllib.loads(text)
+        else:
+            data = json.loads(text, parse_constant=_no_constant)
     except (OSError, ValueError, UnicodeDecodeError) as exc:
-        error = f"cannot be read: {exc}"
-    _files[path] = (stamp, data, error)
+        error = f"cannot be read: {_clip(str(exc))}"
+    _files[(path, kind)] = (stamp, data, error)
     return data, error
 
 
 def _no_constant(name: str):
     raise ValueError(f"{name} is not JSON")
+
+
+def _clip(text: str, limit: int = 300) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 # ------------------------------------------------------------------ hooks
@@ -146,7 +159,7 @@ class Hook:
     def command(self) -> str:
         h = self.handler
         if self.source == "codex" and IS_WINDOWS:
-            return str(h.get("commandWindows") or h.get("command_windows") or h.get("command") or "")
+            return _codex_windows_command(h)
         return str(h.get("command") or "")
 
     def label(self) -> str:
@@ -170,11 +183,19 @@ class Hook:
         return out
 
 
+def _codex_windows_command(h: dict) -> str:
+    """Codex on Windows: commandWindows (or command_windows) when set, even to "", else command."""
+    for key in ("commandWindows", "command_windows"):
+        if h.get(key) is not None:
+            return str(h[key])
+    return str(h.get("command") or "")
+
+
 def _groups(data: object) -> list | str:
     if not isinstance(data, dict):
         return "the top level is not a table"
     hooks = data.get("hooks")
-    if hooks is None:
+    if hooks is None or hooks == []:
         return []
     if not isinstance(hooks, dict):
         return "`hooks` is not a table"
@@ -187,7 +208,7 @@ def _groups(data: object) -> list | str:
 
 
 def _from_file(source: str, path: str, kind: str) -> tuple[list[Hook], list[dict]]:
-    data, error = _load(path, kind)
+    data, error = _load(path, "codex-json" if (source, kind) == ("codex", "json") else kind)
     if error:
         return [], [{"file": path, "error": error}]
     if data is None:
@@ -195,7 +216,7 @@ def _from_file(source: str, path: str, kind: str) -> tuple[list[Hook], list[dict
     if source == "codex":
         problem = _codex_file_problem(data, kind)
         if problem:  # Codex rejects the whole file, so none of its hooks run there either
-            return [], [{"file": path, "error": f"Codex would not load it: {problem}"}]
+            return [], [{"file": path, "error": _clip(f"Codex would not load it: {problem}")}]
     groups = _groups(data)
     if isinstance(groups, str):
         return [], [{"file": path, "error": groups}]
@@ -213,66 +234,115 @@ def _from_file(source: str, path: str, kind: str) -> tuple[list[Hook], list[dict
     return out, []
 
 
-_CODEX_HANDLER = {
-    "type",
-    "command",
-    "commandWindows",
-    "command_windows",
-    "timeout",
-    "async",
-    "statusMessage",
-    "additionalContextLimit",
-    "server",
-    "tool",
-    "input",
-    "prompt",
-    "model",
-}
+# Codex reads a hooks file with serde (codex-rs/config/src/hook_config.rs): only the top level of
+# hooks.json refuses keys it does not know; groups and handlers ignore them, and so do the events.
+# Anything else it cannot read (a wrong type, an unknown handler type, a missing command) makes it
+# drop the whole file.
+_CODEX_EVENTS = (
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+    "Interrupt",
+)
 
 
 def _codex_file_problem(data: object, kind: str) -> str | None:
-    """What makes Codex refuse a hooks file (its schema denies unknown fields), None if nothing."""
+    """Why Codex would refuse this hooks.json (kind "json") or the [hooks] of this config.toml or
+    requirements.toml (kind "toml"); None when it would load it."""
     if not isinstance(data, dict):
         return "the top level is not a table"
-    if kind == "json" and set(data) - {"description", "hooks"}:
-        return f"unknown top-level key(s) {sorted(set(data) - {'description', 'hooks'})}"
-    hooks = data.get("hooks")
-    if hooks is None:
+    if kind == "json":
+        unknown = sorted(set(data) - {"description", "hooks"})
+        if unknown:
+            return f"unknown top-level key(s) {unknown[:5]}"
+        if data.get("description") is not None and not isinstance(data["description"], str):
+            return "description is not a string"
+        if "hooks" in data and data["hooks"] is None:
+            return "`hooks` is null"
+    if "hooks" not in data or data["hooks"] == []:
         return None
-    if not isinstance(hooks, dict):
+    events = data["hooks"]
+    if not isinstance(events, dict):
         return "`hooks` is not a table"
-    groups = hooks.get("PreToolUse")
-    if groups is None:
-        return None
-    if not isinstance(groups, list):
-        return "`hooks.PreToolUse` is not a list"
-    for g, group in enumerate(groups):
-        if not isinstance(group, dict) or set(group) - {"matcher", "hooks"}:
-            return f"PreToolUse group {g} is not {{matcher, hooks}}"
-        if "matcher" in group and not isinstance(group["matcher"], str):
-            return f"PreToolUse group {g}: matcher is not a string"
-        handlers = group.get("hooks", [])
-        if not isinstance(handlers, list):
-            return f"PreToolUse group {g}: hooks is not a list"
-        for i, handler in enumerate(handlers):
-            if not isinstance(handler, dict) or "type" not in handler:
-                return f"PreToolUse group {g} hook {i} has no type"
-            if set(handler) - _CODEX_HANDLER:
-                return (
-                    f"PreToolUse group {g} hook {i}: unknown key(s) {sorted(set(handler) - _CODEX_HANDLER)}"
-                )
-            if handler.get("type") == "command":
-                for key in ("command", "commandWindows", "command_windows", "statusMessage"):
-                    if key in handler and not isinstance(handler[key], str):
-                        return f"PreToolUse group {g} hook {i}: {key} is not a string"
-                timeout = handler.get("timeout")
-                if timeout is not None and (
-                    isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 0
-                ):
-                    return f"PreToolUse group {g} hook {i}: timeout is not a whole number of seconds"
-                if "async" in handler and not isinstance(handler["async"], bool):
-                    return f"PreToolUse group {g} hook {i}: async is not true or false"
+    for event in _CODEX_EVENTS:
+        if event not in events:
+            continue
+        groups = events[event]
+        if not isinstance(groups, list):
+            return f"`{event}` is not a list"
+        for g, group in enumerate(groups):
+            where = f"{event} group {g}"
+            if not isinstance(group, dict):
+                return f"{where} is not a table"
+            if group.get("matcher") is not None and not isinstance(group["matcher"], str):
+                return f"{where}: matcher is not a string"
+            handlers = group.get("hooks", [])
+            if not isinstance(handlers, list):
+                return f"{where}: hooks is not a list"
+            for i, handler in enumerate(handlers):
+                problem = _codex_handler_problem(handler)
+                if problem:
+                    return f"{where} hook {i}: {problem}"
     return None
+
+
+def _codex_handler_problem(h: object) -> str | None:
+    if not isinstance(h, dict):
+        return "it is not a table"
+    kind = h.get("type")
+    if not isinstance(kind, str):
+        return "it has no type"
+    if kind not in ("command", "mcp_tool", "prompt", "agent"):
+        return f"unknown type {_clip(repr(kind), 60)}"
+    strings: tuple[str, ...] = ("statusMessage",)
+    if kind == "command":
+        if not isinstance(h.get("command"), str):
+            return "command is missing or not a string"
+        if "commandWindows" in h and "command_windows" in h:
+            return "both commandWindows and command_windows are set"
+        strings += ("commandWindows", "command_windows")
+        if "async" in h and not isinstance(h["async"], bool):
+            return "async is not true or false"
+        if not _unsigned(h.get("additionalContextLimit")):
+            return "additionalContextLimit is not a whole number"
+    elif kind == "mcp_tool":
+        for key in ("server", "tool"):
+            if not isinstance(h.get(key), str):
+                return f"{key} is missing or not a string"
+        if "input" in h and not (isinstance(h["input"], dict) and _toml_value(h["input"])):
+            return "input is not a table TOML can hold"
+    if kind in ("command", "mcp_tool"):
+        if not _unsigned(h.get("timeout")):
+            return "timeout is not a whole number of seconds"
+        for key in strings:
+            if h.get(key) is not None and not isinstance(h[key], str):
+                return f"{key} is not a string"
+    return None
+
+
+def _unsigned(value: object) -> bool:
+    """None or a whole number Codex keeps as u64."""
+    return value is None or (isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**64)
+
+
+def _toml_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return all(_toml_value(v) for v in value.values())
+    if isinstance(value, list):
+        return all(_toml_value(v) for v in value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return -(2**63) <= value < 2**63
+    return True
 
 
 def _unsupported(hook: Hook) -> str | None:
@@ -280,13 +350,14 @@ def _unsupported(hook: Hook) -> str | None:
     kind = h.get("type", "command")
     if kind != "command":
         return f"`type = {kind!r}` hooks are not run by winhand (only command hooks are)"
-    for key in ("async", "asyncRewake", "if", "once"):
+    # Codex ignores keys it does not know; async hooks cannot refuse anything there
+    for key in ("async",) if hook.source == "codex" else ("async", "asyncRewake", "if", "once"):
         if h.get(key):
             return f"hooks with `{key}` are not run by winhand"
     for key in ("command", "commandWindows", "command_windows"):
         if key in h and not isinstance(h[key], str):
             return f"`{key}` is not a string"
-    if not hook.command:
+    if not hook.command.strip():
         return "it has no command"
     if hook.source == "claude-code" and "args" in h and not isinstance(h["args"], list):
         return "`args` is not a list"
@@ -296,13 +367,13 @@ def _unsupported(hook: Hook) -> str | None:
         number = whole or isinstance(timeout, float)
         if not number or not math.isfinite(timeout) or timeout < 0 or (hook.source == "codex" and not whole):
             return "`timeout` is not a number of seconds" + (
-                " (Codex wants a whole number)" if number else ""
+                " (Codex wants a whole number)" if number and hook.source == "codex" else ""
             )
     for key in ("statusMessage",):
         if key in h and not isinstance(h[key], str):
             return f"`{key}` is not a string"
     matcher = hook.matcher
-    if matcher and matcher.strip() not in ("", "*") and not _EXACT[_dialect(hook)].match(matcher):
+    if not _matches_all(hook) and not _EXACT[_dialect(hook)].fullmatch(matcher or ""):
         try:
             re.compile(matcher)
         except re.error as exc:
@@ -355,7 +426,7 @@ def codex_hash(matcher: str | None, handler: dict) -> str:
     """The hash Codex keeps as trusted_hash for a command hook (codex-rs/hooks discovery.rs and
     config/src/fingerprint.rs): the normalized hook as JSON with sorted keys, compact, SHA-256."""
     if IS_WINDOWS:
-        command = handler.get("commandWindows") or handler.get("command_windows") or handler.get("command")
+        command = _codex_windows_command(handler)
     else:
         command = handler.get("command")
     timeout = handler.get("timeout")
@@ -390,41 +461,64 @@ def _state_key(key: str) -> str:
     return ":".join([os.path.normcase(os.path.normpath(parts[0])), *parts[1:]])
 
 
+def codex_legacy_managed_config() -> str:
+    """The legacy managed config.toml, a managed layer above all others (config/src/loader)."""
+    if IS_WINDOWS:
+        return os.path.join(workspace.codex_home(), "managed_config.toml")
+    return "/etc/codex/managed_config.toml"
+
+
 def _codex_user() -> tuple[dict, dict[str, str], list[dict]]:
-    """hooks.state (by normalized key), each project's trust_level (by folder) and errors, from the
-    user's config.toml: only the user decides what is trusted, never a project's own files."""
+    """hooks.state (by normalized key) and errors from the user's config.toml, where Codex keeps
+    them, and each project's trust_level (by folder) from the system and user config.toml: never
+    from a project's own files."""
     path = os.path.join(workspace.codex_home(), "config.toml")
     data, error = _load(path, "toml")
-    if error:
-        return {}, {}, [{"file": path, "error": error}]
+    errors = [{"file": path, "error": error}] if error else []
+    levels: dict[str, str] = {}
+    for source in (os.path.join(codex_system_dir(), "config.toml"), path):
+        found, _ = _load(source, "toml")
+        projects = found.get("projects") if isinstance(found, dict) else None
+        for k, v in (projects if isinstance(projects, dict) else {}).items():
+            if isinstance(v, dict) and isinstance(v.get("trust_level"), str):
+                levels[_folder_key(str(k))] = v["trust_level"]
     if not isinstance(data, dict):
-        return {}, {}, []
+        return {}, levels, errors
     hooks = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
     raw_state = hooks.get("state") if isinstance(hooks.get("state"), dict) else {}
-    state = {_state_key(str(k)): v for k, v in raw_state.items() if isinstance(v, dict)}
-    projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
-    levels = {
-        _folder_key(str(k)): str(v.get("trust_level")) for k, v in projects.items() if isinstance(v, dict)
-    }
-    return state, levels, []
+    state = {_state_key(str(k).strip()): v for k, v in raw_state.items() if isinstance(v, dict)}
+    return state, levels, errors
 
 
-def _codex_hooks_off() -> bool:
-    """[features] hooks = false (or the old name codex_hooks) in the user's config.toml."""
-    data, _ = _load(os.path.join(workspace.codex_home(), "config.toml"), "toml")
-    features = data.get("features") if isinstance(data, dict) else None
-    if not isinstance(features, dict):
-        return False
-    return features.get("hooks", features.get("codex_hooks")) is False
+def _codex_hooks_on(config_files: list[str], requirements: object) -> bool:
+    """Codex's `hooks` feature: on by default; [features] of its config layers merged, low to high
+    (system, user, trusted projects, the legacy managed file), then what requirements.toml pins.
+    Within one table Codex applies the keys in order, so `hooks` wins over the old `codex_hooks`."""
+    merged: dict[str, bool] = {}
+    for path in config_files:
+        data, _ = _load(path, "toml")
+        features = data.get("features") if isinstance(data, dict) else None
+        if isinstance(features, dict):
+            merged.update(
+                {k: features[k] for k in ("codex_hooks", "hooks") if isinstance(features.get(k), bool)}
+            )
+    pinned = requirements.get("features") if isinstance(requirements, dict) else None
+    on = True
+    for table in (merged, pinned if isinstance(pinned, dict) else {}):
+        for key in ("codex_hooks", "hooks"):
+            if isinstance(table.get(key), bool):
+                on = table[key]
+    return on
 
 
-def _codex_folder_trusted(folder: str, root: str, levels: dict[str, str]) -> bool:
-    """Whether Codex loads the .codex folder of `folder`: decided for that folder, else for the
-    project root; an explicit "untrusted" on either wins."""
-    found = [levels.get(_folder_key(folder)), levels.get(_folder_key(root))]
-    if "untrusted" in found:
-        return False
-    return next((level for level in found if level is not None), None) == "trusted"
+def _codex_folder_trusted(candidates: list[str], levels: dict[str, str]) -> bool:
+    """Codex decides a .codex folder's trust by the first of these with a trust_level: the folder,
+    the project root, the repository's main checkout (loader decision_for_dir)."""
+    for folder in candidates:
+        level = levels.get(_folder_key(folder))
+        if level is not None:
+            return level == "trusted"
+    return False
 
 
 def _codex(root: str, chain: list[str]) -> tuple[list[Hook], list[dict]]:
@@ -435,30 +529,41 @@ def _codex(root: str, chain: list[str]) -> tuple[list[Hook], list[dict]]:
     managed_only = isinstance(req, dict) and req.get("allow_managed_hooks_only") is True
     state, levels, user_errors = _codex_user()
     errors += user_errors
-    switched_off = _codex_hooks_off()
     home = workspace.codex_home()
-    layers: list[tuple[str, str, str, str | None]] = [
-        ("managed", requirements, "toml", None),
-        ("managed", os.path.join(system, "hooks.json"), "json", None),
-        ("managed", os.path.join(system, "config.toml"), "toml", None),
-        ("user", os.path.join(home, "hooks.json"), "json", None),
-        ("user", os.path.join(home, "config.toml"), "toml", None),
+    legacy = codex_legacy_managed_config()
+    main = _main_checkout(root)
+    layers: list[tuple[str, str, str, bool]] = [
+        ("managed", requirements, "toml", True),
+        ("managed", os.path.join(system, "hooks.json"), "json", True),
+        ("managed", os.path.join(system, "config.toml"), "toml", True),
+        ("user", os.path.join(home, "hooks.json"), "json", True),
+        ("user", os.path.join(home, "config.toml"), "toml", True),
     ]
+    config_files = [os.path.join(system, "config.toml"), os.path.join(home, "config.toml")]
     for folder in chain:
-        if _folder_key(os.path.join(folder, ".codex")) == _folder_key(home):
-            continue  # Codex does not load its own home twice
-        layers.append(("project", os.path.join(folder, ".codex", "hooks.json"), "json", folder))
-        layers.append(("project", os.path.join(folder, ".codex", "config.toml"), "toml", folder))
+        dot = os.path.join(folder, ".codex")
+        if not os.path.isdir(dot) or _folder_key(dot) == _folder_key(home):
+            continue  # Codex needs the folder, and does not load its own home twice
+        trusted = _codex_folder_trusted([folder, root, main], levels)
+        if trusted:
+            config_files.append(os.path.join(dot, "config.toml"))
+        # a linked worktree takes its hooks from the same folder of the main checkout
+        hooks_dir = dot if main == root else os.path.normpath(os.path.join(main, os.path.relpath(dot, root)))
+        layers.append(("project", os.path.join(hooks_dir, "hooks.json"), "json", trusted))
+        layers.append(("project", os.path.join(hooks_dir, "config.toml"), "toml", trusted))
+    layers.append(("managed", legacy, "toml", True))
+    config_files.append(legacy)
+    switched_on = _codex_hooks_on(config_files, req)
     hooks: list[Hook] = []
-    for layer, path, kind, folder in layers:
+    for layer, path, kind, trusted in layers:
         found, errs = _from_file("codex", path, kind)
         errors += errs
         for hook in found:
             try:
-                _codex_status(hook, layer, folder, root, state, levels, managed_only)
+                _codex_status(hook, layer, trusted, state, managed_only)
             except Exception as exc:  # a strange file must not stop the others
                 hook.status, hook.reason = "unsupported", f"cannot be read ({exc})"
-            if switched_off and hook.runs:
+            if not switched_on and hook.runs:
                 hook.status, hook.reason = (
                     "disabled",
                     "hooks are turned off in Codex ([features] hooks = false)",
@@ -467,7 +572,7 @@ def _codex(root: str, chain: list[str]) -> tuple[list[Hook], list[dict]]:
     return hooks, errors
 
 
-def _codex_status(hook, layer, folder, root, state, levels, managed_only) -> None:
+def _codex_status(hook, layer, folder_trusted, state, managed_only) -> None:
     why = _unsupported(hook)
     entry = state.get(_state_key(hook.key), {})
     if why:
@@ -479,7 +584,7 @@ def _codex_status(hook, layer, folder, root, state, levels, managed_only) -> Non
         hook.reason = "only managed hooks may run (allow_managed_hooks_only in Codex's requirements.toml)"
     elif entry.get("enabled") is False:
         hook.status, hook.reason = "disabled", "turned off in Codex"
-    elif layer == "project" and not _codex_folder_trusted(folder or root, root, levels):
+    elif not folder_trusted:
         hook.status = "untrusted"
         hook.reason = "this folder is not trusted in Codex ([projects] in ~/.codex/config.toml)"
     else:
@@ -506,13 +611,15 @@ def claude_managed_dir() -> str:
 
 
 def _claude_trusted(root: str) -> bool:
-    """Workspace trust accepted for the project, or for a folder above it when the project is not a
-    repository of its own (trust covers subfolders, not nested repositories)."""
+    """Workspace trust accepted for the project (for a linked worktree, also its main checkout,
+    where Claude Code keeps it), or for a folder above it when the project is not a repository of
+    its own (trust covers subfolders, not nested repositories)."""
     own_repo = os.path.exists(os.path.join(root, ".git"))
+    exact = {_folder_key(root), _folder_key(_main_checkout(root))}
     for folder, entry in workspace._claude_projects().items():
         if not isinstance(entry, dict) or entry.get("hasTrustDialogAccepted") is not True:
             continue
-        if _folder_key(str(folder)) == _folder_key(root) or (not own_repo and _under(root, str(folder))):
+        if _folder_key(str(folder)) in exact or (not own_repo and _under(root, str(folder))):
             return True
     return False
 
@@ -574,18 +681,15 @@ def _claude(root: str) -> tuple[list[Hook], list[dict]]:
 # ------------------------------------------------------------------ finding them for a folder
 
 
-def _main_checkout(root: str, chain: list[str]) -> tuple[str, list[str]]:
-    """For a linked git worktree, the main checkout and the folders there that match `chain`
-    (Codex takes a worktree's hooks and trust from the main checkout); otherwise unchanged."""
+def _main_checkout(root: str) -> str:
+    """The main checkout of a linked git worktree; `root` itself otherwise."""
     if not os.path.isfile(os.path.join(root, ".git")):
-        return root, chain
+        return root
     gitdir, common = workspace._git_dirs(root)
     if not gitdir or not common or os.path.basename(os.path.normpath(common)) != ".git":
-        return root, chain
+        return root
     main = os.path.dirname(os.path.normpath(common))
-    if _folder_key(main) == _folder_key(root):
-        return root, chain
-    return main, [os.path.normpath(os.path.join(main, os.path.relpath(f, root))) for f in chain]
+    return root if _folder_key(main) == _folder_key(root) else main
 
 
 def discover(folder: str, cfg: dict | None = None) -> tuple[list[Hook], list[dict]]:
@@ -597,7 +701,7 @@ def discover(folder: str, cfg: dict | None = None) -> tuple[list[Hook], list[dic
     hooks: list[Hook] = []
     errors: list[dict] = []
     if "codex" in enabled:
-        found, errs = _codex(*_main_checkout(root, chain))
+        found, errs = _codex(root, chain)
         hooks += found
         errors += errs
     if "claude-code" in enabled:
@@ -635,23 +739,42 @@ def describe(folder: str | None, max_chars: int = 6_000) -> dict:
     if len(listed) < len(hooks):
         out["hooks_more"] = len(hooks) - len(listed)
     if errors:
-        out["errors"] = errors[:10]
+        shown = []
+        for error in errors[:10]:
+            item = {"file": error.get("file"), "error": _clip(str(error.get("error")))}
+            used += len(json.dumps(item, ensure_ascii=False)) + 2
+            if used > max_chars + 4_000:  # a little more room, so the errors are not crowded out
+                break
+            shown.append(item)
+        out["errors"] = shown
+        if len(shown) < len(errors):
+            out["errors_more"] = len(errors) - len(shown)
     return out
 
 
 # ------------------------------------------------------------------ matching
 
 
-_EXACT = {"codex": re.compile(r"^[A-Za-z0-9_|]*$"), "claude-code": re.compile(r"^[A-Za-z0-9_\-, |]*$")}
+_EXACT = {"codex": re.compile(r"[A-Za-z0-9_|]*"), "claude-code": re.compile(r"[A-Za-z0-9_\-, |]*")}
+
+
+def _matches_all(hook: Hook) -> bool:
+    """No matcher, "" or "*". Codex compares the matcher as written (hooks/src/engine/matcher.rs)."""
+    matcher = hook.matcher
+    if matcher is None:
+        return True
+    return (matcher if hook.source == "codex" else matcher.strip()) in ("", "*")
 
 
 def matches(hook: Hook, names: tuple[str, ...]) -> bool:
-    matcher = hook.matcher
-    if matcher is None or matcher.strip() in ("", "*"):
+    if _matches_all(hook):
         return True
-    exact = _EXACT[_dialect(hook)]
-    if exact.match(matcher):
-        alternatives = {a.strip() for a in re.split(r"[|,]" if hook.source != "codex" else r"\|", matcher)}
+    matcher = hook.matcher or ""
+    if _EXACT[_dialect(hook)].fullmatch(matcher):
+        if hook.source == "codex":
+            alternatives = set(matcher.split("|"))
+        else:
+            alternatives = {a.strip() for a in re.split(r"[|,]", matcher)}
         return any(n in alternatives for n in names)
     try:
         regex = re.compile(matcher)
@@ -947,7 +1070,9 @@ def _windows_job(pid: int):
             return None
         info = Extended()
         info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+        if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            kernel32.CloseHandle(job)
+            return None
         handle = kernel32.OpenProcess(0x0001 | 0x0100, False, pid)  # TERMINATE | SET_QUOTA
         assigned = bool(handle) and bool(kernel32.AssignProcessToJobObject(job, handle))
         if handle:
