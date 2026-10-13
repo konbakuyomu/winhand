@@ -497,12 +497,13 @@ def test_tall_cursors_slow_blinks_and_faint_noise(monkeypatch):
     _, _, facts = desktop.wait_picture(1, None, None, "stable", 6, 1000)
     assert facts["matched"] is True
     # a 70 px cursor on a 300 % screen is still a cursor
-    monkeypatch.setattr(desktop, "_zoom", lambda: 3.0)
     tall = [frame(i % 2 == 0, height=70) for i in range(400)]
     _frames(monkeypatch, tall)
+    monkeypatch.setattr(desktop, "_zoom", lambda: 3.0)
     _, _, facts = desktop.wait_picture(1, None, None, "stable", 6, 1000)
     assert facts["matched"] is True
     _frames(monkeypatch, tall)
+    monkeypatch.setattr(desktop, "_zoom", lambda: 3.0)
     _, _, facts = desktop.wait_picture(1, None, None, "change", 3, 1000)
     assert facts["matched"] is False
     # the slowest blink setting (1.2 s per phase) is not a change either
@@ -557,6 +558,7 @@ def _frames(monkeypatch, frames):
     monkeypatch.setattr(desktop, "capture", capture)
     monkeypatch.setattr(desktop, "WAIT_PICTURE_S", 0.01)
     monkeypatch.setattr(desktop, "_seen", {})
+    monkeypatch.setattr(desktop, "_zoom", lambda: 1.0)  # sizes as on a 100 % screen, whatever this one is
 
 
 def test_waiting_for_a_change_and_for_stillness(monkeypatch):

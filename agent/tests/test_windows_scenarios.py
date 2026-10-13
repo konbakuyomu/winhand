@@ -565,7 +565,7 @@ async def test_ui_through_the_powershell_script_still_works(test_form, monkeypat
 
 
 # A classic Win32 menu (MainMenu makes a real HMENU), a list view, a text box, and a label that
-# changes 1.5 s after "Start" is pressed.
+# changes 3 s after "Start" is pressed.
 _CLASSIC_FORM = r"""
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object Windows.Forms.Form -Property @{ Text = 'winhand-classic-test'; Width = 620; Height = 380; TopMost = $true }
@@ -581,7 +581,7 @@ foreach ($row in @(@('CPU', 'Intel'), @('内存', '32 GB'), @('Disk', 'SSD'))) {
 $box = New-Object Windows.Forms.TextBox -Property @{ Left = 330; Top = 10; Width = 250 }
 $start = New-Object Windows.Forms.Button -Property @{ Text = 'Start'; Left = 330; Top = 50; Width = 120; Height = 40 }
 $label = New-Object Windows.Forms.Label -Property @{ Left = 10; Top = 190; Width = 580; Height = 60; Text = 'Status: waiting'; Font = New-Object Drawing.Font('Segoe UI', 18) }
-$timer = New-Object Windows.Forms.Timer -Property @{ Interval = 1500 }
+$timer = New-Object Windows.Forms.Timer -Property @{ Interval = 3000 }
 $timer.Add_Tick({ $label.Text = 'Status: Done 已完成'; $timer.Stop() })
 $start.Add_Click({ $timer.Start() })
 $f.Controls.AddRange(@($list, $box, $start, $label))
@@ -738,7 +738,8 @@ async def test_waiting_for_the_picture_and_for_text(classic_form):
             return result.structured_content
 
         await client.call_tool("ui", {"window": "winhand-classic-test", "action": "invoke", "name": "Start"})
-        await shot()  # the picture right after pressing Start
+        # once the button's press animation is over, that picture is what a change is measured against
+        await shot(wait="stable", stable_ms=300, timeout_s=10)
         changed = await shot(wait="change", timeout_s=10)
         assert changed["wait"]["matched"] is True and changed["wait"]["waited_s"] >= 0.3, changed
         settled = await shot(wait="stable", stable_ms=500, timeout_s=10)

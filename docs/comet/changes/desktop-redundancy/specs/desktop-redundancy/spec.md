@@ -139,7 +139,7 @@ Scenario: (A6) 按字点击
   - 匹配的 center 落在 UI Automation 报告的按钮范围内。
 
 Scenario: (A7) 等字与出错
-- 设置：标签在 1.5 秒后改为 “Done”。
+- 设置：按下 Start 后，标签在 3 秒后改为 “Done”。
 - 结果：
   - `wait` 在超时前返回 `matched=true`；
   - 等一个不会出现的字，1 秒超时后返回 `matched=false`；
@@ -171,7 +171,7 @@ Scenario: (A7) 等字与出错
   - 超时时 `matched=false`，并说明。
 
 Scenario: (A8) 等画面
-- 设置：测试窗体在 1.5 秒后改变标签。
+- 设置：按下 Start 后，测试窗体在 3 秒后改变标签。先等按钮的按下动画结束（stable）再截参照图。
 - 结果：
   - 先截一次图，再 `screenshot(window=..., wait='change')`，在超时前返回 `matched=true`；
   - `wait='stable'` 返回 `matched=true`；
