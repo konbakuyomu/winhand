@@ -16,8 +16,8 @@ internal static partial class ReleaseNotes
         foreach (var raw in markdown.Replace("\r\n", "\n").Split('\n'))
         {
             var line = raw.Trim();
-            if (line.Length == 0)
-                continue;
+            if (line.Length == 0 || RulePattern().IsMatch(line))
+                continue; // blank lines and --- / *** rules only separate blocks
             if (line.StartsWith('#'))
             {
                 var heading = Inline(line.TrimStart('#').Trim());
@@ -34,13 +34,16 @@ internal static partial class ReleaseNotes
         return lines;
     }
 
-    /// <summary>Links keep their text, emphasis and code marks go.</summary>
+    /// <summary>Links keep their text; ** bold and `code` marks go (not "__": __init__.py stays).</summary>
     public static string Inline(string text)
     {
         text = LinkPattern().Replace(text, "$1");
-        return text.Replace("**", "").Replace("__", "").Replace("`", "");
+        return text.Replace("**", "").Replace("`", "");
     }
 
     [GeneratedRegex(@"!?\[([^\]]*)\]\([^)]*\)")]
     private static partial Regex LinkPattern();
+
+    [GeneratedRegex(@"^([-*_]\s*){3,}$")]
+    private static partial Regex RulePattern();
 }
