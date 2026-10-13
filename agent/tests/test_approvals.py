@@ -238,6 +238,15 @@ def test_the_switch_lives_in_the_file_next_to_the_programs():
     assert approvals.enabled() is True and approvals.status("notepad.exe") == "always"
 
 
+def test_revoke_with_a_broken_file_says_so(monkeypatch):
+    approvals.allow_session("notepad.exe")
+    approvals.path().parent.mkdir(parents=True, exist_ok=True)
+    approvals.path().write_text("[always\n", encoding="utf-8")
+    with pytest.raises(approvals.FileBroken):
+        approvals.revoke("notepad.exe")
+    assert approvals.status("notepad.exe") == "ask"  # what this process allowed is taken back anyway
+
+
 def test_revoke_takes_back_both_kinds_and_listeners_hear_of_it():
     heard = []
     approvals.subscribe(lambda: heard.append(approvals.snapshot()))
@@ -317,6 +326,32 @@ def test_a_point_outside_every_screen_is_refused(monkeypatch):
         desktop.check_window_at(5000, 10, "点击 (5000, 10)")
     monkeypatch.setattr(desktop, "_on_screen", lambda x, y: True)  # on a screen, no window: nothing to ask
     desktop.check_window_at(10, 10, "点击 (10, 10)")
+    # in the gap between two screens of different sizes WindowFromPoint may still name a window
+    monkeypatch.setattr(desktop, "root_window_at", lambda x, y: 7)
+    monkeypatch.setattr(desktop, "_on_screen", lambda x, y: False)
+    with pytest.raises(desktop.DesktopError, match="outside every screen"):
+        desktop.check_window_at(1930, 1300, "点击 (1930, 1300)")
+
+
+def test_keys_are_refused_while_no_window_is_in_front(monkeypatch):
+    monkeypatch.setattr(
+        desktop, "user32", types.SimpleNamespace(GetForegroundWindow=lambda: 0), raising=False
+    )
+    monkeypatch.setattr(desktop, "require_operable", lambda *a: pytest.fail("nothing to check"))
+    with pytest.raises(desktop.DesktopError, match="no window is in front"):
+        desktop.check_foreground("按键 enter")
+
+
+def test_the_dialog_text_from_the_program_is_kept_short(monkeypatch):
+    shown = {}
+    monkeypatch.setattr(
+        secret_prompt, "ask_approval", lambda name, exe, title, action, warning, timeout_s: shown.update(
+            name=name, title=title, action=action) or "session"
+    )  # fmt: skip
+    long = App("app.exe", "名" * 500, "标题" * 500)
+    approvals.check(long, "控件操作：select「" + "x" * 5000 + "」")
+    assert len(shown["name"]) <= 80 and len(shown["title"]) <= 120 and len(shown["action"]) <= 160
+    assert shown["action"].endswith("…")
 
 
 def test_wrong_arguments_fail_before_anyone_is_asked(monkeypatch):
@@ -567,6 +602,15 @@ async def test_file_tools_cannot_change_who_may_be_operated(tmp_path):
             "fs_write", {"path": str(approvals.path().parent / "notes.txt"), "content": "hi"}
         )
     assert not elsewhere.is_error
+    link = tmp_path / "link-to-home"
+    link.symlink_to(approvals.path().parent, target_is_directory=True)
+    async with Client(build_server(Config())) as client:  # the same file spelled through a link
+        linked = await client.call_tool(
+            "fs_write",
+            {"path": str(link / approvals.FILE_NAME), "content": "ask = false\n"},
+            raise_on_error=False,
+        )
+    assert linked.is_error and "only the person at the machine" in linked.content[0].text
     assert approvals.path().read_text(encoding="utf-8") == before
     async with Client(build_server(Config())) as client:  # making a folder there changes nothing in it
         made = await client.call_tool("fs_op", {"action": "mkdir", "path": str(approvals.path().parent)})

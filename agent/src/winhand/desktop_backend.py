@@ -509,6 +509,8 @@ class Backend:
     async def m_apps_revoke(self, params: dict) -> dict:
         try:
             exe = approvals.revoke(str(params.get("exe") or ""))
+        except approvals.FileBroken as exc:
+            raise RpcError("approvals_file", str(exc)) from None
         except ValueError as exc:
             raise RpcError("invalid_exe", str(exc)) from None
         self.hub.record("settings", f"在应用中撤销了 {exe} 的授权", status="ok", summary="")

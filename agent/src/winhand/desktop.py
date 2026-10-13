@@ -482,20 +482,21 @@ def _on_screen(x: int, y: int) -> bool:
 
 def check_window_at(x: int, y: int, what: str = "") -> None:
     """Refuse input aimed at a point whose window may not be operated (see require_operable)."""
-    root = root_window_at(x, y)
-    if root:
-        require_operable(root, what or f"点击 ({x}, {y})")
-    elif not _on_screen(x, y):  # Windows would move it to the screen's edge, onto whatever is there
+    if not _on_screen(x, y):  # Windows would move it to the nearest screen's edge, onto whatever is there
         raise DesktopError(
             f"({x}, {y}) is outside every screen; nothing was sent. Take a screenshot for coordinates."
         )
+    root = root_window_at(x, y)
+    if root:
+        require_operable(root, what or f"点击 ({x}, {y})")
 
 
 def check_foreground(what: str = "") -> None:
     """Refuse keys or text while a window that may not be operated has the keyboard."""
     hwnd = user32.GetForegroundWindow()
-    if hwnd:
-        require_operable(hwnd, what or "按键")
+    if not hwnd:  # Windows is between two windows: where the keys would go is unknown
+        raise DesktopError("no window is in front right now; nothing was sent. Try again in a moment.")
+    require_operable(hwnd, what or "按键")
 
 
 def check_shell(what: str) -> None:

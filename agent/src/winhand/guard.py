@@ -381,18 +381,21 @@ def touches_approvals(actions: list[Action], mkdir: bool = False) -> bool:
     whatever the owner's rules say. Creating a folder (`mkdir`) changes nothing in one."""
     from . import approvals
 
-    target = os.path.normcase(os.path.abspath(approvals.path()))
+    target = os.path.normcase(os.path.realpath(approvals.path()))
     for action in actions:
         if action.kind not in ("write", "edit", "delete", "move"):
             continue
-        for path in action.paths:
-            try:
-                full = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
-            except (TypeError, ValueError):
-                continue
-            inside = action.kind != "edit" and not mkdir and target.startswith(full.rstrip("\\/") + os.sep)
-            if full == target or inside:
-                return True
+        for given in action.paths:
+            for path in variants(given):  # \\?\ prefixes, ::$DATA, short names, junctions
+                try:
+                    full = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+                except (TypeError, ValueError):
+                    continue
+                inside = (
+                    action.kind != "edit" and not mkdir and target.startswith(full.rstrip("\\/") + os.sep)
+                )
+                if full == target or inside:
+                    return True
     return False
 
 

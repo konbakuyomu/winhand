@@ -289,11 +289,14 @@ def revoke(exe: str) -> str:
     with _lock:
         _read()
         _session.pop(key, None)
-        if key in _file["always"]:
+        broken = _file["error"]
+        if not broken and key in _file["always"]:
             entries = dict(_file["always"])
             del entries[key]
             _write(entries, _file["ask"])
     _changed()
+    if broken:  # whatever the file says about it cannot be read, so it cannot be taken out either
+        raise FileBroken(f"fix or remove the approvals file first: {broken}")
     return key
 
 
@@ -401,7 +404,11 @@ def snapshot() -> dict:
 def _ask_person(app: App, action: str, warning: str | None) -> str:
     from .secret_prompt import ask_approval
 
-    return ask_approval(app.name or app.exe, app.exe, app.title, action, warning, timeout_s=DIALOG_S)
+    def short(text: str, limit: int) -> str:  # titles and control names come from the program
+        return text if len(text) <= limit else text[: limit - 1] + "…"
+
+    name, title = short(app.name or app.exe, 80), short(app.title, 120)
+    return ask_approval(name, app.exe, title, short(action, 160), warning, timeout_s=DIALOG_S)
 
 
 def _dialog(app: App, action: str, future: Future, ask) -> None:
