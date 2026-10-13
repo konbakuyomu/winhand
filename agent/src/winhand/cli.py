@@ -174,7 +174,13 @@ def main(argv: list[str] | None = None) -> int:
         print(session_bridge.setup_text(origin))
         return 0
     if cmd == "apps":
-        return _apps(args.action, args.exe)
+        from .approvals import FileBroken
+
+        try:
+            return _apps(args.action, args.exe)
+        except FileBroken as exc:
+            print(f"winhand apps {args.action}: {exc}", file=sys.stderr)
+            return 1
     if cmd == "doctor":
         from . import config, proc
 

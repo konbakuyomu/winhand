@@ -69,7 +69,8 @@ def media_result(facts: dict, *blocks) -> ToolResult:
 
 def _errors(fn, *args, **kwargs):
     try:
-        return fn(*args, **kwargs)
+        with approvals.one_call():  # every approval this call waits for shares one ~40 s
+            return fn(*args, **kwargs)
     except (
         desktop.DesktopError,
         media.MediaError,

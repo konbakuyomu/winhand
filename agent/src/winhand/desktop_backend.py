@@ -485,13 +485,18 @@ class Backend:
 
     async def m_apps_set_enabled(self, params: dict) -> dict:
         on = bool(params.get("enabled", True))
-        approvals.set_enabled(on)
+        try:
+            approvals.set_enabled(on)
+        except approvals.FileBroken as exc:
+            raise RpcError("approvals_file", str(exc)) from None
         self.hub.record("settings", "程序授权：" + ("已开启" if on else "已关闭"), status="ok", summary="")
         return await asyncio.to_thread(self.apps_state)
 
     async def m_apps_allow(self, params: dict) -> dict:
         try:
             exe = approvals.allow_always(str(params.get("exe") or ""))
+        except approvals.FileBroken as exc:
+            raise RpcError("approvals_file", str(exc)) from None
         except ValueError as exc:
             raise RpcError("invalid_exe", str(exc)) from None
         self.hub.record("settings", f"在应用中允许 AI 一直操作 {exe}", status="ok", summary="")

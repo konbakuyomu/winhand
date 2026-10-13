@@ -377,7 +377,8 @@ APPROVALS_REFUSAL = (
 
 def touches_approvals(actions: list[Action]) -> bool:
     """Whether a file tool would write, edit, move or delete the desktop approvals file
-    (approvals.py), or move or delete a folder holding it: built in, whatever the owner's rules say."""
+    (approvals.py), or write (a folder copied over it), move or delete a folder holding it: built in,
+    whatever the owner's rules say."""
     from . import approvals
 
     target = os.path.normcase(os.path.abspath(approvals.path()))
@@ -389,7 +390,7 @@ def touches_approvals(actions: list[Action]) -> bool:
                 full = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
             except (TypeError, ValueError):
                 continue
-            inside = action.kind in ("delete", "move") and target.startswith(full.rstrip("\\/") + os.sep)
+            inside = action.kind != "edit" and target.startswith(full.rstrip("\\/") + os.sep)
             if full == target or inside:
                 return True
     return False

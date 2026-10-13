@@ -30,8 +30,8 @@
 | `mcp_test` | `name` | 单独启动一份临时进程并列出能力：`ok`、`server{name,version}`、`protocol`、`tools[{name,description}]`、`prompts[]`、`resources`、`error`、`stderr_tail[]`、`duration_ms` |
 | `mcp_start` / `mcp_stop` | `name` | 立即启动或停止（平时第一次被调用时自动启动） |
 | `apps_get` | — | 程序授权状态（见下） |
-| `apps_set_enabled` | `enabled` | 开关“AI 操作程序前先问我”，写入授权文件的 `ask`；返回程序授权状态 |
-| `apps_allow` | `exe`（如 `notepad.exe`，大小写和路径不限，没有扩展名时补 `.exe`） | 加入“一直允许”（人在设置页操作，不再弹确认框）；返回程序授权状态，另加 `added`（规范化后的 exe 名）和 `caution?`（浏览器、终端等要提醒的话）。`exe` 为空时错误码 `invalid_exe` |
+| `apps_set_enabled` | `enabled` | 开关“AI 操作程序前先问我”，写入授权文件的 `ask`；返回程序授权状态。授权文件有错时不改写它，错误码 `approvals_file` |
+| `apps_allow` | `exe`（如 `notepad.exe`，大小写和路径不限，没有扩展名时补 `.exe`） | 加入“一直允许”（人在设置页操作，不再弹确认框）；返回程序授权状态，另加 `added`（规范化后的 exe 名）和 `caution?`（浏览器、终端等要提醒的话）。`exe` 为空时错误码 `invalid_exe`，授权文件有错时 `approvals_file` |
 | `apps_revoke` | `exe` | 同时撤销“一直允许”和“允许到 WinHand 重启”；返回程序授权状态 |
 | `shutdown` | — | `{ok: true}`，随后退出 |
 

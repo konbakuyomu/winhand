@@ -24,7 +24,10 @@ public sealed partial class MainWindow
         {
             if (_appsRendering)
                 return;
-            ApplyApps(await RequestAsync("apps_set_enabled", new Dictionary<string, object?> { ["enabled"] = ask.IsOn }));
+            if (await RequestAsync("apps_set_enabled", new Dictionary<string, object?> { ["enabled"] = ask.IsOn }) is { } result)
+                ApplyApps(result);
+            else
+                RenderApps(); // not changed: the switch goes back to what the file says
         };
         _appsAlways = new StackPanel { Spacing = 8 };
         _appsSession = new StackPanel { Spacing = 8 };

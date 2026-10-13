@@ -308,13 +308,14 @@ def act(
         raise OcrError(f"only {len(found['matches'])} matches; index {index} is out of range")
     x, y = found["matches"][index]["center"]
     if target is not None:
-        desktop.require_operable(target["hwnd"], f"按文字点击「{text}」")  # its approval first
-        try:
-            desktop.window_action(target["hwnd"], "focus")
-        except (desktop.DesktopUnavailable, approvals.NotOperable):
-            raise
-        except desktop.DesktopError:
-            pass  # it may be in front anyway; checked below
+        if action != "move":  # clicking operates the program: its approval first, then to the front
+            desktop.require_operable(target["hwnd"], f"按文字点击「{text}」")
+            try:
+                desktop.window_action(target["hwnd"], "focus")
+            except (desktop.DesktopUnavailable, approvals.NotOperable):
+                raise
+            except desktop.DesktopError:
+                pass  # it may be in front anyway; checked below
         if desktop.root_window_at(x, y) != target["hwnd"]:
             raise OcrError(
                 "another window covers that spot of the window; bring it to the front (window action=focus) "

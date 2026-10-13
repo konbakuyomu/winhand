@@ -129,6 +129,23 @@ def test_without_an_answer_the_call_returns_and_the_dialog_stays(monkeypatch):
     assert approvals.status("notepad.exe") == "session"
 
 
+def test_one_call_waits_once_however_many_programs_it_touches(monkeypatch):
+    monkeypatch.setattr(approvals, "WAIT_S", 0.3)
+    answered = threading.Event()
+
+    def slow_person(app, action, warning):
+        answered.wait(10)
+        return "deny"
+
+    began = time.monotonic()
+    with approvals.one_call():
+        for exe in ("a.exe", "b.exe"):  # a drag from one program into another
+            with pytest.raises(NotOperable, match="Waiting"):
+                approvals.check(App(exe), "拖动", slow_person)
+    assert time.monotonic() - began < 0.55  # not 0.3 s for each
+    answered.set()
+
+
 def test_an_unanswered_dialog_refuses_this_time_only():
     person = Person(PromptUnavailable("nobody answered the dialog within 120s"), "session")
     with pytest.raises(NotOperable, match="Nobody allowed.*nobody answered"):
@@ -157,6 +174,14 @@ def test_terminals_are_refused_without_asking_until_always_allowed():
     assert "终端窗口" in person.asked[0][2]
     approvals.allow_always("cmd.exe")
     approvals.check(console, "按键 enter", person)
+
+
+def test_allowing_a_programs_window_until_restart_does_not_open_its_consoles():
+    approvals.check(App("python.exe", title="tk"), "点击 (1, 2)", Person("session"))
+    assert approvals.status("python.exe") == "session"
+    with pytest.raises(NotOperable, match="console window"):  # a REPL in a console stays a terminal
+        approvals.check(App("python.exe", console=True), "按键 enter", Person())
+    assert "终端窗口" in approvals.caution("python.exe")
 
 
 @pytest.mark.parametrize(
@@ -193,6 +218,14 @@ def test_a_broken_file_asks_about_everything():
     assert "desktop-apps.toml" in approvals.snapshot()["error"]
     approvals.path().write_text('ask = "no"\n', encoding="utf-8")
     assert approvals.enabled() is True and "true or false" in approvals.file_error()
+    # what the person wrote there is not overwritten; "always" in the dialog allows until restart
+    with pytest.raises(approvals.FileBroken):
+        approvals.allow_always("notepad.exe")
+    with pytest.raises(approvals.FileBroken):
+        approvals.set_enabled(False)
+    approvals.check(NOTEPAD, "点击 (1, 2)", Person("always"))
+    assert approvals.status("notepad.exe") == "session"
+    assert approvals.path().read_text(encoding="utf-8") == 'ask = "no"\n'
 
 
 def test_the_switch_lives_in_the_file_next_to_the_programs():
@@ -257,6 +290,18 @@ def test_other_programs_go_through_approval_unless_it_is_off(monkeypatch):
     assert len(checked) == 1
 
 
+def test_a_locked_screen_is_reported_instead_of_a_dialog_nobody_can_see(monkeypatch):
+    _window(monkeypatch, "notepad.exe")
+    monkeypatch.setattr(desktop, "desktop_state", lambda: "locked")
+    monkeypatch.setattr(approvals, "check", lambda *a, **k: pytest.fail("a dialog was shown"))
+    with pytest.raises(desktop.DesktopUnavailable):
+        desktop.require_operable(5, "点击 (1, 2)")
+    approvals.allow_always("notepad.exe")
+    checked = _window(monkeypatch, "notepad.exe")  # allowed: no dialog needed, the tool says the rest
+    desktop.require_operable(5, "点击 (1, 2)")
+    assert checked == [("notepad.exe", "点击 (1, 2)")]
+
+
 def test_winhand_dialogs_run_from_source_are_its_own(monkeypatch):
     import os
 
@@ -278,6 +323,7 @@ def test_winhand_dialogs_run_from_source_are_its_own(monkeypatch):
     assert desktop.is_own(os.getpid(), "whatever.exe")
     assert desktop.is_own(9, "WINHAND.EXE") and desktop.is_own(9, "winhanddesktop.exe")
     assert desktop.is_own(101, "python.exe") and not desktop.is_own(102, "python.exe")
+    assert desktop.is_own(101, "python3.12.exe")  # the Microsoft Store's Python
     assert not desktop.is_own(103, "notepad.exe") and not desktop.is_own(0, "winhand.exe")
 
 
@@ -402,8 +448,10 @@ def test_ocr_reads_without_asking_and_clicks_only_when_allowed(monkeypatch):
     assert asked == ["按文字点击「OK」"]
     moved = []
     monkeypatch.setattr(desktop, "input_action", lambda *a, **k: moved.append(a) or {})
+    monkeypatch.setattr(desktop, "root_window_at", lambda x, y: 11)
     ocr.act("move", "OK")  # moving the pointer over it is not operating anything
-    assert moved and asked == ["按文字点击「OK」"]
+    ocr.act("move", "OK", window="app")  # nor is it in a given window (not even focused for it)
+    assert len(moved) == 2 and asked == ["按文字点击「OK」"]
 
 
 async def test_reading_tools_never_ask(monkeypatch):
@@ -419,7 +467,10 @@ async def test_reading_tools_never_ask(monkeypatch):
 # ------------------------------------------------------------------ guard, CLI, dialog, app (A9, A10)
 
 
-async def test_file_tools_cannot_change_who_may_be_operated():
+async def test_file_tools_cannot_change_who_may_be_operated(tmp_path):
+    backup = tmp_path / "backup" / approvals.path().parent.name
+    backup.mkdir(parents=True)
+    (backup / approvals.FILE_NAME).write_text('ask = false\n[always]\n"cmd.exe" = "x"\n', encoding="utf-8")
     approvals.allow_always("notepad.exe")
     before = approvals.path().read_text(encoding="utf-8")
     target = str(approvals.path())
@@ -432,6 +483,16 @@ async def test_file_tools_cannot_change_who_may_be_operated():
             ("fs_op", {"action": "copy", "path": target + ".bak", "to": target, "overwrite": True}),
             ("fs_op", {"action": "move", "path": str(approvals.path().parent), "to": target + ".dir"}),
             ("fs_op", {"action": "delete", "path": str(approvals.path().parent), "recursive": True}),
+            # a folder copied over the one holding it ("restore my settings from a backup")
+            (
+                "fs_op",
+                {
+                    "action": "copy",
+                    "path": str(backup),
+                    "to": str(approvals.path().parent.parent),
+                    "overwrite": True,
+                },
+            ),
             ("fs_write", {"path": str(approvals.path().parent / "." / "desktop-apps.toml"), "content": ""}),
         ]
         for tool, arguments in calls:

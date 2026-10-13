@@ -7,7 +7,7 @@
 - **要检查的操作**：
   - `input`：click、double_click、right_click、drag、scroll、hscroll、mouse_down、mouse_up、keys、type。move 不检查；
   - `ui`：inspect 和 wait 以外的动作；
-  - `ocr`：click、double_click、right_click。move 和读取类动作不检查；
+  - `ocr`：click、double_click、right_click。move 和读取类动作不检查（指定窗口的 move 也不检查，也不为它把窗口切到前台）；
   - `window`：focus、minimize、maximize、restore、close、move。
 - **不检查**：`screenshot`、`ocr` 的读取类动作、`ui` 的 inspect 和 wait、`window` 的 list 和 wait、`clipboard`。
 - **顺序**：在发出任何输入、执行任何动作之前，依次判断：
@@ -34,6 +34,7 @@ Scenario: (A5) 只读不问
   - 组合键里有 win 键时：Windows 外壳，即任务栏窗口所属的 explorer.exe；
   - `ui`、`window`：指定的窗口；
   - `ocr` 点击：指定的窗口，然后看点击坐标处的窗口。
+- 一次工具调用可能涉及两个程序（拖动的起点和终点、Win 组合键的外壳和前台窗口、`ui` click 退回鼠标点击）：这些检查共用一次最多约 40 秒的等待，整个调用仍在客户端的时限内回答。
 - UWP 应用：窗口属于 ApplicationFrameHost.exe 时，改用它里面第一个属于别的进程的子窗口所在的进程。
 - 显示名：exe 的“文件说明”（版本信息），没有时用 exe 名。只用于弹窗和设置页。
 
@@ -63,6 +64,8 @@ Scenario: (A6) 识别
   - 拒绝：记下拒绝时间。10 分钟内对这个程序的操作直接拒绝，不弹窗，错误写明人刚拒绝过、请在对话里问人；
   - 2 分钟没人回答，或弹不出窗：这次拒绝，不记住。
 - 弹不出窗时，错误写明原因，例如没有桌面会话。
+- 需要弹窗、但屏幕锁着或在 UAC 安全桌面上时，不弹窗，直接返回锁屏之类的错误（同 0.5.0 的桌面状态错误），因为没人看得到弹窗。已授权的程序不受这一条影响。
+- 判断状态和打开弹窗在同一把锁里完成，刚到的回答不会让同一程序再弹一个窗。
 
 Scenario: (A1) 允许到重启
 - 设置：模拟弹窗回答“允许到 WinHand 重启”。
@@ -100,7 +103,8 @@ Scenario: (A4) 没人回答
   - `ask` 是总开关（R7），没写时视为 true；
   - `[always]` 的键是 exe 名（小写），值是加入的时间；
   - 写入是原子的；文件按修改时间缓存，改了立即生效；
-  - 文件坏了时视为开启、没有“一直允许”，弹窗照常，设置页和 `winhand apps` 显示错误。
+  - 文件坏了时视为开启、没有“一直允许”，弹窗照常，设置页和 `winhand apps` 显示错误；
+  - 文件坏了时不改写它（免得冲掉人写的内容）：设置页和命令行的添加、开关报错，请人先修正；弹窗里选“一直允许”时按“允许到 WinHand 重启”处理。
 - **状态**：
   - `always`：一直允许；
   - `session`：允许到重启；
@@ -133,6 +137,7 @@ Scenario: (A11) 提醒
   - 不弹窗，直接拒绝；
   - 错误写明：往终端里打字会绕过守卫规则，请用 `run` 或会话工具（session_start 等），守卫规则在那里照样生效；需要时请人把它加入“一直允许”。
 - 在“一直允许”里时照常放行。设置页和 `winhand apps allow` 都能添加终端。
+- 只有“一直允许”能放开终端：因为某个程序的图形窗口回答了“允许到 WinHand 重启”，它的控制台窗口仍算终端（例如允许了一个 python 写的图形程序，python 的交互窗口仍被拒绝）。
 
 Scenario: (A7) 终端
 - 结果：
@@ -146,13 +151,14 @@ Scenario: (A7) 终端
   - 范围是这些进程的窗口：
     - exe 为 winhand.exe 或 winhanddesktop.exe；
     - 本进程；
-    - 命令行里有 `winhand` 和 `secret-dialog` 的进程（源码运行时的对话框）。
+    - 源码运行时的对话框：python 类进程（名字以 python 开头，或 py.exe、pyw.exe、uv.exe）且命令行里有 `winhand` 和 `secret-dialog`。
   - R1 里的所有操作一律拒绝，即使授权关闭；
   - 错误写明：这是 WinHand 自己的窗口（授权弹窗、它请人确认的对话框或桌面端），只能由电脑前的人操作；
   - 因为按键按前台窗口判断，弹窗在前台时按键也被拒绝。
 - **授权文件不受文件工具改写**：
   - 守卫中间件内置一条：写入、修改、删除、移动类动作的路径就是授权文件时，拒绝，与用户规则无关；
   - 涉及的工具：`fs_write`、`fs_edit`、`fs_apply_patch`、`fs_op`、`fs_write_bytes`、`fs_upload_url`；
+  - 包括整个文件夹：删除、移动它所在的文件夹，或把一个文件夹复制到它所在的文件夹上（会覆盖其中的文件），同样拒绝；
   - 错误写明：只有电脑前的人能改授权，可以通过弹窗、设置页或 `winhand apps`。
 - **总开关也在授权文件里**（D9），所以文件工具同样改不了它。
 - `winhand apps allow <exe>` 先弹确认框（“确定让 AI 一直可以操作 X 吗？”）；人选“是”才写入。`winhand apps off` 同样先弹确认框。
@@ -181,9 +187,9 @@ Scenario: (A9) 防自己批准
   - `winhand apps on`：开启，直接生效；`winhand apps off`：先弹确认框，选“是”才关闭。
 - **桌面端协议**（desktop-backend）：
   - 新方法：
-    - `apps_get`：返回 `{enabled, always:[{exe,name?,since}], session:[{exe,name?,since}], denied:[{exe,until}], terminals[], running:[{exe,name,title}], file, error?}`；
-    - `apps_set_enabled {enabled}`：写授权文件的 `ask`（设置页由人操作，不再弹确认）；
-    - `apps_allow {exe}`：设置页由人操作，不再弹确认；
+    - `apps_get`：返回 `{enabled, always:[{exe,since}], session:[{exe,since}], denied:[{exe,left_s}], terminals[], running:[{exe,title}], file, error?}`；
+    - `apps_set_enabled {enabled}`：写授权文件的 `ask`（设置页由人操作，不再弹确认）；文件坏了时错误码 `approvals_file`；
+    - `apps_allow {exe}`：设置页由人操作，不再弹确认；结果另带 `added`（规范化后的 exe 名）和 `caution?`；exe 为空时错误码 `invalid_exe`，文件坏了时 `approvals_file`；
     - `apps_revoke {exe}`：同时撤销“一直允许”和“允许到重启”；
   - 新事件 `apps`：授权变化时（回答弹窗、增删）发出，`data` 同 `apps_get`；
   - 快照里加 `apps`；

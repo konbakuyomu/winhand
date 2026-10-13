@@ -339,7 +339,7 @@ def root_window_at(x: int, y: int) -> int:
 # ------------------------------------------------------- who may be operated
 
 _OWN_PROGRAMS = {"winhand.exe", "winhanddesktop.exe"}
-_HOSTS = {"python.exe", "pythonw.exe", "py.exe", "uv.exe"}  # winhand's dialogs when run from source
+_HOSTS = {"py.exe", "pyw.exe", "uv.exe"}  # and python*.exe: winhand's dialogs when run from source
 
 
 def is_own(pid: int, process: str) -> bool:
@@ -349,7 +349,7 @@ def is_own(pid: int, process: str) -> bool:
     name = (process or "").lower()
     if pid == os.getpid() or name in _OWN_PROGRAMS:
         return True
-    if name in _HOSTS:
+    if name in _HOSTS or name.startswith("python"):
         import psutil
 
         try:
@@ -457,7 +457,10 @@ def require_operable(hwnd, what: str) -> None:
     from . import approvals
 
     if approvals.enabled():
-        approvals.check(app_of(root), what)
+        app = app_of(root)
+        if approvals.status(app.exe, app.console) == "ask":
+            require_desktop()  # locked: nobody could see or answer the dialog; say so at once
+        approvals.check(app, what)
 
 
 def check_window_at(x: int, y: int, what: str = "") -> None:

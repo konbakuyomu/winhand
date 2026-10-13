@@ -20,9 +20,10 @@ import re
 import threading
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -46,8 +47,20 @@ TERMINALS = frozenset(
 )  # fmt: skip
 CAUTIONS: dict[str, tuple[frozenset[str], str]] = {
     "shell": (
-        frozenset({"cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe", "sh.exe", "wsl.exe"}),
-        "这是命令行程序：允许后，AI 也能在它的终端窗口里输入并执行命令，不经过守卫规则。",
+        frozenset(
+            {
+                "cmd.exe",
+                "powershell.exe",
+                "pwsh.exe",
+                "bash.exe",
+                "sh.exe",
+                "wsl.exe",
+                "python.exe",
+                "py.exe",
+                "node.exe",
+            }
+        ),  # fmt: skip
+        "这是命令行程序：选“一直允许”后，AI 也能在它的终端窗口里输入并执行命令，不经过守卫规则。",
     ),
     "browser": (
         frozenset(
@@ -117,6 +130,10 @@ CAUTIONS: dict[str, tuple[frozenset[str], str]] = {
 
 class NotOperable(DesktopError):
     """The AI may not operate this program now; nothing was sent."""
+
+
+class FileBroken(ValueError):
+    """The approvals file cannot be read; it is not rewritten until the person fixes it."""
 
 
 @dataclass(frozen=True)
@@ -200,6 +217,8 @@ def _toml_string(value: str) -> str:
 
 def _write(entries: dict[str, str], ask: bool) -> None:
     file = path()
+    if _file["error"]:  # rewriting it would throw away what the person wrote there
+        raise FileBroken(f"fix or remove the approvals file first: {_file['error']}")
     file.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# 程序授权：AI 用桌面工具（点击、输入、控件操作）操作一个程序前，先在电脑上问你。",
@@ -315,18 +334,41 @@ def is_terminal(exe: str, console: bool = False) -> bool:
     return console or normalize(exe) in TERMINALS
 
 
+def _status(key: str, console: bool) -> str:
+    _read()
+    if key in _file["always"]:
+        return "always"
+    if is_terminal(
+        key, console
+    ):  # only "always" opens a terminal, not an answer about the program's other windows
+        return "terminal"
+    if key in _session:
+        return "session"
+    return "denied" if _denied_left(key) else "ask"
+
+
 def status(exe: str, console: bool = False) -> str:
     """always | session | denied | terminal | ask (`console`: the window is a console window)"""
     key = normalize(exe)
     with _lock:
-        _read()
-        if key in _file["always"]:
-            return "always"
-        if key in _session:
-            return "session"
-        if _denied_left(key):
-            return "denied"
-    return "terminal" if is_terminal(key, console) else "ask"
+        return _status(key, console)
+
+
+_call = threading.local()
+
+
+@contextmanager
+def one_call() -> Iterator[None]:
+    """The approvals one tool call waits for (a drag across two programs, Win+key and the window in
+    front) share one WAIT_S, so the call still answers within the client's time limit."""
+    outer = getattr(_call, "deadline", None)
+    if outer is None:
+        _call.deadline = time.monotonic() + WAIT_S
+    try:
+        yield
+    finally:
+        if outer is None:
+            _call.deadline = None
 
 
 def caution(exe: str) -> str | None:
@@ -371,7 +413,10 @@ def _dialog(app: App, action: str, future: Future, ask) -> None:
         if answer == "session":
             allow_session(app.exe)
         elif answer == "always":
-            allow_always(app.exe)
+            try:
+                allow_always(app.exe)
+            except (OSError, ValueError):  # cannot be saved (a broken file): allowed until restart
+                allow_session(app.exe)
         elif answer == "deny":
             deny(app.exe)
     finally:
@@ -385,7 +430,21 @@ def check(app: App, action: str, ask: Callable[[App, str, str | None], str] | No
     the dialog and wait for it up to WAIT_S."""
     key = normalize(app.exe)
     app = App(key, app.name, app.title, app.pid, app.console)
-    state = status(key, app.console)
+    with _lock:  # deciding and opening the dialog at once: an answer cannot slip in between
+        state = _status(key, app.console)
+        left = _denied_left(key)
+        future = None
+        if state == "ask":
+            future = _pending.get(key)
+            if future is None:
+                future = Future()
+                _pending[key] = future
+                threading.Thread(
+                    target=_dialog,
+                    args=(app, action, future, ask or _ask_person),
+                    name="winhand-approval",
+                    daemon=True,
+                ).start()
     if state in ("always", "session"):
         return
     if state == "terminal":
@@ -397,26 +456,15 @@ def check(app: App, action: str, ask: Callable[[App, str, str | None], str] | No
             f"WinHand's settings (程序授权) or with `winhand apps allow {key}`."
         )
     if state == "denied":
-        with _lock:
-            left = _denied_left(key)
         raise NotOperable(
             f"The person refused to let the AI operate {app.label} a short while ago; operations on it "
             f"are refused for another {max(1, round(left / 60))} min without asking again. Nothing was "
             "sent. Ask them in the conversation; they can allow it in WinHand's settings (程序授权)."
         )
-    with _lock:
-        future = _pending.get(key)
-        if future is None:
-            future = Future()
-            _pending[key] = future
-            threading.Thread(
-                target=_dialog,
-                args=(app, action, future, ask or _ask_person),
-                name="winhand-approval",
-                daemon=True,
-            ).start()
+    deadline = getattr(_call, "deadline", None)
+    wait = WAIT_S if deadline is None else max(0.0, deadline - time.monotonic())
     try:
-        answer = future.result(timeout=WAIT_S)
+        answer = future.result(timeout=wait)
     except FutureTimeout:
         raise NotOperable(
             f"Waiting for the person at the machine to allow operating {app.label}: a dialog is open "
