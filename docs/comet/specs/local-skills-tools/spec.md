@@ -87,6 +87,8 @@ Scenario: (A2) 项目优先
 
 ### R4 本机 MCP 工具段和工具清单缓存
 
+> 工具段的长度规则（放不下时怎样缩短）已由 `docs/comet/specs/local-mcp-reliability/spec.md` R1 取代（0.4.9）；本节其余条款不变。
+
 - 缓存文件：`<WINHAND_HOME>/cache/mcp-tools.json`，按服务名记录：
   - `fingerprint`：服务的 kind、command、args、url、cwd、env 的 SHA-256；
   - `listed_at`、`instructions`（服务初始化时给的说明，最多 2,000 字符）；

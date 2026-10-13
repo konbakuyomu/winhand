@@ -2,7 +2,7 @@
 that no longer exists (a version manager such as mise removed it after an upgrade): uv does not
 notice, so `uv run` fails on every start. winhand checks before starting such a server and, unless
 the server's `repair_env` is false, rebuilds the environment with `uv venv --clear` and `uv sync`.
-See docs/comet/changes/local-mcp-reliability/research.md.
+See docs/comet/archive/2026-10-13-local-mcp-reliability/research.md.
 """
 
 from __future__ import annotations
