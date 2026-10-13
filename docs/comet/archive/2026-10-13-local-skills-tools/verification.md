@@ -150,3 +150,7 @@ A1–A8 全部通过，没有遗留的阻断或应修问题。剩下的是真机
 - `mcp_call("usb-camera-mcp", "camera_status", {})` 调用成功，返回配置（ffmpeg / dshow、设备 0、640×480 mjpeg）和空闲状态，没有打开摄像头。
 
 结论：A1、A3、A5、A7 在真机上成立。遗留一项改进：工具多的服务在开场里只有名字。
+
+## 归档
+
+用户接受了 0.4.8 的真机结果（2026-10-13），并要求接着做两项改进：开场里每个工具都带说明；本机 MCP 服务的虚拟环境坏了时 winhand 自己发现并修好。两项由 change `local-mcp-reliability` 负责。现行规格发布到 `docs/comet/specs/local-skills-tools/spec.md`。
