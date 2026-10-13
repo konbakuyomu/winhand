@@ -24,6 +24,26 @@ class DesktopError(RuntimeError):
     pass
 
 
+DESKTOP_MESSAGES = {
+    "locked": "The screen is locked: Windows lets no program see or operate the desktop until the person "
+    "signs in at the machine. Commands, files and sessions keep working; ask them to unlock it.",
+    "secure": "Windows is showing a secure screen (a UAC prompt, the Ctrl+Alt+Del screen or the lock "
+    "screen): no program can see or operate it, only the person at the machine can answer it. Commands, "
+    "files and sessions keep working.",
+    "disconnected": "This Windows session is disconnected (Remote Desktop was closed without signing "
+    "out): it has no screen until someone reconnects or signs in at the machine. Commands, files and "
+    "sessions keep working.",
+}
+
+
+class DesktopUnavailable(DesktopError):
+    """The desktop cannot be seen or operated right now (locked, a secure screen, disconnected)."""
+
+    def __init__(self, state: str):
+        self.state = state
+        super().__init__(DESKTOP_MESSAGES[state])
+
+
 def _require_windows() -> None:
     if not IS_WINDOWS:
         raise DesktopError("desktop tools are only available on Windows")
@@ -123,6 +143,230 @@ if IS_WINDOWS:
         wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT
     ]  # fmt: skip
     dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    wtsapi32 = ctypes.WinDLL("wtsapi32", use_last_error=True)
+    user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    user32.OpenInputDesktop.restype = wintypes.HANDLE
+    user32.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+    ]  # fmt: skip
+    user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+    wtsapi32.WTSQuerySessionInformationW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)
+    ]  # fmt: skip
+    wtsapi32.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+    ]  # fmt: skip
+    advapi32.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+    advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+    advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+    user32.WindowFromPoint.argtypes = [wintypes.POINT]
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    user32.MonitorFromWindow.restype = wintypes.HMONITOR
+
+
+# ----------------------------------------------------------- desktop state
+
+
+def _session() -> tuple[int | None, int | None]:
+    """(connect state, lock flag) of this process's Windows session; None where unknown."""
+    pointer = ctypes.c_void_p()
+    size = wintypes.DWORD()
+    # WTS_CURRENT_SESSION, WTSSessionInfoEx
+    if not wtsapi32.WTSQuerySessionInformationW(
+        None, 0xFFFFFFFF, 25, ctypes.byref(pointer), ctypes.byref(size)
+    ):
+        return None, None
+    try:
+        if not pointer.value or size.value < 20:
+            return None, None
+        # WTSINFOEXW: Level, then (8-byte aligned) SessionId, SessionState, SessionFlags
+        level, _pad, _session_id, state, flags = (ctypes.c_uint32 * 5).from_address(pointer.value)
+        return (state, flags) if level == 1 else (None, None)
+    finally:
+        wtsapi32.WTSFreeMemory(pointer)
+
+
+def _input_desktop() -> str | None:
+    """The desktop that gets keyboard and mouse input ('Default' normally); '' when this process may
+    not open it (the lock screen or a UAC prompt), None when unknown."""
+    handle = user32.OpenInputDesktop(0, False, 0x0001)  # DESKTOP_READOBJECTS
+    if not handle:
+        return "" if ctypes.get_last_error() == 5 else None  # ERROR_ACCESS_DENIED
+    try:
+        buffer = ctypes.create_unicode_buffer(256)
+        needed = wintypes.DWORD()
+        if not user32.GetUserObjectInformationW(
+            handle, 2, buffer, ctypes.sizeof(buffer), ctypes.byref(needed)
+        ):
+            return None  # UOI_NAME
+        return buffer.value
+    finally:
+        user32.CloseDesktop(handle)
+
+
+def desktop_state() -> str:
+    """'ok', 'locked', 'secure' (a UAC prompt or another secure screen) or 'disconnected'. What cannot
+    be read counts as 'ok': a failed check must not stand in the way."""
+    if not IS_WINDOWS:
+        return "ok"
+    try:
+        state, flags = _session()
+        if state == 4:  # WTSDisconnected
+            return "disconnected"
+        if flags == 0:  # WTS_SESSIONSTATE_LOCK
+            return "locked"
+        name = _input_desktop()
+    except (OSError, AttributeError):
+        return "ok"
+    return "ok" if name is None or name.lower() == "default" else "secure"
+
+
+def require_desktop() -> None:
+    state = desktop_state()
+    if state != "ok":
+        raise DesktopUnavailable(state)
+
+
+# ------------------------------------------------------- administrator windows
+
+_levels: dict[int, tuple[float, int | None]] = {}
+
+
+def _read_integrity(pid: int) -> int | None:
+    process = kernel32.GetCurrentProcess() if pid == 0 else kernel32.OpenProcess(0x1000, False, pid)
+    if not process:  # PROCESS_QUERY_LIMITED_INFORMATION refused
+        return None
+    try:
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+            return None
+        try:
+            buffer = ctypes.create_string_buffer(128)
+            needed = wintypes.DWORD()
+            if not advapi32.GetTokenInformation(token, 25, buffer, 128, ctypes.byref(needed)):
+                return None  # TokenIntegrityLevel
+            sid = ctypes.c_void_p.from_buffer(buffer).value  # TOKEN_MANDATORY_LABEL.Label.Sid
+            count = advapi32.GetSidSubAuthorityCount(sid)[0]
+            return advapi32.GetSidSubAuthority(sid, count - 1)[0] if count else None
+        finally:
+            kernel32.CloseHandle(token)
+    finally:
+        if pid != 0:
+            kernel32.CloseHandle(process)
+
+
+def integrity(pid: int) -> int | None:
+    """A process's integrity level (0x2000 normal, 0x3000 administrator, 0x4000 system; 0 = winhand
+    itself); None when Windows does not tell. Remembered for a few seconds."""
+    now = time.monotonic()
+    known = _levels.get(pid)
+    if known and (pid == 0 or now - known[0] < 5):
+        return known[1]
+    try:
+        level = _read_integrity(pid)
+    except (OSError, AttributeError, ValueError):
+        level = None
+    if len(_levels) > 256:
+        _levels.clear()
+    _levels[pid] = (now, level)
+    return level
+
+
+def is_elevated(pid: int) -> bool:
+    """True when a process runs at a higher integrity level than winhand (as administrator): Windows
+    then drops winhand's clicks, keys and UI Automation commands to its windows (UIPI)."""
+    if not IS_WINDOWS or not pid:
+        return False
+    mine, theirs = integrity(0), integrity(pid)
+    return mine is not None and theirs is not None and theirs > mine
+
+
+def admin_error(window: dict) -> DesktopError:
+    title = window.get("title") or "(untitled)"
+    program = window.get("process") or f"process {window.get('pid')}"
+    return DesktopError(
+        f"The window {title[:80]!r} belongs to {program}, which runs as administrator: Windows does not let "
+        "a normal program send it clicks, keys or UI Automation commands (they would be silently dropped). "
+        "Ask the person at the machine to do this step, or to reopen that program without administrator "
+        "rights. screenshot and ocr can still read it."
+    )
+
+
+def _window_facts(hwnd) -> dict:
+    import psutil
+
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    try:
+        process = psutil.Process(pid.value).name()
+    except psutil.Error:
+        process = ""
+    return {"hwnd": int(hwnd or 0), "title": _title(hwnd), "process": process, "pid": pid.value}
+
+
+def root_window_at(x: int, y: int) -> int:
+    """The top-level window at a screen point (0 when none)."""
+    hwnd = user32.WindowFromPoint(wintypes.POINT(x, y))
+    return int(user32.GetAncestor(hwnd, 2) or 0) if hwnd else 0  # GA_ROOT
+
+
+def check_window_at(x: int, y: int) -> None:
+    """Refuse input aimed at a point where an administrator program's window is."""
+    root = root_window_at(x, y)
+    if root:
+        facts = _window_facts(root)
+        if is_elevated(facts["pid"]):
+            raise admin_error(facts)
+
+
+def check_foreground() -> None:
+    """Refuse keys or text while an administrator program's window has the keyboard."""
+    hwnd = user32.GetForegroundWindow()
+    if hwnd:
+        facts = _window_facts(hwnd)
+        if is_elevated(facts["pid"]):
+            raise admin_error(facts)
+
+
+def checks() -> list[dict]:
+    """For sys_info(checks=true): what keeps the desktop tools from working right now."""
+    if not IS_WINDOWS:
+        return []
+    out = []
+    state = desktop_state()
+    if state != "ok":
+        out.append({"check": "desktop", "ok": False, "detail": state, "fix": DESKTOP_MESSAGES[state]})
+    try:
+        admins = [w for w in windows() if w.get("admin")]
+    except (DesktopError, OSError):
+        admins = []
+    if admins:
+        names = "; ".join(f"{w['title'][:40]!r} ({w['process']})" for w in admins[:10])
+        out.append(
+            {
+                "check": "admin_windows",
+                "ok": False,
+                "detail": f"{len(admins)} window(s) of programs running as administrator: {names}",
+                "fix": "winhand can look at them (screenshot, ocr) but not click or type into them; the person "
+                "at the machine operates them, or reopens the program without administrator rights",
+            }
+        )
+    mine = integrity(0)
+    if mine is not None and mine >= 0x3000:
+        out.append({"check": "winhand_elevated", "ok": True, "detail": "winhand runs as administrator"})
+    return out
 
 
 # ---------------------------------------------------------------- monitors
@@ -218,25 +462,53 @@ def windows() -> list[dict]:
         except psutil.Error:
             process = ""
         rect = _rect(hwnd)
-        out.append(
-            {
-                "hwnd": int(hwnd),
-                "title": title,
-                "process": process,
-                "pid": pid.value,
-                "class": _class(hwnd),
-                # an owned window is a dialog, tooltip or popup of another one
-                "owned": bool(user32.GetWindow(hwnd, 4)),  # GW_OWNER
-                **rect,
-                "minimized": bool(user32.IsIconic(hwnd)),
-                "maximized": bool(user32.IsZoomed(hwnd)),
-                "foreground": hwnd == foreground,
-            }
-        )
+        entry = {
+            "hwnd": int(hwnd),
+            "title": title,
+            "process": process,
+            "pid": pid.value,
+            "class": _class(hwnd),
+            # an owned window is a dialog, tooltip or popup of another one
+            "owned": bool(user32.GetWindow(hwnd, 4)),  # GW_OWNER
+            **rect,
+            "minimized": bool(user32.IsIconic(hwnd)),
+            "maximized": bool(user32.IsZoomed(hwnd)),
+            "foreground": hwnd == foreground,
+        }
+        if is_elevated(pid.value):
+            entry["admin"] = True  # runs as administrator: look, but no clicks or keys
+        out.append(entry)
         return True
 
     user32.EnumWindows(WNDENUMPROC(callback), 0)
     return out
+
+
+def menus_of(top: int) -> list[int]:
+    """Open menus and caption-less popups of a window that live in their own top-level windows:
+    Win32 menus (#32768) of its process, and popups it owns (drop-downs), but no tooltips."""
+    if not IS_WINDOWS:
+        return []
+    owner_pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(wintypes.HWND(top), ctypes.byref(owner_pid))
+    found: list[int] = []
+
+    def callback(hwnd, _):
+        if hwnd == top or not user32.IsWindowVisible(hwnd):
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value != owner_pid.value:
+            return True
+        kind = _class(hwnd)
+        caption = user32.GetWindowLongW(hwnd, -16) & 0x00C00000 == 0x00C00000  # WS_CAPTION
+        owned = user32.GetWindow(hwnd, 4) == top  # GW_OWNER
+        if kind == "#32768" or (owned and not caption and kind != "tooltips_class32"):
+            found.append(int(hwnd))
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    return found
 
 
 # Popups that belong to a program but are not where its controls live.
@@ -339,6 +611,7 @@ def window_action(
     w = find_window(selector)
     hwnd = wintypes.HWND(w["hwnd"])
     if action == "focus":
+        require_desktop()
         ok = _force_foreground(hwnd)
         if not ok:
             raise DesktopError(
@@ -564,19 +837,64 @@ def _print_window(hwnd, width: int, height: int):
         user32.ReleaseDC(None, screen_dc)
 
 
-def screenshot(
-    window: str | int | None = None,
-    monitor: int | None = None,
-    region: list[int] | None = None,
-    max_side: int = media.MAX_SIDE,
-) -> tuple[bytes, str, dict]:
-    """Capture the whole desktop, one monitor, a region [left, top, width, height] or a window
-    (even when covered by others). Returns the encoded image and how its pixels map to the screen."""
-    global _last_shot
+def _content_scale(hwnd) -> float:
+    """How much Windows enlarges this window's own drawing on its monitor. Above 1 for programs that
+    do not follow the monitor's DPI themselves: their PrintWindow picture is that much smaller."""
+    try:
+        context = user32.GetWindowDpiAwarenessContext(hwnd)
+        awareness = user32.GetAwarenessFromDpiAwarenessContext(context)
+        if awareness not in (0, 1):  # per-monitor aware, or unknown
+            return 1.0
+        try:
+            program_dpi = user32.GetDpiFromDpiAwarenessContext(context)
+        except AttributeError:  # before Windows 10 1803
+            program_dpi = 0
+        if not program_dpi:
+            program_dpi = 96 if awareness == 0 else user32.GetDpiForSystem()
+        x, y = wintypes.UINT(), wintypes.UINT()
+        monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        if ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(x), ctypes.byref(y)) != 0:
+            return 1.0  # MDT_EFFECTIVE_DPI
+        return x.value / program_dpi if program_dpi else 1.0
+    except (AttributeError, OSError):
+        return 1.0
+
+
+def _fit_drawing(image, scale: float):
+    """A DPI-unaware program draws at its own (smaller) size into the top-left corner of the
+    PrintWindow picture; enlarge that part to the window's size on screen, as Windows shows it."""
+    if scale <= 1.01:
+        return image
+    from PIL import Image
+
+    width, height = image.size
+    drawn = (max(1, round(width / scale)), max(1, round(height / scale)))
+    return image.crop((0, 0, *drawn)).resize((width, height), Image.Resampling.BICUBIC)
+
+
+if IS_WINDOWS:
+    try:
+        user32.GetWindowDpiAwarenessContext.argtypes = [wintypes.HWND]
+        user32.GetWindowDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.GetAwarenessFromDpiAwarenessContext.restype = ctypes.c_int
+        user32.GetDpiFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.GetDpiFromDpiAwarenessContext.restype = wintypes.UINT
+    except AttributeError:
+        pass
+
+
+def capture(
+    window: str | int | None = None, monitor: int | None = None, region: list[int] | None = None
+) -> tuple[object, dict]:
+    """The full-resolution picture of a window (even when covered by others), a monitor, a region
+    [left, top, width, height] or the whole desktop, and where it sits on the screen:
+    {'left', 'top', 'target', 'key', 'note'?}."""
     _require_windows()
     _dpi_aware()
     from PIL import ImageGrab
 
+    state = desktop_state()
     target: dict = {}
     image = None
     if window is not None:
@@ -584,39 +902,164 @@ def screenshot(
         if w["minimized"]:
             raise DesktopError("the window is minimized; restore it first (window action=restore)")
         target = {"window": {k: w[k] for k in ("hwnd", "title", "process")}}
+        key: tuple = ("window", w["hwnd"])
         left, top, width, height = w["left"], w["top"], w["width"], w["height"]
         full = RECT()
-        user32.GetWindowRect(wintypes.HWND(w["hwnd"]), ctypes.byref(full))
-        image = _print_window(wintypes.HWND(w["hwnd"]), full.right - full.left, full.bottom - full.top)
+        hwnd = wintypes.HWND(w["hwnd"])
+        user32.GetWindowRect(hwnd, ctypes.byref(full))
+        image = _print_window(hwnd, full.right - full.left, full.bottom - full.top)
         if image is not None:
+            image = _fit_drawing(image, _content_scale(hwnd))
             # trim the invisible resize border so the picture matches the visible frame
             image = image.crop(
                 (left - full.left, top - full.top, left - full.left + width, top - full.top + height)
             )
             if not image.getbbox():  # all black: GPU-drawn content PrintWindow cannot copy
                 image = None
-    elif region is not None:
-        if len(region) != 4:
-            raise DesktopError("region is [left, top, width, height] in screen pixels")
-        left, top, width, height = region
-    elif monitor is not None:
-        screens = monitors()
-        if not 0 <= monitor < len(screens):
-            raise DesktopError(f"monitor must be 0..{len(screens) - 1}")
-        m = screens[monitor]
-        left, top, width, height = m["left"], m["top"], m["width"], m["height"]
-        target = {"monitor": monitor}
+        if state != "ok":
+            if image is None:
+                raise DesktopUnavailable(state)
+            target["note"] = DESKTOP_MESSAGES[state] + " This picture is the window's own drawing."
     else:
-        left, top, width, height = _virtual_screen()
-        target = {"desktop": True}
+        if state != "ok":
+            raise DesktopUnavailable(state)
+        if region is not None:
+            if len(region) != 4:
+                raise DesktopError("region is [left, top, width, height] in screen pixels")
+            left, top, width, height = region
+            key = ("region", tuple(region))
+        elif monitor is not None:
+            screens = monitors()
+            if not 0 <= monitor < len(screens):
+                raise DesktopError(f"monitor must be 0..{len(screens) - 1}")
+            m = screens[monitor]
+            left, top, width, height = m["left"], m["top"], m["width"], m["height"]
+            target = {"monitor": monitor}
+            key = ("monitor", monitor)
+        else:
+            left, top, width, height = _virtual_screen()
+            target = {"desktop": True}
+            key = ("desktop",)
     if image is None:
         image = ImageGrab.grab(bbox=(left, top, left + width, top + height), all_screens=True)
+    note = target.pop("note", None)
+    place = {"left": left, "top": top, "target": target, "key": key}
+    if note:
+        place["note"] = note
+    return image, place
+
+
+# ------------------------------------------------------------ waiting for the picture
+
+_seen: dict[tuple, tuple[float, object]] = {}  # target -> (time, greyscale picture) of its latest screenshot
+SEEN_FOR_S = 600
+
+
+def _grey(image):
+    return image.convert("L")
+
+
+def pictures_differ(before, after) -> bool:
+    """Whether two greyscale pictures differ beyond noise. Changed pixels (more than 24 grey levels)
+    whose outline is a thin sliver - a blinking text cursor - do not count."""
+    if before.size != after.size:
+        return True
+    from PIL import ImageChops
+
+    box = ImageChops.difference(before, after).point(lambda v: 255 if v > 24 else 0).getbbox()
+    if box is None:
+        return False
+    width, height = box[2] - box[0], box[3] - box[1]
+    return not ((width <= 4 and height <= 64) or (height <= 4 and width <= 64))
+
+
+def _remember(key: tuple, grey) -> None:
+    now = time.monotonic()
+    with _lock:
+        for old in [k for k, (when, _) in _seen.items() if now - when > SEEN_FOR_S]:
+            del _seen[old]
+        if len(_seen) >= 8 and key not in _seen:
+            del _seen[min(_seen, key=lambda k: _seen[k][0])]
+        _seen[key] = (now, grey)
+
+
+def _previous(key: tuple):
+    with _lock:
+        found = _seen.get(key)
+    return found[1] if found and time.monotonic() - found[0] <= SEEN_FOR_S else None
+
+
+WAIT_PICTURE_S = 0.25
+
+
+def wait_picture(window, monitor, region, condition: str, timeout_s: float, stable_ms: float):
+    """Capture until the picture differs from this target's previous screenshot ('change') or has
+    not changed for stable_ms ('stable'). Returns (image, place, facts)."""
+    if condition not in ("change", "stable"):
+        raise DesktopError("wait is change or stable")
+    began = time.monotonic()
+    deadline = began + max(0.0, min(timeout_s, 40))
+    still_for = max(200, min(stable_ms, 10_000)) / 1000
+    image, place = capture(window, monitor, region)
+    grey = _grey(image)
+    baseline = _previous(place["key"]) if condition == "change" else None
+    if baseline is None:
+        baseline = grey
+    last_change = began
+
+    def facts(matched: bool) -> dict:
+        out = {"condition": condition, "matched": matched, "waited_s": round(time.monotonic() - began, 1)}
+        if not matched:
+            out["note"] = (
+                "the picture did not change in time" if condition == "change" else "the picture kept changing"
+            ) + "; this is how it looks now (call again to keep waiting)"
+        return out
+
+    while True:
+        if condition == "change" and pictures_differ(baseline, grey):
+            return image, place, facts(True)
+        if condition == "stable" and time.monotonic() - last_change >= still_for:
+            return image, place, facts(True)
+        if time.monotonic() >= deadline:
+            return image, place, facts(False)
+        time.sleep(WAIT_PICTURE_S)
+        image, place = capture(window, monitor, region)
+        latest = _grey(image)
+        if condition == "stable" and pictures_differ(grey, latest):
+            last_change = time.monotonic()
+        grey = latest
+
+
+def screenshot(
+    window: str | int | None = None,
+    monitor: int | None = None,
+    region: list[int] | None = None,
+    max_side: int = media.MAX_SIDE,
+    wait: str | None = None,
+    timeout_s: float = 20,
+    stable_ms: float = 1000,
+) -> tuple[bytes, str, dict]:
+    """Capture the whole desktop, one monitor, a region [left, top, width, height] or a window
+    (even when covered by others), optionally once it changed or settled (wait). Returns the encoded
+    image and how its pixels map to the screen."""
+    global _last_shot
+    waited = None
+    if wait:
+        image, place, waited = wait_picture(window, monitor, region, wait, timeout_s, stable_ms)
+    else:
+        image, place = capture(window, monitor, region)
+    _remember(place["key"], _grey(image))
+    left, top = place["left"], place["top"]
     data, fmt, facts = media.encode_image(image, max_side)
     saved = _keep_original(image)
     if saved:
         facts["original_file"] = saved
-    facts.update(target)
+    facts.update(place["target"])
     facts.update({"screen_left": left, "screen_top": top})
+    if place.get("note"):
+        facts["note"] = place["note"]
+    if waited:
+        facts["wait"] = waited
     with _lock:
         _last_shot = {"left": left, "top": top, "scale": facts["scale"]}
     facts["coordinates"] = (
@@ -778,6 +1221,36 @@ def type_text(text: str) -> None:
         time.sleep(0.01)
 
 
+def _check_target(action: str, point: tuple[int, int] | None, end: tuple[int, int] | None) -> None:
+    """Refuse input that Windows would silently drop because it goes to an administrator program:
+    the window under the pointer for mouse buttons and wheels, the foreground one for keys."""
+    if action in ("type", "keys"):
+        if point is not None:  # type clicks there first, so the text goes to that window
+            check_window_at(*point)
+        else:
+            check_foreground()
+        return
+    if action not in (
+        "click",
+        "double_click",
+        "right_click",
+        "mouse_down",
+        "mouse_up",
+        "drag",
+        "scroll",
+        "hscroll",
+    ):
+        return
+    if point is None:
+        here = wintypes.POINT()
+        if not user32.GetCursorPos(ctypes.byref(here)):
+            return
+        point = (here.x, here.y)
+    check_window_at(*point)
+    if end is not None:
+        check_window_at(*end)
+
+
 def input_action(
     action: str,
     x: float | None = None,
@@ -792,11 +1265,16 @@ def input_action(
 ) -> dict:
     _require_windows()
     _dpi_aware()
+    require_desktop()  # locked, a UAC prompt, disconnected: Windows would drop the input
     done: dict = {"action": action}
     point = None
     if x is not None and y is not None:
         point = to_screen(x, y, coordinates)
         done["screen"] = list(point)
+    drag_end = None
+    if action == "drag" and point and to_x is not None and to_y is not None:
+        drag_end = to_screen(to_x, to_y, coordinates)
+    _check_target(action, point, drag_end)
     if action in ("click", "double_click", "right_click", "move", "mouse_down", "mouse_up"):
         if action == "right_click":
             button = "right"

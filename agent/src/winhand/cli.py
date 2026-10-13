@@ -175,6 +175,10 @@ def main(argv: list[str] | None = None) -> int:
         info = proc.sys_info()
         info["config"] = str(config.config_path())
         info["local_mcp_servers"] = [s.name for s in config.load().servers]
+        if sys.platform == "win32":
+            from . import uia
+
+            info["ui_automation"] = uia.status()
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return 0
     if cmd == "profiles":

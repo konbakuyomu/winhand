@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from . import (
     __version__,
     coalesce,
+    desktop,
     fs,
     local_mcp,
     media,
@@ -95,15 +96,26 @@ Quick rules
   (never paste base64 in parts).
 - The desktop like a person: screenshot (desktop, monitor, region or a window) -> input
   (click/type/keys/scroll/drag in the screenshot's pixels) or, more reliably, ui (inspect a
-  window's controls, then invoke/set_value/toggle by name; also classic Win32/WinForms/Delphi
-  programs and installers, even in the background). window lists/focuses windows;
-  clipboard reads/writes text, images and copied files.
+  window's controls, then invoke/set_value/toggle/expand/select by name: buttons, fields, lists,
+  trees, menu bars and open menus; also classic Win32/WinForms/Delphi programs and installers,
+  even in the background). window lists/focuses windows; clipboard reads/writes text, images and
+  copied files.
+  Several ways to the same goal, most reliable first: the program's own command line, API or files;
+  ui by name; keyboard shortcuts (input keys); ocr for text where there are no controls (canvases,
+  games, remote desktops, self-drawn programs): ocr(action='read') lists the lines with screen
+  rectangles, ocr(action='click', text='Save') clicks a text, ocr(action='wait', text=...) waits for
+  it (state='gone': until it disappears); last, input clicks at pixels, checked with a screenshot.
+  When one way fails, take the next.
   Need to see what the person sees, or whether a program/dialog/installer is in the right state?
   Take a screenshot yourself instead of asking them for one, and operate it with ui instead of
-  telling them where to click (anything sensitive: ask first). ui(action='wait') and
-  window(action='wait') wait for a control or window instead of sleeping.
+  telling them where to click (anything sensitive: ask first). ui(action='wait'),
+  window(action='wait'), ocr(action='wait') and screenshot(wait='change' | 'stable') wait for a
+  control, a window, a text or the picture instead of sleeping.
   ui reads back after an action: verified=true confirms the observed state; false/null requires
   inspecting the result. A button being invoked does not prove its task finished; do not blindly retry.
+  A locked screen, a UAC prompt or a disconnected session cannot be seen or operated, and Windows
+  drops clicks and keys to programs running as administrator (window list: admin=true): the
+  error says which; screenshots and ocr can still read admin windows. Tell the person what to do.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
   follow it with job_status(id, wait_s=40).
@@ -152,8 +164,11 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
 - Full-screen programs (menuconfig, htop, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
   then session_screen; `highlighted` shows the selected row.
-- The desktop: take a screenshot yourself instead of asking the person for one; operate programs with ui
-  (controls by name) or input (mouse and keys).
+- The desktop: take a screenshot yourself instead of asking the person for one. To operate a program
+  prefer its own CLI/API, then ui (controls and menus by name), then keys; without controls (canvases,
+  self-drawn apps) ocr(action='click', text=...) finds text on screen; input pixel clicks come last.
+  screenshot(wait='change' | 'stable') waits for the screen instead of sleeping. A locked screen or an
+  administrator program's window cannot be operated: the error says so; tell the person.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts winhand, elevated=true for admin tasks); follow it with job_status(id, wait_s=40).
 - Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the
@@ -281,6 +296,7 @@ def build_server(
             info["checks"] = await asyncio.to_thread(proc.doctor)
             entries = [s.entry for s in local_mcp.services().services.values()]
             info["checks"] += await asyncio.to_thread(venv_repair.checks, entries)
+            info["checks"] += await asyncio.to_thread(desktop.checks)
         info["winhand"] = __version__
         info["local_mcp_servers"] = {
             "names": local_servers,

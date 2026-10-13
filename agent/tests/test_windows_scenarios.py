@@ -536,11 +536,219 @@ async def test_real_mouse_click_lands_where_the_screenshot_shows(test_form):
 
 
 def _uia_elements(window):
-    from winhand import desktop
-    from winhand.tools_desktop import _run_uia, merge_controls
+    from winhand.tools_desktop import _inspect_controls
 
-    uia = _run_uia(window["hwnd"], Mode="inspect")["elements"]
-    return merge_controls(uia, desktop.native_controls(window["hwnd"]))
+    return _inspect_controls(window["hwnd"])["elements"]
+
+
+async def test_ui_through_the_powershell_script_still_works(test_form, monkeypatch):
+    from fastmcp import Client
+
+    from winhand import uia
+
+    def unavailable(hwnd, timeout=0):
+        raise uia.Unavailable("simulated")
+
+    monkeypatch.setattr(uia, "snapshot", unavailable)
+    async with Client(build_server(Config())) as client:
+        found = (
+            await client.call_tool("ui", {"window": "winhand-ui-test", "filter": "Press"})
+        ).structured_content
+        assert found["backend"] == "powershell", found
+        assert any(e["name"] == "Press me" and e["type"] == "Button" for e in found["elements"])
+        done = (
+            await client.call_tool(
+                "ui", {"window": "winhand-ui-test", "action": "toggle", "name": "Remember me"}
+            )
+        ).structured_content
+    assert done["verified"] is True, done
+
+
+# A classic Win32 menu (MainMenu makes a real HMENU), a list view, a text box, and a label that
+# changes 1.5 s after "Start" is pressed.
+_CLASSIC_FORM = r"""
+Add-Type -AssemblyName System.Windows.Forms
+$f = New-Object Windows.Forms.Form -Property @{ Text = 'winhand-classic-test'; Width = 620; Height = 380; TopMost = $true }
+$menu = New-Object Windows.Forms.MainMenu
+$file = $menu.MenuItems.Add('文件(&F)')
+$about = $file.MenuItems.Add('关于(&A)')
+$about.Add_Click({ $f.Text = 'winhand-classic-test about' })
+$f.Menu = $menu
+$list = New-Object Windows.Forms.ListView -Property @{ Left = 10; Top = 10; Width = 300; Height = 150; View = 'Details'; FullRowSelect = $true; HideSelection = $false }
+[void]$list.Columns.Add('Item', 140)
+[void]$list.Columns.Add('Value', 140)
+foreach ($row in @(@('CPU', 'Intel'), @('内存', '32 GB'), @('Disk', 'SSD'))) { $item = New-Object Windows.Forms.ListViewItem($row[0]); [void]$item.SubItems.Add($row[1]); [void]$list.Items.Add($item) }
+$box = New-Object Windows.Forms.TextBox -Property @{ Left = 330; Top = 10; Width = 250 }
+$start = New-Object Windows.Forms.Button -Property @{ Text = 'Start'; Left = 330; Top = 50; Width = 120; Height = 40 }
+$label = New-Object Windows.Forms.Label -Property @{ Left = 10; Top = 190; Width = 580; Height = 60; Text = 'Status: waiting'; Font = New-Object Drawing.Font('Segoe UI', 18) }
+$timer = New-Object Windows.Forms.Timer -Property @{ Interval = 1500 }
+$timer.Add_Tick({ $label.Text = 'Status: Done 已完成'; $timer.Stop() })
+$start.Add_Click({ $timer.Start() })
+$f.Controls.AddRange(@($list, $box, $start, $label))
+[void]$f.ShowDialog()
+"""
+
+
+@pytest.fixture
+def classic_form(tmp_path):
+    script = tmp_path / "classic.ps1"
+    script.write_text(_CLASSIC_FORM, encoding="utf-8-sig")
+    proc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)])
+    from winhand import desktop
+
+    try:
+        for _ in range(60):
+            try:
+                window = desktop.find_window("winhand-classic-test")
+                break
+            except desktop.DesktopError:
+                time.sleep(0.25)
+        else:
+            pytest.fail("classic test form did not appear")
+        yield window
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+async def test_native_ui_automation_reaches_classic_menus_and_lists(classic_form):
+    from fastmcp import Client
+
+    from winhand import desktop
+
+    async with Client(build_server(Config())) as client:
+
+        async def ui(**arguments):
+            return (
+                await client.call_tool("ui", {"window": "winhand-classic-test", **arguments})
+            ).structured_content
+
+        found = await ui()
+        assert found["backend"] == "native", found
+        menu = next(e for e in found["elements"] if e["type"] == "MenuItem" and e["name"] == "文件(F)")
+        assert "ExpandCollapse" in menu["patterns"]
+        rows = {e["name"]: e for e in found["elements"] if e["type"] == "ListItem"}
+        assert {"CPU", "内存", "Disk"} <= rows.keys() and "SelectionItem" in rows["内存"]["patterns"]
+
+        await ui(action="expand", name="文件(F)", control_type="MenuItem")
+        opened = await ui(filter="关于")
+        assert any(e["type"] == "MenuItem" and e["name"] == "关于(A)" for e in opened["elements"]), opened
+        await ui(action="invoke", name="关于(A)", control_type="MenuItem")
+        time.sleep(0.5)
+        assert desktop.find_window(classic_form["hwnd"])["title"] == "winhand-classic-test about"
+
+        chosen = await ui(action="select", name="内存", control_type="ListItem")
+        assert chosen["verified"] is True and chosen["element"]["selected"] is True, chosen
+
+
+def test_msinfo32_menus_and_tree_are_visible():
+    from winhand import desktop
+    from winhand.tools_desktop import _inspect_controls
+
+    exe = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "msinfo32.exe"
+    if not exe.is_file():
+        pytest.skip("msinfo32 is not installed")
+    proc = subprocess.Popen([str(exe)])
+    try:
+        for _ in range(80):
+            try:
+                window = desktop.find_window("msinfo32.exe")
+                break
+            except desktop.DesktopError:
+                time.sleep(0.25)
+        else:
+            pytest.fail("msinfo32 did not open")
+        snapshot = _inspect_controls(window["hwnd"])
+        kinds = [e["type"] for e in snapshot["elements"]]
+        assert snapshot["backend"] == "native"
+        assert kinds.count("MenuItem") >= 4, kinds
+        assert any(e["type"] == "TreeItem" and e["name"] for e in snapshot["elements"]), kinds
+    finally:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+
+
+def _ocr_or_skip(fn, *args, **kwargs):
+    from winhand import ocr
+
+    try:
+        return fn(*args, **kwargs)
+    except ocr.OcrError as exc:
+        if "no OCR language" in str(exc) or "has no OCR language" in str(exc):
+            pytest.skip(f"no OCR language on this machine: {exc}")
+        raise
+
+
+async def test_ocr_reads_and_clicks_text(test_form):
+    from fastmcp import Client
+
+    from winhand import desktop, ocr
+
+    found = _ocr_or_skip(ocr.find, "press  ME", window="winhand-ui-test")
+    assert found["matches"], found
+    button = next(e for e in _uia_elements(test_form) if e["name"] == "Press me")
+    left, top, width, height = button["rect"]
+    x, y = found["matches"][0]["center"]
+    assert left <= x <= left + width and top <= y <= top + height, (found, button)
+    async with Client(build_server(Config())) as client:
+        done = (
+            await client.call_tool(
+                "ocr", {"action": "click", "text": "Press me", "window": "winhand-ui-test"}
+            )
+        ).structured_content
+    assert "click at" in done.get("done", ""), done
+    time.sleep(0.5)
+    assert desktop.find_window(test_form["hwnd"])["title"].startswith("winhand-ui-test pressed")
+
+
+async def test_waiting_for_the_picture_and_for_text(classic_form):
+    from fastmcp import Client
+
+    from winhand import ocr
+
+    async with Client(build_server(Config())) as client:
+
+        async def shot(**arguments):
+            result = await client.call_tool("screenshot", {"window": "winhand-classic-test", **arguments})
+            return result.structured_content
+
+        await client.call_tool("ui", {"window": "winhand-classic-test", "action": "invoke", "name": "Start"})
+        await shot()  # the picture right after pressing Start
+        changed = await shot(wait="change", timeout_s=10)
+        assert changed["wait"]["matched"] is True and changed["wait"]["waited_s"] >= 0.3, changed
+        settled = await shot(wait="stable", stable_ms=500, timeout_s=10)
+        assert settled["wait"]["matched"] is True, settled
+        unchanged = await shot(wait="change", timeout_s=1)
+        assert unchanged["wait"]["matched"] is False and "did not change" in unchanged["wait"]["note"]
+        # a focused text box blinks its cursor: that is not a change
+        await client.call_tool(
+            "ui", {"window": "winhand-classic-test", "action": "focus", "control_type": "Edit"}
+        )
+        blinking = await shot(wait="stable", stable_ms=1000, timeout_s=5)
+        assert blinking["wait"]["matched"] is True, blinking
+    done = _ocr_or_skip(ocr.wait, "Done", window="winhand-classic-test", timeout_s=5)
+    assert done["matched"] is True, done
+    gone = _ocr_or_skip(ocr.wait, "Done", window="winhand-classic-test", state="gone", timeout_s=1)
+    assert gone["matched"] is False
+    read = _ocr_or_skip(ocr.read, window="winhand-classic-test")
+    assert any("Done" in line["text"] for line in read["lines"]), read
+
+
+def test_window_screenshots_of_dpi_unaware_programs_fill_the_window(classic_form):
+    from winhand import desktop
+
+    scale = desktop._content_scale(classic_form["hwnd"])
+    if scale <= 1.01:
+        pytest.skip("the monitor is not scaled: nothing to enlarge")
+    image, place = desktop.capture(window=classic_form["hwnd"])
+    width, height = image.size
+    corner = image.crop((width * 3 // 4, height * 3 // 4, width - 8, height - 8)).convert("L")
+    assert corner.getextrema()[1] > 60, "the bottom-right quarter is black: the drawing was not enlarged"
+
+
+def test_doctor_reports_native_ui_automation():
+    from winhand import uia
+
+    assert uia.status() == "native"
 
 
 def test_screenshot_of_the_desktop_and_window_list():
