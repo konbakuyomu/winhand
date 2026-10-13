@@ -226,8 +226,15 @@ def entry(*args, command="uv", cwd=None, env=None, **kw) -> ServerEntry:
     return ServerEntry(name="s", command=command, args=list(args), cwd=cwd, env=env or {}, **kw)
 
 
+def project_at(folder) -> str:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "pyproject.toml").write_text("[project]\nname = 'p'\nversion = '0'\n", encoding="utf-8")
+    return str(folder)
+
+
 def test_the_project_of_a_uv_run_server(tmp_path):
-    d = str(tmp_path)
+    d = project_at(tmp_path)
+    project_at(tmp_path / "sub")
     found = venv_repair.uv_project(entry("--directory", d, "run", "--locked", "usb-camera-mcp"))
     assert (found.project, found.venv, found.lock_args) == (d, os.path.join(d, ".venv"), ["--locked"])
     found = venv_repair.uv_project(
@@ -243,7 +250,15 @@ def test_the_project_of_a_uv_run_server(tmp_path):
             "x",
         )
     )
-    assert found.python_args == ["--python", "3.12", "--managed-python"] and found.lock_args == ["--frozen"]
+    assert found.python_args == ["--python", "3.12"] and found.lock_args == ["--frozen"]
+    assert found.global_args == ["--managed-python"]
+    carried = venv_repair.uv_project(
+        entry("--offline", "--config-file", "uv.toml", "--directory", d, "run", "-p3.11", "--locked", "x")
+    )
+    assert carried.global_args == ["--offline", "--config-file", "uv.toml"]
+    assert carried.python_args == ["--python", "3.11"]
+    stepped = venv_repair.uv_project(entry("run", "--refresh-package", "p", "--locked", "x", cwd=d))
+    assert stepped.lock_args == ["--locked"]  # the value of --refresh-package is not the command
     upper = venv_repair.uv_project(
         entry("run", "x", command=r"C:\Users\me\AppData\Local\mise\shims\UV.EXE", cwd=d)
     )
@@ -255,20 +270,62 @@ def test_the_project_of_a_uv_run_server(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "server",
+    "make",
     [
-        entry("run", "--no-project", "x", cwd="/p"),
-        entry("run", "--isolated", "x", cwd="/p"),
-        entry("run", "--script", "x.py", cwd="/p"),
-        entry("run", "x"),  # neither a project directory nor a cwd
-        entry("tool", "run", "x", cwd="/p"),
-        entry("x", command="uvx", cwd="/p"),
-        entry("-y", "eshop-mcp", command="npx", cwd="/p"),
-        ServerEntry(name="h", url="http://127.0.0.1:1/mcp"),
+        lambda d: entry("run", "--no-project", "x", cwd=d),
+        lambda d: entry("run", "--isolated", "x", cwd=d),
+        lambda d: entry("run", "--script", "x.py", cwd=d),
+        lambda d: entry("run", "-s", "x.py", cwd=d),
+        lambda d: entry("run", "--active", "x", cwd=d),
+        lambda d: entry("run", "--refresh-package", "p", "--no-project", "x", cwd=d),
+        lambda d: entry("run", "x", cwd=d, env={"UV_NO_PROJECT": "1"}),
+        lambda d: entry("run", "x"),  # neither a project directory nor a cwd
+        lambda d: entry("tool", "run", "x", cwd=d),
+        lambda d: entry("x", command="uvx", cwd=d),
+        lambda d: entry("-y", "eshop-mcp", command="npx", cwd=d),
+        lambda d: ServerEntry(name="h", url="http://127.0.0.1:1/mcp"),
     ],
 )
-def test_servers_that_are_not_checked(server):
-    assert venv_repair.uv_project(server) is None
+def test_servers_that_are_not_checked(make, tmp_path):
+    assert venv_repair.uv_project(make(project_at(tmp_path / "p"))) is None
+
+
+def test_a_folder_without_a_project_is_not_checked(tmp_path):
+    (tmp_path / "loose" / ".venv").mkdir(parents=True)  # a .venv but no pyproject.toml up to the root
+    assert venv_repair.uv_project(entry("--directory", str(tmp_path / "loose"), "run", "x")) is None
+
+
+def test_a_subfolder_and_a_workspace_member_use_the_environment_uv_uses(tmp_path):
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        "[project]\nname = 'ws'\nversion = '0'\n"
+        "[tool.uv.workspace]\nmembers = ['packages/*']\nexclude = ['packages/own']\n",
+        encoding="utf-8",
+    )
+    member = project_at(root / "packages" / "server")
+    (root / "packages" / "server" / "src").mkdir()
+    own = project_at(root / "packages" / "own")
+    inside = venv_repair.uv_project(
+        entry("--directory", str(root / "packages" / "server" / "src"), "run", "x")
+    )
+    assert inside.project == member and inside.venv == str(root / ".venv")
+    alone = venv_repair.uv_project(entry("run", "x", cwd=own))
+    assert alone.project == own and alone.venv == os.path.join(own, ".venv")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX environments link to their base Python")
+def test_a_base_with_only_a_versioned_python_is_sound(tmp_path):
+    base = tmp_path / "onlyver" / "bin"
+    base.mkdir(parents=True)
+    os.symlink(os.path.realpath(sys.executable), base / "python3.11")
+    venv = tmp_path / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    os.symlink(base / "python3.11", venv / "bin" / "python")
+    (venv / "pyvenv.cfg").write_text(f"home = {base}\n", encoding="utf-8")
+    assert venv_repair.missing_python(str(venv)) is None
+    (base / "python3.11").unlink()  # now the link leads nowhere and the base has no Python
+    assert venv_repair.missing_python(str(venv)) is not None
 
 
 def test_a_broken_environment_is_told_from_a_sound_one(tmp_path):
@@ -327,9 +384,15 @@ def broken_project(tmp_path):
         subprocess.run([UV, *command], cwd=project, env=env, check=True, capture_output=True)
     cfg = project / ".venv" / "pyvenv.cfg"
     gone = tmp_path / "mise" / "installs" / "python" / "3.12.14"
-    cfg.write_text(
-        re.sub(r"(?m)^home = .*$", f"home = {gone}", cfg.read_text(encoding="utf-8")), encoding="utf-8"
-    )
+    text = re.sub(
+        r"(?m)^home = .*$", lambda m: f"home = {gone}", cfg.read_text(encoding="utf-8")
+    )  # a Windows path
+    cfg.write_text(text, encoding="utf-8")
+    if os.name != "nt":  # there the environment's pythons are links to the base one: make them lead nowhere
+        for link in (project / ".venv" / "bin").glob("python*"):
+            if link.is_symlink():
+                link.unlink()
+                link.symlink_to(gone / "bin" / "python3")
     assert venv_repair.missing_python(str(project / ".venv"))
     return project
 
@@ -420,6 +483,30 @@ async def test_no_python_at_is_explained(winhand_home, monkeypatch):
     probed = await mcp_bridge.probe(dying, timeout=10)
     assert not probed["ok"] and "no longer exists" in probed["error"]
     await services.close()
+
+
+async def test_an_old_line_in_the_test_log_is_not_the_cause(winhand_home):
+    log = winhand_home / "logs" / "mcp" / "plain.test.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("No Python at '\"C:\\old\\python.exe'\n", encoding="utf-8")
+    plain = ServerEntry(name="plain", command=sys.executable, args=["-c", "import sys; sys.exit(1)"])
+    probed = await mcp_bridge.probe(plain, timeout=10)
+    assert not probed["ok"] and "no longer exists" not in probed["error"]
+
+
+def test_with_repair_on_and_a_sound_environment_the_other_one_is_named(tmp_path):
+    d = project_at(tmp_path / "p")
+    why = venv_repair.explain(entry("--directory", d, "run", "x"), ["No Python at '\"C:\\gone\\python.exe'"])
+    assert "Automatic repair is on" in why and "another one" in why and "uv venv --clear" in why
+
+
+def test_many_servers_are_quick(winhand_home, monkeypatch):
+    import time
+
+    servers_like({f"m{i:03}": (50, [(30, 120)] * 40) for i in range(100)}, monkeypatch)
+    started = time.monotonic()
+    text = local_mcp.session_text(session_bridge.BUDGET_CHARS)
+    assert time.monotonic() - started < 5 and session_bridge._size(text) <= session_bridge.BUDGET_CHARS
 
 
 # ------------------------------------------------------------------ A8 configuration

@@ -12,23 +12,51 @@ import re
 import subprocess
 import threading
 import time
+import tomllib
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from . import winenv
 from .config import ServerEntry
 
 REPAIR_TIMEOUT_S = 600.0
 UV_NAMES = ("uv", "uv.exe")
-# uv's global options that take a value (before `run`)
-GLOBAL_VALUED = ("--directory", "--project", "--config-file", "--cache-dir", "--color")
-# options of `uv run` that take a value: knowing them lets the scan below step over their values
+# uv's global options (accepted before or after the subcommand) that take a value
+GLOBAL_VALUED = (
+    "--directory",
+    "--project",
+    "--config-file",
+    "--cache-dir",
+    "--color",
+    "--allow-insecure-host",
+)
+# global options a rebuild repeats: they decide where packages and Pythons come from
+CARRIED = (
+    "--config-file",
+    "--cache-dir",
+    "--allow-insecure-host",
+    "--offline",
+    "--no-config",
+    "--native-tls",
+    "--system-certs",
+    "--managed-python",
+    "--no-managed-python",
+    "--no-python-downloads",
+    "--allow-python-downloads",
+    "--no-cache",
+    "-n",
+)
+# options of `uv run` that take a value: knowing them lets the scan step over their values
 RUN_VALUED = (
+    *GLOBAL_VALUED,
     "--python",
     "-p",
     "--with",
+    "-w",
     "--with-editable",
     "--with-requirements",
     "--extra",
+    "--no-extra",
     "--group",
     "--only-group",
     "--no-group",
@@ -41,17 +69,41 @@ RUN_VALUED = (
     "--extra-index-url",
     "--find-links",
     "-f",
+    "--upgrade-package",
+    "-P",
+    "--upgrade-group",
+    "--reinstall-package",
+    "--refresh-package",
+    "--config-setting",
+    "-C",
+    "--config-settings-package",
+    "--keyring-provider",
+    "--fork-strategy",
     "--prerelease",
     "--resolution",
     "--index-strategy",
     "--link-mode",
     "--exclude-newer",
+    "--exclude-newer-package",
+    "--no-build-package",
+    "--no-binary-package",
+    "--no-build-isolation-package",
+    "--no-sources-package",
+    "--no-editable-package",
     "--python-platform",
-    *GLOBAL_VALUED,
 )
+SHORT_VALUED = ("-p", "-w", "-i", "-f", "-P", "-C")
 # `uv run` does not use the project's environment with these
-NO_PROJECT = ("--no-project", "--isolated", "--script", "--with-requirements")
-PASSED_FLAGS = ("--managed-python", "--no-managed-python")
+NO_PROJECT = (
+    "--no-project",
+    "--isolated",
+    "--script",
+    "-s",
+    "--gui-script",
+    "--with-requirements",
+    "--active",
+)
+NO_PROJECT_ENV = ("UV_NO_PROJECT", "UV_ISOLATED")
 LOCK_FLAGS = ("--locked", "--frozen")
 _NO_PYTHON = re.compile(r"No Python at '(.+?)'\s*$")
 _locks: dict[str, threading.Lock] = {}
@@ -62,17 +114,58 @@ _locks_guard = threading.Lock()
 class UvProject:
     """Where `uv run` keeps a server's environment, and the options a rebuild must repeat."""
 
-    project: str
-    venv: str
-    python_args: list[str] = field(default_factory=list)  # --python X, --managed-python ...
+    project: str  # the project (a workspace member, maybe): where the rebuild runs
+    venv: str  # the environment uv uses for it (a workspace's is at the workspace root)
+    python_args: list[str] = field(default_factory=list)  # --python X
     lock_args: list[str] = field(default_factory=list)  # --locked / --frozen
+    global_args: list[str] = field(default_factory=list)  # CARRIED options, as given
 
 
 def _split(arg: str) -> tuple[str, str | None]:
     if arg.startswith("--") and "=" in arg:
         key, value = arg.split("=", 1)
         return key, value
+    if not arg.startswith("--") and len(arg) > 2 and arg[:2] in SHORT_VALUED:
+        return arg[:2], arg[2:]  # -p3.12
     return arg, None
+
+
+def _setting(entry: ServerEntry, name: str) -> str | None:
+    return (entry.env or {}).get(name) or os.environ.get(name) or None
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _read_toml(path: str) -> dict:
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _workspace_root(project: str) -> str:
+    """The root of the uv workspace `project` belongs to (the project itself when none)."""
+    if (_read_toml(os.path.join(project, "pyproject.toml")).get("tool") or {}).get("uv", {}).get("workspace"):
+        return project
+    here = project
+    while True:
+        parent = os.path.dirname(here)
+        if parent == here:
+            return project
+        here = parent
+        data = _read_toml(os.path.join(here, "pyproject.toml"))
+        workspace = ((data.get("tool") or {}).get("uv") or {}).get("workspace")
+        if not isinstance(workspace, dict):
+            continue
+        rel = PurePosixPath(os.path.relpath(project, here).replace(os.sep, "/"))
+        members = [m for m in workspace.get("members") or [] if isinstance(m, str)]
+        excluded = [m for m in workspace.get("exclude") or [] if isinstance(m, str)]
+        if any(rel.full_match(m) for m in members) and not any(rel.full_match(m) for m in excluded):
+            return here
+        return project  # the nearest workspace does not take it in: a project of its own
 
 
 def uv_project(entry: ServerEntry) -> UvProject | None:
@@ -81,53 +174,77 @@ def uv_project(entry: ServerEntry) -> UvProject | None:
         return None
     if os.path.basename(entry.command.replace("\\", "/")).lower() not in UV_NAMES:
         return None
+    if any(_truthy(_setting(entry, name)) for name in NO_PROJECT_ENV):
+        return None
     args = list(entry.args)
     options: dict[str, str] = {}
-    i = 0
-    while i < len(args) and args[i].startswith("-"):
-        key, value = _split(args[i])
-        if key in GLOBAL_VALUED and value is None:
-            i += 1
-            value = args[i] if i < len(args) else ""
-        if value is not None:
-            options[key] = value
-        i += 1
-    if i >= len(args) or args[i] != "run":
-        return None
     python_args: list[str] = []
     lock_args: list[str] = []
-    i += 1
-    while i < len(args) and args[i].startswith("-") and args[i] != "--":
-        key, value = _split(args[i])
-        if key in NO_PROJECT:
+    global_args: list[str] = []
+    seen_run = False
+    i = 0
+    while i < len(args) and args[i] != "--":
+        arg = args[i]
+        if not arg.startswith("-"):
+            if seen_run:
+                break  # the command uv runs
+            if arg != "run":
+                return None  # another subcommand (tool run, pip ...)
+            seen_run = True
+            i += 1
+            continue
+        key, value = _split(arg)
+        if seen_run and key in NO_PROJECT:
             return None
-        if key in RUN_VALUED and value is None:
+        valued = key in (RUN_VALUED if seen_run else GLOBAL_VALUED)
+        if valued and value is None:
             i += 1
             value = args[i] if i < len(args) else ""
         if key in GLOBAL_VALUED:
             options[key] = value or ""
-        elif key in ("--python", "-p"):
+        if key in ("--python", "-p"):
             python_args += ["--python", value or ""]
-        elif key in PASSED_FLAGS:
-            python_args.append(key)
         elif key in LOCK_FLAGS:
             lock_args.append(key)
+        if key in CARRIED:
+            global_args += [key, value] if valued else [key]
         i += 1
-    base = os.path.expanduser(entry.cwd) if entry.cwd else os.getcwd()
-    chosen = options.get("--directory") or options.get("--project")
-    if chosen:
-        project = os.path.join(base, os.path.expanduser(chosen))
-    elif entry.cwd:
-        project = base
-    else:
+    if not seen_run:
         return None
-    named = (entry.env or {}).get("UV_PROJECT_ENVIRONMENT") or os.environ.get("UV_PROJECT_ENVIRONMENT")
-    venv = os.path.join(project, os.path.expanduser(named)) if named else os.path.join(project, ".venv")
-    return UvProject(os.path.normpath(project), os.path.normpath(venv), python_args, lock_args)
+    base = os.path.expanduser(entry.cwd) if entry.cwd else os.getcwd()
+    directory = options.get("--directory") or _setting(entry, "UV_WORKING_DIR")
+    start = os.path.join(base, os.path.expanduser(directory)) if directory else (base if entry.cwd else None)
+    named_project = options.get("--project") or _setting(entry, "UV_PROJECT")
+    if named_project:
+        start = os.path.join(start or base, os.path.expanduser(named_project))
+    if start is None:
+        return None
+    # the project: the nearest folder up from there with a pyproject.toml, as uv finds it
+    here = os.path.abspath(start)
+    while not os.path.isfile(os.path.join(here, "pyproject.toml")):
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None  # not a project: uv run does not build a project environment here
+        here = parent
+    root = _workspace_root(here)
+    named = _setting(entry, "UV_PROJECT_ENVIRONMENT")
+    venv = os.path.join(root, os.path.expanduser(named)) if named else os.path.join(root, ".venv")
+    return UvProject(os.path.normpath(here), os.path.normpath(venv), python_args, lock_args, global_args)
+
+
+def _has_python(folder: str) -> bool:
+    try:
+        names = [name.lower() for name in os.listdir(folder)]
+    except OSError:
+        return False
+    if winenv.IS_WINDOWS:  # python.exe, or only python3.13t.exe in a free-threaded build
+        return any(name.startswith("python") and name.endswith(".exe") for name in names)
+    return any(name == "python" or name.startswith("python3") for name in names)
 
 
 def missing_python(venv: str) -> str | None:
-    """The base Python a virtual environment points to, when it no longer exists; else None."""
+    """The base Python a virtual environment points to, when it no longer exists; else None.
+    Errs towards "sound": winhand rebuilds only an environment that cannot run."""
     try:
         with open(os.path.join(venv, "pyvenv.cfg"), encoding="utf-8", errors="replace") as fh:
             text = fh.read(64 * 1024)
@@ -141,19 +258,30 @@ def missing_python(venv: str) -> str | None:
             break
     if not home:
         return None
-    names = ("python.exe",) if winenv.IS_WINDOWS else ("python3", "python")
-    if any(os.path.isfile(os.path.join(home, name)) for name in names):
+    if not winenv.IS_WINDOWS:
+        # the environment's python is a link to the base one: if it still leads somewhere, it runs
+        if any(os.path.exists(os.path.join(venv, "bin", name)) for name in ("python", "python3")):
+            return None
+    if _has_python(home):
         return None
-    return os.path.join(home, names[0])
+    return os.path.join(home, "python.exe" if winenv.IS_WINDOWS else "python3")
+
+
+def _commands(project: UvProject) -> list[list[str]]:
+    """The two uv commands of a rebuild, without the uv executable."""
+    return [
+        [*project.global_args, "venv", "--clear", *project.python_args, project.venv],
+        [*project.global_args, "sync", *project.python_args, *project.lock_args],
+    ]
+
+
+def _shown(args: list[str]) -> str:
+    return " ".join(f'"{a}"' if (" " in a or not a) else a for a in args)
 
 
 def manual_fix(project: UvProject) -> str:
-    extra = " ".join(project.python_args)
-    lock = " ".join(project.python_args + project.lock_args)
-    return (
-        f'in "{project.project}" run `uv venv --clear{" " + extra if extra else ""} "{project.venv}"`, '
-        f"then `uv sync{' ' + lock if lock else ''}`"
-    )
+    first, second = (_shown(c) for c in _commands(project))
+    return f'in "{project.project}" run `uv {first}`, then `uv {second}`'
 
 
 def broken_text(entry: ServerEntry, project: UvProject, missing: str) -> str:
@@ -186,6 +314,38 @@ def _tail(output: str, lines: int = 5) -> str:
     return " | ".join(kept)
 
 
+def _run(command: list[str], cwd: str, env: dict, deadline: float) -> tuple[int | None, str]:
+    """Run one uv command until `deadline`: (exit code or None when it ran out of time, its output).
+    An overdue one is ended with its whole process tree, so nothing it started keeps the pipes open."""
+    kwargs: dict = {"creationflags": 0x08000000} if winenv.IS_WINDOWS else {}  # CREATE_NO_WINDOW
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            **kwargs,
+        )
+    except OSError as exc:
+        return 127, f"cannot run {command[0]}: {exc}"
+    try:
+        out, _ = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
+        return proc.returncode, out.decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired as exc:
+        from .proc import _kill_tree
+
+        _kill_tree(proc.pid)
+        partial = exc.output or b""
+        try:
+            out, _ = proc.communicate(timeout=5)
+            partial += out or b""
+        except subprocess.TimeoutExpired:
+            pass
+        return None, partial.decode("utf-8", errors="replace")
+
+
 def prepare(entry: ServerEntry) -> str | None:
     """Before starting `entry`: when its uv project environment points to a missing Python, rebuild
     it (or, with repair_env false, refuse). Returns a note when it repaired something; raises
@@ -204,40 +364,21 @@ def prepare(entry: ServerEntry) -> str | None:
             )
         env = winenv.build_env(entry.env)
         uv = winenv.resolve_executable(entry.command, env)
-        commands = [
-            [uv, "venv", "--clear", *project.python_args, project.venv],
-            [uv, "sync", *project.python_args, *project.lock_args],
-        ]
         _log(entry, f"{what}; rebuilding it")
         deadline = time.monotonic() + REPAIR_TIMEOUT_S
-        kwargs: dict = {"creationflags": 0x08000000} if winenv.IS_WINDOWS else {}  # CREATE_NO_WINDOW
-        for command in commands:
-            shown = " ".join(command[1:])
-            try:
-                done = subprocess.run(
-                    command,
-                    cwd=project.project,
-                    env=env,
-                    capture_output=True,
-                    timeout=max(1.0, deadline - time.monotonic()),
-                    stdin=subprocess.DEVNULL,
-                    **kwargs,
+        for args in _commands(project):
+            shown = _shown(args)
+            code, output = _run([uv, *args], project.project, env, deadline)
+            _log(entry, f"uv {shown} ({'timed out' if code is None else f'exit {code}'}):\n{output.strip()}")
+            if code is None:
+                raise RuntimeError(
+                    f"{what}; rebuilding it did not finish within {REPAIR_TIMEOUT_S:.0f} s (uv {shown}"
+                    + (f": {_tail(output)}" if output.strip() else "")
+                    + f"). To fix it by hand, {manual_fix(project)}"
                 )
-            except subprocess.TimeoutExpired:
-                _log(entry, f"uv {shown}: timed out")
+            if code != 0:
                 raise RuntimeError(
-                    f"{what}; rebuilding it did not finish within {REPAIR_TIMEOUT_S:.0f} s (uv {shown}). "
-                    f"To fix it by hand, {manual_fix(project)}"
-                ) from None
-            except OSError as exc:
-                raise RuntimeError(
-                    f"{what}; cannot run uv to rebuild it ({exc}). To fix it, {manual_fix(project)}"
-                ) from None
-            output = (done.stdout + done.stderr).decode("utf-8", errors="replace")
-            _log(entry, f"uv {shown} (exit {done.returncode}):\n{output.strip()}")
-            if done.returncode != 0:
-                raise RuntimeError(
-                    f"{what}; rebuilding it failed: uv {shown} exited with {done.returncode}: {_tail(output)}. "
+                    f"{what}; rebuilding it failed: uv {shown} exited with {code}: {_tail(output)}. "
                     f"To fix it by hand, {manual_fix(project)}"
                 )
         if missing_python(project.venv) is not None:
@@ -258,12 +399,23 @@ def explain(entry: ServerEntry, output_lines) -> str | None:
                 f"its Python virtual environment points to {missing}, which no longer exists: rebuild that "
                 "environment (or point the server at an existing Python)"
             )
+        if getattr(entry, "repair_env", True) and missing_python(project.venv) is None:
+            # winhand checked that environment before the start and found it sound: uv used another
+            return (
+                f"its Python virtual environment points to {missing}, which no longer exists. Automatic repair "
+                f"is on, but the environment winhand checks ({project.venv}) is sound, so this server runs "
+                "from another one: rebuild that environment (in the folder it belongs to, run "
+                "`uv venv --clear`, then `uv sync`)"
+            )
         how = (
-            "winhand rebuilds it before the next start (repair_env is on)"
+            "winhand rebuilds it before the next start (repair_env is on); to fix it now, "
             if getattr(entry, "repair_env", True)
-            else f"automatic repair is off (repair_env = false); to fix it, {manual_fix(project)}"
+            else "automatic repair is off (repair_env = false); to fix it, "
         )
-        return f"its Python environment {project.venv} points to {missing}, which no longer exists; {how}"
+        return (
+            f"its Python environment {project.venv} points to {missing}, which no longer exists; "
+            f"{how}{manual_fix(project)}"
+        )
     return None
 
 

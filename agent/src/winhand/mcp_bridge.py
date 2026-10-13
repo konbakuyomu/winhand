@@ -85,28 +85,34 @@ def _quietly(function, *args) -> None:
         function(*args)
 
 
-def _send_off_loop(loop: asyncio.AbstractEventLoop, process: StdioProcess, message: dict) -> asyncio.Future:
-    """process.send(message) on a daemon thread; a future that is done once it was written."""
+def _off_loop(loop: asyncio.AbstractEventLoop, name: str, function, *args) -> asyncio.Future:
+    """function(*args) on a daemon thread of its own (not the shared pool, which shutdown waits
+    for); a future with its result."""
     future = loop.create_future()
 
-    def settle(error: BaseException | None) -> None:
+    def settle(result, error: BaseException | None) -> None:
         if not future.done():
             if error is None:
-                future.set_result(None)
+                future.set_result(result)
             else:
                 future.set_exception(error)
 
     def work() -> None:
+        result, error = None, None
         try:
-            process.send(message)
-            error = None
+            result = function(*args)
         except BaseException as exc:  # noqa: BLE001 - handed to the waiting caller
             error = exc
         with contextlib.suppress(RuntimeError):  # the loop is closed: nobody waits any more
-            loop.call_soon_threadsafe(settle, error)
+            loop.call_soon_threadsafe(settle, result, error)
 
-    threading.Thread(target=work, name=f"mcp-{process.name}-send", daemon=True).start()
+    threading.Thread(target=work, name=name, daemon=True).start()
     return future
+
+
+def _send_off_loop(loop: asyncio.AbstractEventLoop, process: StdioProcess, message: dict) -> asyncio.Future:
+    """process.send(message) on a daemon thread; a future that is done once it was written."""
+    return _off_loop(loop, f"mcp-{process.name}-send", process.send, message)
 
 
 class StdioProcess:
@@ -270,6 +276,7 @@ class Service:
         self.init_params: dict | None = None
         self.init_result: dict | None = None
         self.note: str | None = None  # e.g. that winhand repaired its Python environment
+        self.closed = False  # closed for good (removed or replaced by a new configuration)
         self.sessions: dict[str, _Session] = {}
         self.pending: dict[int, _Pending] = {}
         # requests the server has not answered yet (also those whose client gave up), by send time
@@ -335,10 +342,13 @@ class Service:
                 self.init_params = params
             self._set_state("starting")
             try:  # a `uv run` project whose Python was removed: rebuild it first (venv_repair.py)
-                note = await asyncio.to_thread(venv_repair.prepare, self.entry)
+                loop = asyncio.get_running_loop()
+                note = await _off_loop(loop, f"mcp-{self.entry.name}-repair", venv_repair.prepare, self.entry)
             except RuntimeError as exc:
                 self._set_state("error", str(exc)[:600])
                 raise ServiceError(str(exc)[:1500]) from None
+            if self.closed:  # removed or changed in the app while its environment was rebuilt
+                raise ServiceError(f"{self.entry.name} was removed or changed while it was starting")
             if note:
                 self.note = note
                 log.warning("mcp server %s: %s", self.entry.name, note)
@@ -876,6 +886,7 @@ class Service:
         return StreamingResponse(body(), status_code=response.status_code, headers=out_headers)
 
     async def close(self) -> None:
+        self.closed = True
         await self.stop("shut down")
         if self._http is not None:
             await self._http.aclose()
@@ -1004,8 +1015,13 @@ async def probe(entry: ServerEntry, timeout: float | None = None) -> dict:
     result: dict[str, Any] = {"name": entry.name, "ok": False}
     errlog_path = home() / "logs" / "mcp" / f"{entry.name}.test.log"
     errlog_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        before = errlog_path.stat().st_size  # the log is appended to: earlier runs are not this one's cause
+    except OSError:
+        before = 0
     try:  # a `uv run` project whose Python was removed: rebuild it first (venv_repair.py)
-        note = await asyncio.to_thread(venv_repair.prepare, entry)
+        loop = asyncio.get_running_loop()
+        note = await _off_loop(loop, f"mcp-{entry.name}-repair", venv_repair.prepare, entry)
     except RuntimeError as exc:
         result["error"] = str(exc)[:1500]
         result["duration_ms"] = round((time.time() - started) * 1000)
@@ -1065,7 +1081,12 @@ async def probe(entry: ServerEntry, timeout: float | None = None) -> dict:
             result["stderr_tail"] = errlog_path.read_text(encoding="utf-8", errors="replace").splitlines()[
                 -15:
             ]
-    why = venv_repair.explain(entry, result.get("stderr_tail")) if not result["ok"] else None
+    why = None
+    if not result["ok"] and not entry.url:
+        with contextlib.suppress(OSError):
+            with open(errlog_path, "rb") as fh:
+                fh.seek(before)
+                why = venv_repair.explain(entry, fh.read().decode("utf-8", errors="replace").splitlines())
     if why:
         result["error"] = f"{result.get('error') or 'it did not start'}. Cause: {why}"
     return result

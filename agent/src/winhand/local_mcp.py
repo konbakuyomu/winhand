@@ -434,15 +434,26 @@ def session_text(budget: int) -> str:
                 high = mid - 1
         blocks = render(low, n, n)
         if not fits(blocks):
-            # as many servers as fit, the last ones by tool names only; as many of them described as fit
-            blocks = []
+            # as many servers as fit, the last ones by tool names only; as many of them described as fit.
+            # Sizes are summed, not rendered again for each try: many servers stay quick
+            described_size = [_size(block(s, MIN_TOOL_CHARS)) + 2 for s in servers]
+            named_size = [_size(block(s, None)) + 2 for s in servers]
+            space = room - _size(head)
+            best = (0, 0)
             for shown in range(n, -1, -1):
-                found = next(
-                    (b for d in range(shown, -1, -1) if fits(b := render(MIN_TOOL_CHARS, d, shown))), None
-                )
-                if found is not None:
-                    blocks = found
-                    break
+                total = sum(named_size[:shown])
+                if total > space:
+                    continue  # even by names only these do not fit: one server fewer
+                described = 0  # a described block is never smaller than the names-only one
+                while (
+                    described < shown and total + described_size[described] - named_size[described] <= space
+                ):
+                    total += described_size[described] - named_size[described]
+                    described += 1
+                best = (described, shown)
+                break
+            described, shown = best
+            blocks = render(MIN_TOOL_CHARS, described, shown)
     parts = [head, *blocks]
     if len(blocks) < n:
         parts.append(
