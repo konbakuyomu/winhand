@@ -384,7 +384,7 @@ def _link_chain(path, limit: int = 40) -> set[str]:
     (a folder or the file, a symlink or a junction) is followed and the path through its target
     noted, so the place of every link on the way stays protected, nested ones included."""
     places = {os.path.normcase(os.path.realpath(path))}
-    todo = [os.path.abspath(str(path))]
+    todo = [os.path.abspath(variants(str(path))[0])]  # a home given as \\?\C:\... too
     hops = 0
     while todo and hops < limit:
         full = todo.pop()

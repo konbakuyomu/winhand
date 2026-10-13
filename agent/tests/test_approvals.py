@@ -645,6 +645,21 @@ async def test_an_approvals_file_kept_elsewhere_through_a_link_is_protected_both
     assert real.read_text(encoding="utf-8") == "ask = true\n[always]\n" and approvals.enabled()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="\\\\?\\ paths are Windows paths")
+async def test_a_home_spelled_with_a_long_path_prefix_is_protected(monkeypatch):
+    home = approvals.path().parent
+    monkeypatch.setenv("WINHAND_HOME", "\\\\?\\" + str(home))
+    approvals.allow_always("notepad.exe")
+    before = approvals.path().read_text(encoding="utf-8")
+    async with Client(build_server(Config())) as client:
+        for target in (home / approvals.FILE_NAME, home):
+            result = await client.call_tool(
+                "fs_op", {"action": "delete", "path": str(target), "recursive": True}, raise_on_error=False
+            )
+            assert result.is_error and "only the person at the machine" in result.content[0].text, target
+    assert approvals.path().read_text(encoding="utf-8") == before
+
+
 async def test_a_folder_link_inside_a_linked_folder_is_protected(tmp_path, monkeypatch):
     # WINHAND_HOME = T/x/A/B with x/A -> y/A2 and y/A2/B -> z/B2 (a junction inside a junction)
     for folder in ("x", "y/A2", "z/B2"):
