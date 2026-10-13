@@ -56,7 +56,7 @@ AI 用桌面工具**操作**某个程序之前，要先经过电脑前的人点�
 - “允许到重启”只记在这个 WinHand 进程里。本机客户端各自启动的 winhand 进程各算各的。
 
 **终端**
-- cmd、PowerShell、pwsh、Windows Terminal、OpenConsole、conhost、mintty、wsl、bash、PuTTY 等；
+- 所有控制台窗口（cmd、PowerShell、python 等在里面跑），以及 Windows Terminal、OpenConsole、mintty、PuTTY 等终端程序；PowerShell 脚本弹出的图形窗口不算终端；
 - 不弹窗，直接拒绝，并说明：请用 `run` 或会话工具，守卫规则在那里照样生效；
 - 人在设置页、命令行或文件里把它加进“一直允许”，才放开。
 
@@ -74,7 +74,7 @@ AI 用桌面工具**操作**某个程序之前，要先经过电脑前的人点�
   - 开关“AI 操作程序前先问我”；
   - “一直允许”和“允许到重启”两个列表，每项可撤销；
   - 从正在运行的程序里选，或者输入 exe 名，加入“一直允许”；
-- 配置：`config.toml` 的 `[desktop] approval = true`（默认）。设为 false 时回到 0.5.0 的行为，WinHand 自己的窗口仍然不能操作。
+- 总开关：授权文件 `desktop-apps.toml` 里的 `ask = true`（默认），设置页的开关和 `winhand apps on|off` 改的就是它。设为 false 时回到 0.5.0 的行为，WinHand 自己的窗口仍然不能操作。
 
 **AI 看得到的**
 - `window(action='list')` 的每个窗口带上 `approval`，取值为：
@@ -135,10 +135,10 @@ AI 用桌面工具**操作**某个程序之前，要先经过电脑前的人点�
   - `winhand apps allow` 要人在弹窗里确认；
   - `revoke` 直接生效。
 - **A10 管理**：
-  - `[desktop] approval = false` 时不问，行为同 0.5.0；
+  - 授权文件里 `ask = false` 时不问，行为同 0.5.0；
   - 桌面端设置页能开关、看两个列表、撤销、添加；
   - 协议新增的方法写进 PROTOCOL.md；
-  - 桌面端保存其他设置时不丢 `[desktop]`。
+  - `winhand apps off` 要人在确认框里同意。
 - **A11 提醒**：浏览器、密码管理器、聊天软件、系统设置的弹窗里有提醒。
 - **A12 兼容**：
   - instructions 不超过 4,096 字符；
@@ -163,6 +163,8 @@ AI 用桌面工具**操作**某个程序之前，要先经过电脑前的人点�
 - **D6 按 exe 名识别**：人看得懂，跨版本、跨路径都稳定。
 - **D7 等 40 秒后先返回**：客户端单次调用约 60 秒超时，不能一直挂着。
 - **D8 拒绝记 10 分钟**：防止 AI 反复重试、一直弹窗。
+- **D9 总开关放在授权文件里**（Build 中决定）：原计划放在 `config.toml` 的 `[desktop]`，但那样 AI 用文件工具改一行就能关掉授权；放进受保护的授权文件后，关掉只能靠人（设置页、`winhand apps off` 的确认框、手动改文件）。
+- **D10 终端按控制台窗口判断**（Build 中决定）：控制台窗口按 Windows 的规定归属于在里面跑的程序（cmd、python……），而 PowerShell 脚本的图形窗体也属于 powershell.exe。按窗口类判断才能既挡住所有控制台，又不误挡这类图形窗口。
 
 # Open questions
 

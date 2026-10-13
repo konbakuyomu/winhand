@@ -9,6 +9,7 @@ vision model: the conversion back to the screen happens here, not in the model's
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 import threading
 import time
@@ -172,6 +173,8 @@ if IS_WINDOWS:
     user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
     user32.GetAncestor.restype = wintypes.HWND
     user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
     user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
     user32.MonitorFromWindow.restype = wintypes.HMONITOR
     try:
@@ -333,22 +336,149 @@ def root_window_at(x: int, y: int) -> int:
     return int(user32.GetAncestor(hwnd, 2) or 0) if hwnd else 0  # GA_ROOT
 
 
-def check_window_at(x: int, y: int) -> None:
-    """Refuse input aimed at a point where an administrator program's window is."""
+# ------------------------------------------------------- who may be operated
+
+_OWN_PROGRAMS = {"winhand.exe", "winhanddesktop.exe"}
+_HOSTS = {"python.exe", "pythonw.exe", "py.exe", "uv.exe"}  # winhand's dialogs when run from source
+
+
+def is_own(pid: int, process: str) -> bool:
+    """A window of winhand itself: its approval dialog, a confirmation it asked for, its app."""
+    if not pid:
+        return False
+    name = (process or "").lower()
+    if pid == os.getpid() or name in _OWN_PROGRAMS:
+        return True
+    if name in _HOSTS:
+        import psutil
+
+        try:
+            command = " ".join(psutil.Process(pid).cmdline())
+        except psutil.Error:
+            return False
+        return "winhand" in command and "secret-dialog" in command
+    return False
+
+
+_descriptions: dict[str, str] = {}
+
+
+def _file_description(path: str) -> str:
+    """The FileDescription of an executable's version information ('' when it has none)."""
+    if not path or not IS_WINDOWS:
+        return ""
+    if path in _descriptions:
+        return _descriptions[path]
+    text = ""
+    try:
+        version = ctypes.WinDLL("version")
+        size = version.GetFileVersionInfoSizeW(path, None)
+        if size:
+            data = ctypes.create_string_buffer(size)
+            if version.GetFileVersionInfoW(path, 0, size, data):
+                pointer, length = ctypes.c_void_p(), wintypes.UINT()
+                if version.VerQueryValueW(data, "\\VarFileInfo\\Translation", ctypes.byref(pointer), ctypes.byref(length)) and length.value >= 4:  # fmt: skip
+                    language, codepage = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_ushort * 2)).contents
+                    key = f"\\StringFileInfo\\{language:04x}{codepage:04x}\\FileDescription"
+                    if (
+                        version.VerQueryValueW(data, key, ctypes.byref(pointer), ctypes.byref(length))
+                        and length.value
+                    ):
+                        text = ctypes.wstring_at(pointer.value, length.value).rstrip("\0").strip()
+    except (OSError, AttributeError, ValueError):
+        text = ""
+    if len(_descriptions) > 256:
+        _descriptions.clear()
+    _descriptions[path] = text
+    return text
+
+
+def _hosted_app(frame) -> int:
+    """The process of the app inside an ApplicationFrameHost window (UWP), or 0."""
+    frame_pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(frame, ctypes.byref(frame_pid))
+    found: list[int] = []
+
+    def callback(child, _):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(child, ctypes.byref(pid))
+        if pid.value and pid.value != frame_pid.value:
+            found.append(pid.value)
+            return False
+        return True
+
+    user32.EnumChildWindows(frame, WNDENUMPROC(callback), 0)
+    return found[0] if found else 0
+
+
+def app_of(hwnd):
+    """The program a top-level window belongs to, as approvals.App (UWP apps: the hosted app)."""
+    import psutil
+
+    from .approvals import CONSOLE_CLASSES, App
+
+    facts = _window_facts(hwnd)
+    pid, process = facts["pid"], facts["process"]
+    if process.lower() == "applicationframehost.exe":
+        inner = _hosted_app(hwnd)
+        if inner:
+            try:
+                pid, process = inner, psutil.Process(inner).name()
+            except psutil.Error:
+                pass
+    try:
+        path = psutil.Process(pid).exe()
+    except psutil.Error:
+        path = ""
+    console = _class(hwnd) in CONSOLE_CLASSES
+    return App(process.lower(), _file_description(path), facts["title"], pid, console)
+
+
+def _root(hwnd) -> int:
+    handle = (hwnd.value or 0) if isinstance(hwnd, ctypes.c_void_p) else int(hwnd or 0)
+    return int(user32.GetAncestor(handle, 2) or handle)  # GA_ROOT
+
+
+def require_operable(hwnd, what: str) -> None:
+    """Refuse (nothing sent) to operate the window's program: winhand's own windows, programs
+    running as administrator, and - with approval on - terminals and programs the person has not
+    allowed (asking them first, see approvals.py). `what` describes the action for that dialog."""
+    root = _root(hwnd)
+    facts = _window_facts(root)
+    if is_own(facts["pid"], facts["process"]):
+        from .approvals import NotOperable
+
+        raise NotOperable(
+            f"The window {facts['title'][:80]!r} is WinHand's own (its approval dialog, a confirmation it "
+            "asked for, or its app): desktop tools never operate it; only the person at the machine answers it."
+        )
+    if is_elevated(facts["pid"]):
+        raise admin_error(facts)
+    from . import approvals
+
+    if approvals.enabled():
+        approvals.check(app_of(root), what)
+
+
+def check_window_at(x: int, y: int, what: str = "") -> None:
+    """Refuse input aimed at a point whose window may not be operated (see require_operable)."""
     root = root_window_at(x, y)
     if root:
-        facts = _window_facts(root)
-        if is_elevated(facts["pid"]):
-            raise admin_error(facts)
+        require_operable(root, what or f"点击 ({x}, {y})")
 
 
-def check_foreground() -> None:
-    """Refuse keys or text while an administrator program's window has the keyboard."""
+def check_foreground(what: str = "") -> None:
+    """Refuse keys or text while a window that may not be operated has the keyboard."""
     hwnd = user32.GetForegroundWindow()
     if hwnd:
-        facts = _window_facts(hwnd)
-        if is_elevated(facts["pid"]):
-            raise admin_error(facts)
+        require_operable(hwnd, what or "按键")
+
+
+def check_shell(what: str) -> None:
+    """Windows-key combinations go to the shell (explorer.exe, which owns the taskbar)."""
+    taskbar = user32.FindWindowW("Shell_TrayWnd", None)
+    if taskbar:
+        require_operable(taskbar, what)
 
 
 def checks() -> list[dict]:
@@ -488,11 +618,29 @@ def windows() -> list[dict]:
         }
         if is_elevated(pid.value):
             entry["admin"] = True  # runs as administrator: look, but no clicks or keys
+        approval = _approval_of(hwnd, pid.value, process, entry["class"])
+        if approval:
+            entry["approval"] = approval
         out.append(entry)
         return True
 
     user32.EnumWindows(WNDENUMPROC(callback), 0)
     return out
+
+
+def _approval_of(hwnd, pid: int, process: str, kind: str) -> str | None:
+    """What operating this window needs: winhand (never), or with approval on always | session |
+    denied | terminal | ask."""
+    if is_own(pid, process):
+        return "winhand"
+    from . import approvals
+
+    if not approvals.enabled() or not process:
+        return None
+    exe = process.lower()
+    if exe == "applicationframehost.exe":
+        exe = app_of(hwnd).exe
+    return approvals.status(exe, kind in approvals.CONSOLE_CLASSES)
 
 
 def menus_of(top: int) -> list[int]:
@@ -610,6 +758,16 @@ def _force_foreground(hwnd) -> bool:
     return user32.GetForegroundWindow() == hwnd
 
 
+_WINDOW_ACTIONS = {
+    "focus": "切到前台",
+    "minimize": "最小化窗口",
+    "maximize": "最大化窗口",
+    "restore": "还原窗口",
+    "close": "关闭窗口",
+    "move": "移动或缩放窗口",
+}
+
+
 def window_action(
     selector: str | int,
     action: str,
@@ -621,8 +779,11 @@ def window_action(
     _require_windows()
     w = find_window(selector)
     hwnd = wintypes.HWND(w["hwnd"])
+    if action in _WINDOW_ACTIONS:
+        if action == "focus":
+            require_desktop()
+        require_operable(hwnd, _WINDOW_ACTIONS[action])
     if action == "focus":
-        require_desktop()
         ok = _force_foreground(hwnd)
         if not ok:
             raise DesktopError(
@@ -1293,14 +1454,34 @@ def type_text(text: str) -> None:
         time.sleep(0.01)
 
 
-def _check_target(action: str, point: tuple[int, int] | None, end: tuple[int, int] | None) -> None:
-    """Refuse input that Windows would silently drop because it goes to an administrator program:
-    the window under the pointer for mouse buttons and wheels, the foreground one for keys."""
+def _uses_windows_key(keys: str) -> bool:
+    return any(_VK.get(part.strip().lower()) == 0x5B for combo in keys.split() for part in combo.split("+"))
+
+
+_MOUSE_WORDS = {
+    "click": "点击", "double_click": "双击", "right_click": "右键点击", "mouse_down": "按下鼠标",
+    "mouse_up": "松开鼠标", "drag": "拖动", "scroll": "滚动", "hscroll": "横向滚动",
+}  # fmt: skip
+
+
+def _check_target(
+    action: str,
+    point: tuple[int, int] | None,
+    end: tuple[int, int] | None,
+    keys: str | None = None,
+    text: str | None = None,
+) -> None:
+    """Refuse input to a window that may not be operated (require_operable): the one under the
+    pointer for mouse buttons and wheels, the foreground one for keys, the shell for Windows-key
+    combinations."""
+    typed = f"输入文字（{len(text or '')} 个字）"
     if action == "type" and point is not None:  # type clicks there first: the text goes to that window
-        check_window_at(*point)
+        check_window_at(*point, f"点击 {point} 后{typed}")
         return
+    if action == "keys" and keys and _uses_windows_key(keys):
+        check_shell(f"按键 {keys}")
     if action in ("type", "keys"):  # keys go to the foreground window, wherever x, y point
-        check_foreground()
+        check_foreground(f"按键 {keys}" if action == "keys" else typed)
         return
     if action not in (
         "click",
@@ -1318,9 +1499,10 @@ def _check_target(action: str, point: tuple[int, int] | None, end: tuple[int, in
         if not user32.GetCursorPos(ctypes.byref(here)):
             return
         point = (here.x, here.y)
-    check_window_at(*point)
+    word = _MOUSE_WORDS[action]
+    check_window_at(*point, f"{word} {point}")
     if end is not None:
-        check_window_at(*end)
+        check_window_at(*end, f"{word}到 {end}")
 
 
 def input_action(
@@ -1346,7 +1528,7 @@ def input_action(
     drag_end = None
     if action == "drag" and point and to_x is not None and to_y is not None:
         drag_end = to_screen(to_x, to_y, coordinates)
-    _check_target(action, point, drag_end)
+    _check_target(action, point, drag_end, keys, text)
     if action in ("click", "double_click", "right_click", "move", "mouse_down", "mouse_up"):
         if action == "right_click":
             button = "right"

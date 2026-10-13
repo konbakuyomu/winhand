@@ -356,6 +356,7 @@ async def test_ui_reads_back_without_replaying_an_action(monkeypatch, outcome, v
         return "value set"
 
     monkeypatch.setattr(td.desktop, "find_window", lambda _: {"hwnd": 11, "title": "test"})
+    monkeypatch.setattr(td.desktop, "require_operable", lambda hwnd, what: None)
     monkeypatch.setattr(td, "_inspect_controls", inspect)
     monkeypatch.setattr(td.desktop, "native_act", act)
     async with Client(build_server(Config())) as client:

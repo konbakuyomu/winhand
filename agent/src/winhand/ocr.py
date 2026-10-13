@@ -20,7 +20,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import desktop, winenv
+from . import approvals, desktop, winenv
 
 SCRIPT = Path(__file__).parent / "scripts" / "ocr.ps1"
 UPSCALE_UP_TO = 4000  # long side up to which a twice-as-large copy is read too
@@ -308,9 +308,10 @@ def act(
         raise OcrError(f"only {len(found['matches'])} matches; index {index} is out of range")
     x, y = found["matches"][index]["center"]
     if target is not None:
+        desktop.require_operable(target["hwnd"], f"按文字点击「{text}」")  # its approval first
         try:
             desktop.window_action(target["hwnd"], "focus")
-        except desktop.DesktopUnavailable:
+        except (desktop.DesktopUnavailable, approvals.NotOperable):
             raise
         except desktop.DesktopError:
             pass  # it may be in front anyway; checked below

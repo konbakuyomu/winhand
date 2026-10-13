@@ -171,6 +171,38 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 不支持高 DPI 的老程序，在缩放过的显示器上截窗口图时，会放大到窗口在屏幕上的实际大小，坐标与屏幕一致。
 
+### 程序授权：AI 操作程序前先问你
+
+AI 第一次点击、输入或操作某个程序时，电脑上会弹出“WinHand：AI 想操作一个程序”，写明是哪个程序、哪个窗口、要做什么。三个按钮：
+
+- **拒绝**（默认焦点，误按回车不会批准）：这次不执行；之后 10 分钟内对这个程序的操作直接拒绝，不再弹窗，AI 会改为在对话里问你；
+- **允许到 WinHand 重启**：只记在这次运行的 WinHand 里；
+- **一直允许**：写入 `~/.winhand/desktop-apps.toml`，以后不再问。
+
+几点说明：
+
+- **要授权的操作**：`input` 的点击、拖动、滚动、按键、输入文字；`ui` 除 inspect 和 wait 以外的动作；`ocr` 的点击；`window` 的切到前台、最小化、最大化、还原、关闭、移动。截图、读字、`ui` inspect、剪贴板不受限制。
+- **按程序算**：按 exe 文件名，例如 `notepad.exe`。鼠标动作看坐标处的窗口，按键看前台窗口，带 Win 键的组合键算 `explorer.exe`。
+- **等你回答**：工具调用最多等约 40 秒；还没回答时先告诉 AI “正在等人允许”，弹窗继续开 2 分钟，你点了允许后，AI 下一次调用直接执行。2 分钟没人回答，这次就算拒绝，不记住。
+- **提醒**：浏览器、密码管理器、聊天软件、系统工具和命令行程序的弹窗里多一行红字，说明允许后 AI 能做什么。
+- **终端**：所有控制台窗口（命令提示符、PowerShell、python 等），以及 Windows Terminal、PuTTY、mintty 等终端程序，不弹窗，直接拒绝，提示 AI 改用 `run` 或会话工具，那里有守卫规则把关。确实要让 AI 在终端窗口里打字时，把它加入“一直允许”。
+- **WinHand 自己的窗口**：授权弹窗、守卫的确认框和桌面端，任何桌面工具都碰不到，即使关掉了授权。
+- **窗口列表**：`window(action="list")` 的每个窗口带 `approval`：`always`、`session`、`denied`、`terminal`、`ask` 或 `winhand`。
+
+管理授权：
+
+- 桌面端“设置”页的“程序授权”：开关“AI 操作程序前先问我”，查看和撤销两个列表，从开着的程序里挑选或输入 exe 名加入“一直允许”；
+- 命令行：
+  ```
+  winhand apps                    # 列出
+  winhand apps allow notepad.exe  # 弹确认框，你选“是”才加入一直允许
+  winhand apps revoke notepad.exe # 撤销
+  winhand apps off                # 弹确认框后关闭授权；winhand apps on 重新开启
+  ```
+- 授权文件 `~/.winhand/desktop-apps.toml` 也可以手动编辑（`ask = false` 关闭授权，`[always]` 下列出程序）。AI 的文件工具（`fs_write`、`fs_edit`、`fs_op` 等）改不了它，也不能删除或移走它所在的文件夹。
+
+这一层防的是 AI 误操作、越界去动你没交给它的程序，不是安全边界：AI 能执行命令，真想绕过也能绕过，和守卫规则的定位一样。
+
 `sys_info(checks=true)` 会做一次环境体检，逐项列出 PowerShell 7、代码页、RedirectionGuard、长路径、Git Bash、WSL、scoop/mise shim、ssh、ripgrep 和非 ASCII 用户目录的状态，每项附修复建议。
 
 `ui` 的操作只执行一次，之后回读控件状态；`verified=true` 表示可观察状态符合预期，`false` 表示未达到，`null` 表示无法确认。填写内容、切换勾选、选择、展开和聚焦可以按控件支持的状态核验；普通按钮被点击不代表它触发的工作已经完成，还应检查结果窗口。`verify_wait_s` 默认 3 秒，最多 10 秒，用于等待回读状态改变。

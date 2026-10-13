@@ -368,6 +368,33 @@ def rules_for(path: str | None) -> dict:
 
 # ------------------------------------------------------------------------- the middleware
 
+APPROVALS_REFUSAL = (
+    "refused: this file holds which programs the AI may operate on the desktop, and only the person at "
+    "the machine changes it (WinHand's approval dialog, its settings page 程序授权, or `winhand apps`). "
+    "Ask them in the conversation."
+)
+
+
+def touches_approvals(actions: list[Action]) -> bool:
+    """Whether a file tool would write, edit, move or delete the desktop approvals file
+    (approvals.py), or move or delete a folder holding it: built in, whatever the owner's rules say."""
+    from . import approvals
+
+    target = os.path.normcase(os.path.abspath(approvals.path()))
+    for action in actions:
+        if action.kind not in ("write", "edit", "delete", "move"):
+            continue
+        for path in action.paths:
+            try:
+                full = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+            except (TypeError, ValueError):
+                continue
+            inside = action.kind in ("delete", "move") and target.startswith(full.rstrip("\\/") + os.sep)
+            if full == target or inside:
+                return True
+    return False
+
+
 _OWNER = "This limit is the machine owner's rule: do not try to get around it another way; tell the person if it blocks the task."
 
 
@@ -689,6 +716,8 @@ class GuardActions(Middleware):
 
         if not actions:
             return await call_next(context)
+        if touches_approvals(actions):
+            return ToolResult(content=[TextContent(type="text", text=APPROVALS_REFUSAL)], is_error=True)
         verdict = await asyncio.to_thread(judge, actions, cache)
         if verdict.decision != "deny":
             await self._hooks(context, actions, verdict)

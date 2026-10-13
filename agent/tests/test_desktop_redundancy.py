@@ -88,6 +88,9 @@ def _fake_window(monkeypatch, **extra):
     window = {"hwnd": 11, "title": "app", "process": "app.exe", "pid": 9, **extra}
     monkeypatch.setattr(td.desktop, "find_window", lambda _: window)
     monkeypatch.setattr(td.desktop, "native_controls", lambda hwnd: [])
+    monkeypatch.setattr(
+        td.desktop, "require_operable", lambda hwnd, what: None
+    )  # allowed (test_approvals.py)
     return window
 
 
@@ -401,6 +404,7 @@ def test_ocr_click_moves_the_mouse_only_on_an_exact_match(monkeypatch):
     clicks = []
     monkeypatch.setattr(desktop, "find_window", lambda _: window)
     monkeypatch.setattr(desktop, "window_action", lambda *a, **k: {})
+    monkeypatch.setattr(desktop, "require_operable", lambda hwnd, what: None)
     monkeypatch.setattr(desktop, "root_window_at", lambda x, y: 11)
     monkeypatch.setattr(desktop, "input_action", lambda *a, **k: clicks.append(a) or {"foreground": "app"})
     done = ocr.act("click", "保存", window="app")
@@ -414,6 +418,7 @@ def test_ocr_click_refuses_a_covered_spot_and_admin_windows(monkeypatch):
     _fake_ocr(monkeypatch, [[words(("OK", (10, 10, 20, 20)))]])
     monkeypatch.setattr(desktop, "find_window", lambda _: {"hwnd": 11, "title": "app", "process": "a.exe"})
     monkeypatch.setattr(desktop, "window_action", lambda *a, **k: {})
+    monkeypatch.setattr(desktop, "require_operable", lambda hwnd, what: None)
     monkeypatch.setattr(desktop, "root_window_at", lambda x, y: 99)
     monkeypatch.setattr(desktop, "input_action", lambda *a, **k: pytest.fail("must not click"))
     with pytest.raises(ocr.OcrError, match="covers that spot"):
@@ -722,8 +727,8 @@ def test_nothing_is_sent_while_the_desktop_is_unavailable(monkeypatch, state):
 
 def test_input_to_an_administrator_window_is_refused(monkeypatch):
     checked = []
-    monkeypatch.setattr(desktop, "check_window_at", lambda x, y: checked.append(("at", x, y)))
-    monkeypatch.setattr(desktop, "check_foreground", lambda: checked.append("foreground"))
+    monkeypatch.setattr(desktop, "check_window_at", lambda x, y, what="": checked.append(("at", x, y)))
+    monkeypatch.setattr(desktop, "check_foreground", lambda what="": checked.append("foreground"))
     desktop._check_target("click", (5, 6), None)
     desktop._check_target("drag", (5, 6), (7, 8))
     desktop._check_target("keys", None, None)

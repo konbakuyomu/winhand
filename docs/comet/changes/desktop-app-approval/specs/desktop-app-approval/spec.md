@@ -1,6 +1,6 @@
 # desktop-app-approval：桌面操作按程序授权
 
-依据：brief.md。D1–D4 是用户 2026-10-13 的选择；D5–D8 由用户在确认摘要中同意。
+依据：brief.md。D1–D4 是用户 2026-10-13 的选择；D5–D8 由用户在确认摘要中同意；D9、D10 是 Build 中补的实现决定（见 brief）。
 
 ### R1 哪些调用要检查，按什么顺序
 
@@ -91,13 +91,16 @@ Scenario: (A4) 没人回答
 
 - **授权文件** `~/.winhand/desktop-apps.toml`：
   ```toml
-  # 允许 AI 用桌面工具操作的程序。由 WinHand 的授权弹窗、桌面端设置页或 `winhand apps` 写入。
+  # 程序授权：……由 WinHand 的授权弹窗、桌面端设置页（程序授权）或 `winhand apps` 写入；AI 的文件工具改不了它。
+  ask = true
+
   [always]
   "notepad.exe" = "2026-10-13T14:30:00"
   ```
-  - 键是 exe 名（小写），值是加入的时间；
-  - 写入是原子的；文件按修改时间缓存；
-  - 文件坏了时视为没有“一直允许”，弹窗照常，设置页显示错误。
+  - `ask` 是总开关（R7），没写时视为 true；
+  - `[always]` 的键是 exe 名（小写），值是加入的时间；
+  - 写入是原子的；文件按修改时间缓存，改了立即生效；
+  - 文件坏了时视为开启、没有“一直允许”，弹窗照常，设置页和 `winhand apps` 显示错误。
 - **状态**：
   - `always`：一直允许；
   - `session`：允许到重启；
@@ -108,7 +111,8 @@ Scenario: (A4) 没人回答
   - 浏览器：msedge、chrome、firefox、brave、opera、vivaldi、360se、360chrome、qqbrowser、sogouexplorer、iexplore、arc；
   - 密码管理器：1password、keepass、keepassxc、bitwarden、dashlane、enpass、roboform、nordpass、lastpass；
   - 聊天软件：weixin、wechat、wxwork、qq、tim、dingtalk、feishu、lark、telegram、slack、teams、ms-teams、discord、whatsapp、signal；
-  - 系统工具：systemsettings、control、mmc、regedit、taskmgr、explorer。
+  - 系统工具：systemsettings、control、mmc、regedit、taskmgr、explorer；
+  - 命令行程序：cmd、powershell、pwsh、bash、sh、wsl（它们的图形窗口不算终端，见 R5；提醒允许后它的终端窗口也能被操作）。
 
 Scenario: (A2) 一直允许
 - 结果：
@@ -121,7 +125,10 @@ Scenario: (A11) 提醒
 
 ### R5 终端
 
-- 终端程序：cmd、powershell、pwsh、windowsterminal、wt、openconsole、conhost、mintty、wsl、wslhost、bash、putty、kitty、alacritty、wezterm-gui、tabby、conemu、conemu64、hyper、mobaxterm、xshell、windterm、termius。
+- 终端是：
+  - 所有控制台窗口（窗口类 `ConsoleWindowClass` 或 `PseudoConsoleWindow`），不管它显示的是哪个程序（cmd、PowerShell、python……），按程序算就是这个窗口所属的进程；
+  - 终端程序的窗口：windowsterminal、wt、openconsole、conhost、powershell_ise、mintty、wslhost、putty、kitty、alacritty、wezterm-gui、tabby、conemu、conemu64、hyper、mobaxterm、xshell、windterm、termius。
+- cmd、powershell 等命令行程序自己的图形窗口（例如 PowerShell 脚本弹出的窗体）不算终端，照常走授权（D10）。
 - 不在“一直允许”里时：
   - 不弹窗，直接拒绝；
   - 错误写明：往终端里打字会绕过守卫规则，请用 `run` 或会话工具（session_start 等），守卫规则在那里照样生效；需要时请人把它加入“一直允许”。
@@ -129,8 +136,9 @@ Scenario: (A11) 提醒
 
 Scenario: (A7) 终端
 - 结果：
-  - 对 `cmd.exe`、`windowsterminal.exe` 窗口的 click、keys 直接拒绝，不调用弹窗；
-  - 加入“一直允许”后放行。
+  - 对 `cmd.exe` 的控制台窗口、`windowsterminal.exe` 窗口的 click、keys 直接拒绝，不调用弹窗；
+  - 加入“一直允许”后放行；
+  - `powershell.exe` 的图形窗口（不是控制台）照常走授权，弹窗带命令行程序的提醒。
 
 ### R6 WinHand 自己的窗口；防止 AI 自己批准
 
@@ -146,7 +154,8 @@ Scenario: (A7) 终端
   - 守卫中间件内置一条：写入、修改、删除、移动类动作的路径就是授权文件时，拒绝，与用户规则无关；
   - 涉及的工具：`fs_write`、`fs_edit`、`fs_apply_patch`、`fs_op`、`fs_write_bytes`、`fs_upload_url`；
   - 错误写明：只有电脑前的人能改授权，可以通过弹窗、设置页或 `winhand apps`。
-- `winhand apps allow <exe>` 先弹确认框（“确定让 AI 一直可以操作 X 吗？”）；人选“是”才写入。
+- **总开关也在授权文件里**（D9），所以文件工具同样改不了它。
+- `winhand apps allow <exe>` 先弹确认框（“确定让 AI 一直可以操作 X 吗？”）；人选“是”才写入。`winhand apps off` 同样先弹确认框。
 - 已知限制：AI 能用 `run` 跑脚本绕过（直接改文件、模拟按键）。这一层防的是误操作，不是安全边界（brief 的 Non-goals）。
 
 Scenario: (A8) 自己的窗口
@@ -156,23 +165,24 @@ Scenario: (A8) 自己的窗口
 
 Scenario: (A9) 防自己批准
 - 结果：
-  - `fs_write` 授权文件，返回拒绝，文件不变；
+  - `fs_write` 授权文件（包括把 `ask` 改成 false），返回拒绝，文件不变；
   - `winhand apps allow notepad.exe` 在确认框选“否”时不写入，选“是”时写入；
   - `winhand apps revoke notepad.exe` 直接移除。
 
 ### R7 管理：配置、命令行、桌面端
 
-- **配置**：`config.toml` 的 `[desktop] approval = true | false`。
-  - 没写时视为 true；按修改时间重新读取，改了立即生效；
-  - `config.save` 原样保留 `[desktop]`。
+- **总开关**：授权文件里的 `ask = true | false`（R4，D9）。
+  - 没写时视为 true；改了立即生效；
+  - 关闭时 WinHand 自己的窗口和管理员窗口仍然不能操作。
 - **命令行**：
   - `winhand apps`：列出开关状态、一直允许的程序、终端名单，以及授权文件路径；
   - `winhand apps allow <exe>`：见 R6；
-  - `winhand apps revoke <exe>`：从“一直允许”中移除。
+  - `winhand apps revoke <exe>`：从“一直允许”中移除；
+  - `winhand apps on`：开启，直接生效；`winhand apps off`：先弹确认框，选“是”才关闭。
 - **桌面端协议**（desktop-backend）：
   - 新方法：
     - `apps_get`：返回 `{enabled, always:[{exe,name?,since}], session:[{exe,name?,since}], denied:[{exe,until}], terminals[], running:[{exe,name,title}], file, error?}`；
-    - `apps_set_enabled {enabled}`；
+    - `apps_set_enabled {enabled}`：写授权文件的 `ask`（设置页由人操作，不再弹确认）；
     - `apps_allow {exe}`：设置页由人操作，不再弹确认；
     - `apps_revoke {exe}`：同时撤销“一直允许”和“允许到重启”；
   - 新事件 `apps`：授权变化时（回答弹窗、增删）发出，`data` 同 `apps_get`；
@@ -186,9 +196,9 @@ Scenario: (A9) 防自己批准
 
 Scenario: (A10) 管理
 - 结果：
-  - `[desktop] approval = false` 时不弹窗（行为同 0.5.0），WinHand 自己的窗口仍被拒绝；
-  - 协议的四个方法：allow 后 always 有它，revoke 后两处都没有，set_enabled 写进配置；
-  - 桌面端保存中转设置后，`[desktop]` 还在；
+  - `ask = false` 时不弹窗（行为同 0.5.0），WinHand 自己的窗口仍被拒绝；
+  - 协议的四个方法：allow 后 always 有它，revoke 后两处都没有，set_enabled 写进授权文件；
+  - `winhand apps off` 在确认框选“否”时不关闭；
   - 桌面端（WinUI）能编译。
 
 ### R8 AI 看得到的

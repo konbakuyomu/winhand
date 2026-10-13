@@ -22,7 +22,7 @@ from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import coalesce, desktop, jobs, media, proc, transfer, uia, winenv
+from . import approvals, coalesce, desktop, jobs, media, proc, transfer, uia, winenv
 from . import ocr as screen_text
 from .secret_prompt import PromptUnavailable, ask_pick
 
@@ -581,6 +581,11 @@ def register(mcp: FastMCP) -> None:
             if w.get("admin"):
                 raise desktop.admin_error(w)
             hwnd = w["hwnd"]
+            if action != "inspect":  # operating a program: its approval first (approvals.py)
+                which = name or automation_id or control_type or ""
+                desktop.require_operable(
+                    hwnd, f"控件操作：{action}「{which}」" if which else f"控件操作：{action}"
+                )
             snapshot = _inspect_controls(hwnd)
             elements = snapshot["elements"]
             if action == "inspect":
@@ -660,6 +665,8 @@ def register(mcp: FastMCP) -> None:
                 cx, cy = left + width // 2, top + height // 2
                 try:
                     desktop.window_action(hwnd, "focus")
+                except approvals.NotOperable:
+                    raise
                 except desktop.DesktopError:
                     pass  # the control may be visible anyway (topmost, or already in front)
                 desktop.input_action("click", cx, cy, coordinates="screen")

@@ -22,7 +22,7 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
-from . import __version__, config, transfer
+from . import __version__, approvals, config, desktop, transfer
 from .activity import ActivityHub, ToolActivity
 from .mcp_bridge import Services, probe
 from .relay_client import AlreadyRunning, Replaced, run_tunnel, single_instance
@@ -77,6 +77,7 @@ class Backend:
         self.mcp.middleware.insert(0, ToolActivity(self.hub))
         self.services = Services(self.cfg.servers, self.hub)
         self.services.listeners.append(lambda _snapshot: self.emit("mcp", self.mcp_state()))
+        approvals.subscribe(self._apps_changed)  # an answered approval dialog shows up at once
         transfer.listeners.append(self._on_transfer)
         self.status: dict[str, Any] = {}
         self.tunnel: asyncio.Task | None = None
@@ -251,6 +252,7 @@ class Backend:
             "counts": dict(self.hub.counts),
             "activity": self.hub.snapshot(),
             "sessions": self.session_list(),
+            "apps": self.apps_state(),
         }
 
     async def m_initialize(self, params: dict) -> dict:
@@ -452,6 +454,61 @@ class Backend:
             await service.stop()
         return self.mcp_state()
 
+    # ------------------------------------------------------ program approval
+
+    def _apps_changed(self) -> None:
+        # called on whichever thread changed them (an approval dialog's, a tool call's): listing
+        # the open programs takes a moment, so not there
+        threading.Thread(
+            target=lambda: self.emit("apps", self.apps_state()), name="desktop-apps", daemon=True
+        ).start()
+
+    def apps_state(self) -> dict:
+        """Which programs the AI may operate on the desktop, and the open programs one could add."""
+        state = approvals.snapshot()
+        running: list[dict] = []
+        if desktop.IS_WINDOWS:
+            seen: set[str] = set()
+            try:
+                for w in desktop.windows():
+                    exe = (w.get("process") or "").lower()
+                    if exe and exe not in seen and w.get("approval") != "winhand":
+                        seen.add(exe)
+                        running.append({"exe": exe, "title": w.get("title") or ""})
+            except Exception:  # noqa: BLE001 - the list of open programs is only a convenience
+                log.exception("listing open programs failed")
+        state["running"] = sorted(running, key=lambda r: r["exe"])
+        return state
+
+    async def m_apps_get(self, params: dict) -> dict:
+        return await asyncio.to_thread(self.apps_state)
+
+    async def m_apps_set_enabled(self, params: dict) -> dict:
+        on = bool(params.get("enabled", True))
+        approvals.set_enabled(on)
+        self.hub.record("settings", "程序授权：" + ("已开启" if on else "已关闭"), status="ok", summary="")
+        return await asyncio.to_thread(self.apps_state)
+
+    async def m_apps_allow(self, params: dict) -> dict:
+        try:
+            exe = approvals.allow_always(str(params.get("exe") or ""))
+        except ValueError as exc:
+            raise RpcError("invalid_exe", str(exc)) from None
+        self.hub.record("settings", f"在应用中允许 AI 一直操作 {exe}", status="ok", summary="")
+        state = await asyncio.to_thread(self.apps_state)
+        caution = approvals.caution(exe)
+        if caution is None and approvals.is_terminal(exe):
+            caution = "这是终端：AI 能在它的窗口里输入并执行命令，不经过守卫规则。"
+        return {**state, "added": exe, **({"caution": caution} if caution else {})}
+
+    async def m_apps_revoke(self, params: dict) -> dict:
+        try:
+            exe = approvals.revoke(str(params.get("exe") or ""))
+        except ValueError as exc:
+            raise RpcError("invalid_exe", str(exc)) from None
+        self.hub.record("settings", f"在应用中撤销了 {exe} 的授权", status="ok", summary="")
+        return await asyncio.to_thread(self.apps_state)
+
     async def m_shutdown(self, params: dict) -> dict:
         self.done.set()
         return {"ok": True}
@@ -475,6 +532,7 @@ class Backend:
             self.write_line({"id": rid, "error": {"code": "internal", "message": str(exc)}})
 
     async def close(self) -> None:
+        approvals.unsubscribe(self._apps_changed)
         self.done.set()
         await self.stop_tunnel(quiet=True)
         await self.services.close()
