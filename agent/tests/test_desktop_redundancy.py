@@ -548,6 +548,31 @@ def test_one_half_painted_picture_is_not_a_change(monkeypatch):
     assert facts["matched"] is True and facts["waited_s"] < 1.5
 
 
+def test_the_tall_cursor_of_a_large_font_is_a_cursor(monkeypatch):
+    _clock(monkeypatch)
+    assert desktop.small_change((300, 40, 303, 100)) and not desktop.small_change((300, 40, 340, 100))
+    tall = []
+    for i in range(60):  # a 3 x 60 pixel cursor: three captures on, three off
+        frame = _form()
+        if (i // 3) % 2 == 0:
+            ImageDraw.Draw(frame).rectangle((300, 80, 302, 140), fill=0)
+        tall.append(frame)
+    _frames(monkeypatch, tall)
+    _, _, facts = desktop.wait_picture(1, None, None, "stable", 6, 1000)
+    assert facts["matched"] is True
+    _frames(monkeypatch, tall)
+    _, _, facts = desktop.wait_picture(1, None, None, "change", 4, 1000)
+    assert facts["matched"] is False
+
+
+def test_a_large_two_picture_animation_is_not_still(monkeypatch):
+    _clock(monkeypatch)
+    for every in (1, 2):  # alternating on every capture, or every second one
+        _frames(monkeypatch, [_form(spinner=(i // every) % 2) for i in range(80)])
+        _, _, facts = desktop.wait_picture(1, None, None, "stable", 8, 1000)
+        assert facts["matched"] is False, every
+
+
 def test_large_animations_are_not_still_but_a_one_off_picture_is_overlooked(monkeypatch):
     _clock(monkeypatch)
     _frames(monkeypatch, [_form(glitch=i == 2) for i in range(60)])

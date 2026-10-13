@@ -986,9 +986,11 @@ def changed_box(before, after) -> tuple[int, int, int, int] | None:
 
 def small_change(box, zoom: float = 1.0) -> bool:
     """A change that fits a text cursor or a blinking icon (up to 32 x 48 pixels at 100 % scaling,
-    `zoom` times that on a scaled screen): such a change only counts once it has lasted, or never
-    comes back to an earlier picture."""
-    return box[2] - box[0] <= 32 * zoom and box[3] - box[1] <= 48 * zoom
+    `zoom` times that on a scaled screen; any height when at most 8 pixels wide, as the cursor of a
+    large font): such a change only counts once it has lasted, or never comes back to an earlier
+    picture."""
+    width, height = box[2] - box[0], box[3] - box[1]
+    return width <= 8 * zoom or (width <= 32 * zoom and height <= 48 * zoom)
 
 
 def _zoom() -> float:
@@ -1047,6 +1049,8 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     states = [grey]  # 'stable': small pictures seen lately (a cursor on and off): coming back is no change
     suspect = None  # 'stable': (reference, last_change, states) before a large change that may be one-off
     forgiven = -FORGIVE_S
+    large_at = -FORGIVE_S  # 'stable': when the latest large change was seen
+    large_prior = -FORGIVE_S  # 'stable': the large change before that one
     zoom = _zoom()
 
     def facts(matched: bool) -> dict:
@@ -1074,7 +1078,8 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
         if condition == "stable" and suspect is not None:
             before, earlier, kept = suspect
             suspect = None
-            if changed_box(before, grey) is None and now - forgiven >= FORGIVE_S:
+            lone = large_at - large_prior >= FORGIVE_S  # no other large change just before it
+            if changed_box(before, grey) is None and lone and now - forgiven >= FORGIVE_S:
                 # the large change lasted one capture: a half-painted picture, not a change
                 reference, last_change, states, forgiven = grey, earlier, kept, now
                 box = None
@@ -1086,6 +1091,7 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
             else:
                 suspect = (reference, last_change, states)
                 states, last_change = [grey], now
+                large_prior, large_at = large_at, now
             reference = grey
         if condition == "stable" and time.monotonic() - last_change >= still_for:
             return image, place, facts(True)
