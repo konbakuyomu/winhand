@@ -43,8 +43,10 @@ class NoAnswer(desktop.DesktopError):
 class _Worker:
     def __init__(self) -> None:
         self.jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self.abandoned = False  # set when a call gave up on it: it ends once its queue is empty
         # a daemon thread: one stuck in an unresponsive program must not hold up winhand's exit
-        threading.Thread(target=self._loop, name="winhand-uia", daemon=True).start()
+        self.thread = threading.Thread(target=self._loop, name="winhand-uia", daemon=True)
+        self.thread.start()
 
     def _loop(self) -> None:
         try:
@@ -53,6 +55,8 @@ class _Worker:
         except Exception as exc:  # noqa: BLE001 - reported with every call instead
             broken = Unavailable(f"COM could not start: {type(exc).__name__}: {exc}")
         while True:
+            if self.abandoned and self.jobs.empty():
+                return  # given up on while it waited (a hung program, a dialog): end the thread
             fn, args, future = self.jobs.get()
             if not future.set_running_or_notify_cancel():
                 continue
@@ -63,10 +67,6 @@ class _Worker:
                 future.set_result(fn(*args))
             except BaseException as exc:  # noqa: BLE001 - handed to the caller
                 future.set_exception(exc)
-            with _lock:
-                replaced = _worker is not self
-            if replaced and self.jobs.empty():
-                return  # given up on while it waited (a hung program, a dialog): end the thread
 
     def submit(self, fn, *args) -> Future:
         future: Future = Future()
@@ -103,6 +103,7 @@ def call(fn, *args, timeout: float = TIMEOUT_S):
         raise
     except FutureTimeout:
         future.cancel()  # if it has not started, it never will
+        worker.abandoned = True
         with _lock:
             if _worker is worker:
                 _worker = None  # that thread still waits on the program; the next call gets a new one

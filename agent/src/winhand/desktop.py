@@ -1019,6 +1019,7 @@ WAIT_PICTURE_S = 0.25
 
 
 LASTING_S = 2.0  # a small change counts once it lasted this long: longer than the slowest cursor blink
+FORGIVE_S = 2.0  # at most one one-off large picture is overlooked in this time ('stable')
 
 
 def wait_picture(window, monitor, region, condition: str, timeout_s: float, stable_ms: float):
@@ -1026,10 +1027,10 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     not changed for stable_ms ('stable'). Returns (image, place, facts).
 
     Changes are measured against a reference picture, not the capture before, so slow changes (a
-    progress bar, a fade) add up. For 'change' a change must still be there on the next capture (a
-    window drawing itself now and then delivers one half-painted picture), a small one for a few
-    seconds (longer than a cursor blink). For 'stable' a picture that returns to one seen just
-    before is no change: a blinking cursor or such a one-off picture."""
+    progress bar, a fade) add up. A window drawing itself now and then delivers one half-painted
+    picture, and cursors blink: for 'change' a large change must show on two captures in a row and a
+    small one must last a few seconds; for 'stable' a small picture coming back to one seen lately is
+    no change, nor is (once in a while) a large one that lasted a single capture."""
     if condition not in ("change", "stable"):
         raise DesktopError("wait is change or stable")
     began = time.monotonic()
@@ -1041,8 +1042,11 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     if reference is None:
         reference = grey
     last_change = began
-    changed_since = None  # when the change seen now (for 'change') first appeared
-    states = [grey]  # the distinct pictures seen lately ('stable'): coming back to one is no change
+    changed_since = None  # 'change': when the difference seen now first appeared
+    large_before = False  # 'change': the capture before differed largely too
+    states = [grey]  # 'stable': small pictures seen lately (a cursor on and off): coming back is no change
+    suspect = None  # 'stable': (reference, last_change, states) before a large change that may be one-off
+    forgiven = -FORGIVE_S
     zoom = _zoom()
 
     def facts(matched: bool) -> dict:
@@ -1054,21 +1058,34 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
         return out
 
     while True:
+        now = time.monotonic()
         box = changed_box(reference, grey)
-        if condition == "change" and box is not None:
-            seen_before = changed_since
-            changed_since = changed_since or time.monotonic()
-            if not small_change(box, zoom) and seen_before is not None:
-                return image, place, facts(True)  # still there on the next capture
-            if time.monotonic() - changed_since >= LASTING_S:
-                return image, place, facts(True)
-        elif condition == "change":
-            changed_since = None
+        if condition == "change":
+            if box is None:
+                changed_since, large_before = None, False
+            else:
+                large = not small_change(box, zoom)
+                if large and large_before:
+                    return image, place, facts(True)  # a large change, still there on the next capture
+                large_before = large
+                changed_since = changed_since or now
+                if now - changed_since >= LASTING_S:
+                    return image, place, facts(True)
+        if condition == "stable" and suspect is not None:
+            before, earlier, kept = suspect
+            suspect = None
+            if changed_box(before, grey) is None and now - forgiven >= FORGIVE_S:
+                # the large change lasted one capture: a half-painted picture, not a change
+                reference, last_change, states, forgiven = grey, earlier, kept, now
+                box = None
         if condition == "stable" and box is not None:
-            back = any(changed_box(state, grey) is None for state in states)
-            if not back:  # a new picture, not a cursor blinking back or a one-off picture going away
-                states = [*states[-3:], grey]
-                last_change = time.monotonic()
+            if small_change(box, zoom):
+                if not any(changed_box(state, grey) is None for state in states):
+                    states = [*states[-3:], grey]  # a new small picture, not a cursor blinking back
+                    last_change = now
+            else:
+                suspect = (reference, last_change, states)
+                states, last_change = [grey], now
             reference = grey
         if condition == "stable" and time.monotonic() - last_change >= still_for:
             return image, place, facts(True)

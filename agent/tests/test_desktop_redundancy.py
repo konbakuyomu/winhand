@@ -513,6 +513,67 @@ def test_tall_cursors_slow_blinks_and_faint_noise(monkeypatch):
     assert facts["matched"] is False
 
 
+def _clock(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(desktop.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(desktop.time, "sleep", lambda s: clock.update(now=clock["now"] + 0.3))
+
+
+def _form(cursor: bool = False, glitch: bool = False, spinner: int | None = None) -> Image.Image:
+    image = Image.new("L", (400, 200), 220)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20, 20, 380, 60), fill=255)  # a list view
+    if cursor:
+        draw.rectangle((300, 120, 301, 140), fill=0)
+    if glitch:  # one half-painted picture of the list view
+        draw.rectangle((20, 40, 300, 60), fill=0)
+    if spinner is not None:  # a large loading animation
+        draw.pieslice((150, 80, 214, 144), spinner * 90, spinner * 90 + 90, fill=0)
+    return image
+
+
+def test_one_half_painted_picture_is_not_a_change(monkeypatch):
+    _clock(monkeypatch)
+    # the cursor blinks, and once the list view comes out half painted
+    frames = [_form(cursor=i % 4 < 2, glitch=i == 7) for i in range(60)]
+    _frames(monkeypatch, frames)
+    _, _, facts = desktop.wait_picture(1, None, None, "change", 6, 1000)
+    assert facts["matched"] is False
+    _frames(monkeypatch, [_form(glitch=i == 3) for i in range(60)])
+    _, _, facts = desktop.wait_picture(1, None, None, "change", 6, 1000)
+    assert facts["matched"] is False
+    # a large change that stays is found on the next capture
+    _frames(monkeypatch, [_form()] * 3 + [_form(spinner=0)] * 30)
+    _, _, facts = desktop.wait_picture(1, None, None, "change", 6, 1000)
+    assert facts["matched"] is True and facts["waited_s"] < 1.5
+
+
+def test_large_animations_are_not_still_but_a_one_off_picture_is_overlooked(monkeypatch):
+    _clock(monkeypatch)
+    _frames(monkeypatch, [_form(glitch=i == 2) for i in range(60)])
+    _, _, facts = desktop.wait_picture(1, None, None, "stable", 6, 1000)
+    assert facts["matched"] is True and facts["waited_s"] <= 1.3  # not pushed back by the glitch
+    for states in (2, 4):  # a loading animation is still going
+        _frames(monkeypatch, [_form(spinner=i % states) for i in range(60)])
+        _, _, facts = desktop.wait_picture(1, None, None, "stable", 6, 1000)
+        assert facts["matched"] is False, states
+
+
+def test_an_abandoned_worker_thread_ends_even_with_cancelled_calls_queued(monkeypatch):
+    monkeypatch.setattr(desktop, "IS_WINDOWS", True)
+    monkeypatch.setattr(uia, "_enter_apartment", lambda: None)
+    monkeypatch.setattr(uia, "_worker", None)
+    stuck = uia._Worker()
+    monkeypatch.setattr(uia, "_worker", stuck)
+    first = stuck.submit(time.sleep, 0.3)
+    queued = stuck.submit(lambda: 1)
+    queued.cancel()
+    stuck.abandoned = True
+    first.result(timeout=2)
+    stuck.thread.join(timeout=2)
+    assert not stuck.thread.is_alive() and queued.cancelled()
+
+
 def test_an_abandoned_worker_thread_ends(monkeypatch):
     monkeypatch.setattr(desktop, "IS_WINDOWS", True)
     monkeypatch.setattr(uia, "_enter_apartment", lambda: None)
