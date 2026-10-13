@@ -124,7 +124,36 @@
 
 不再改等画面的算法：剩下的情况大多是取图节奏造成的采样混叠，没有哪条规则能完全避免。返回结果里总带着当时的截图，调用方看得到。
 
-## 真机验收要做的事
+## 发布和真机验收（0.5.0，2026-10-13）
+
+**发布**
+- PR #12 的 6 项检查全部通过，squash 合并为 89fb5d5；
+- `v0.5.0` 标签从用户电脑推送，release run 38353446207；
+- 用户电脑已更新到 0.5.0（`sys_info` 报告 winhand 0.5.0）。
+
+**安装版 0.5.0 实测**（打包好的 winhand.exe，不是源码）
+- msinfo32：
+  - `ui` 的 backend 为 native，共 161 个元素，看得到 5 个菜单项；
+  - expand、collapse “查看(V)” 都是 `verified=true`；
+  - `ocr` 找到“已安装的物理内存”，并给出位置；
+  - `screenshot(wait='stable')` 1 秒后返回 `matched=true`。
+- **A10 管理员窗口**（用户打开任务管理器，它在用户的账户下以管理员身份运行）：
+  - `window(list)` 里任务管理器有 `admin: true`；
+  - `ui` inspect、`input` 点击它的标题栏、`ocr` 点击“进程”：三者都被拒绝，错误写明 Taskmgr.exe 和办法；
+  - `ocr` find 照常找到“进程”；
+  - `screenshot(window=…)` 照常返回；
+  - `sys_info(checks=true)` 有 admin_windows 一项。
+  - 发现：Windows 不让普通程序叫管理员窗口自己画图（PrintWindow），所以这类窗口的截图取的是屏幕上那块区域，被别的窗口挡住的部分显示的是挡住它的窗口。可以以后在结果里加一句说明。
+- **A9 锁屏**（用户按 Win+L 锁屏约 30 秒；一个脚本像客户端一样连 `winhand.exe stdio`，锁屏期间调用工具）：
+  - 窗口列表带 `desktop: locked` 和说明；
+  - 整个桌面的截图、`ocr`、`input` 按键、`window(focus)`：都报“屏幕已锁定”，没有发送输入；
+  - 单个窗口的截图在锁屏时仍然返回窗口自己画的图，并附说明；
+  - `sys_info(checks=true)` 有 desktop: locked 一项。
+  - UAC 安全桌面没有实测，走同一条判断路径，有模拟测试。
+
+结论：A1–A12 在真机上成立（A9 的 UAC 部分用模拟）。
+
+## 真机验收时做过的事（记录）
 
 已人工整理出真机验收时要做的事（需要人在电脑前）：
 1. 打开一个有可见窗口的管理员程序（例如任务管理器 Ctrl+Shift+Esc，或 regedit）：
