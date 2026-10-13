@@ -251,11 +251,11 @@ def test_the_project_of_a_uv_run_server(tmp_path):
         )
     )
     assert found.python_args == ["--python", "3.12"] and found.lock_args == ["--frozen"]
-    assert found.global_args == ["--managed-python"]
+    assert found.global_args == ["--directory", d, "--managed-python"]
     carried = venv_repair.uv_project(
         entry("--offline", "--config-file", "uv.toml", "--directory", d, "run", "-p3.11", "--locked", "x")
     )
-    assert carried.global_args == ["--offline", "--config-file", "uv.toml"]
+    assert carried.global_args == ["--offline", "--config-file", "uv.toml", "--directory", d]
     assert carried.python_args == ["--python", "3.11"]
     stepped = venv_repair.uv_project(entry("run", "--refresh-package", "p", "--locked", "x", cwd=d))
     assert stepped.lock_args == ["--locked"]  # the value of --refresh-package is not the command
@@ -430,7 +430,7 @@ async def test_a_removed_python_is_rebuilt_before_the_server_starts(
         status = services.services["tiny"].status()
         assert status["state"] == "running" and "repaired its Python environment" in status["note"]
         log = (winhand_home / "logs" / "mcp" / "tiny.log").read_text(encoding="utf-8")
-        assert "3.12.14" in log and "rebuilding it" in log and "uv sync --python" in log and "--locked" in log
+        assert "3.12.14" in log and "rebuilding it" in log and "sync --python" in log and "--locked" in log
     finally:
         await services.close()
 
@@ -446,7 +446,7 @@ async def test_with_repair_off_the_cause_and_the_fix_are_named(broken_project, w
     assert (
         refused.is_error and "3.12.14" in text and "no longer exists" in text and "repair_env = false" in text
     )
-    assert "uv venv --clear" in text and "uv sync" in text
+    assert "venv --clear" in text and " sync " in text
     assert (broken_project / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8") == before
     assert services.services["tiny"].process is None
     await services.close()
@@ -497,7 +497,78 @@ async def test_an_old_line_in_the_test_log_is_not_the_cause(winhand_home):
 def test_with_repair_on_and_a_sound_environment_the_other_one_is_named(tmp_path):
     d = project_at(tmp_path / "p")
     why = venv_repair.explain(entry("--directory", d, "run", "x"), ["No Python at '\"C:\\gone\\python.exe'"])
-    assert "Automatic repair is on" in why and "another one" in why and "uv venv --clear" in why
+    assert "automatic repair is on" in why and "another one" in why and "uv venv --clear" in why
+    off = venv_repair.explain(
+        entry("--directory", d, "run", "x", repair_env=False), ["No Python at '\"C:\\gone\\python.exe'"]
+    )
+    assert "sound or absent" in off and "repair_env = false" in off and f'{d}{os.sep}.venv"' not in off
+
+
+# ------------------------------------------------------------------ round 2 of the verification
+
+
+def test_more_uv_spellings(tmp_path):
+    d = project_at(tmp_path / "p")
+    assert venv_repair.uv_project(entry("run", "-p=3.13", "x", cwd=d)).python_args == ["--python", "3.13"]
+    assert venv_repair.uv_project(entry("--isolated", "run", "x", cwd=d)) is None
+    assert (
+        venv_repair.uv_project(entry("run", "--with-requirements", "r.txt", "x", cwd=d)) is not None
+    )  # uses .venv
+    hidden = venv_repair.uv_project(
+        entry("run", "--python-preference", "only-managed", "--locked", "x", cwd=d)
+    )
+    assert hidden.lock_args == ["--locked"] and hidden.global_args == ["--python-preference", "only-managed"]
+
+
+@pytest.mark.parametrize(
+    "text", ["[tool]\nuv = 1\n", "tool = 'x'\n", "[tool.uv]\nworkspace = 3\n", "not toml ["]
+)
+def test_an_odd_pyproject_does_not_break_anything(tmp_path, text):
+    (tmp_path / "pyproject.toml").write_text(text, encoding="utf-8")
+    server = entry("run", "x", cwd=str(tmp_path))
+    assert venv_repair.prepare(server) is None
+    assert venv_repair.checks([server]) == []
+
+
+def test_a_folder_that_cannot_be_read_is_not_taken_for_gone(tmp_path, monkeypatch):
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text(f"home = {tmp_path / 'share'}\n", encoding="utf-8")
+    monkeypatch.setattr(venv_repair.winenv, "IS_WINDOWS", True)
+
+    def refuse(path):
+        raise PermissionError(13, "denied", str(path))
+
+    monkeypatch.setattr(venv_repair.os, "listdir", refuse)
+    assert venv_repair.missing_python(str(venv)) is None
+
+
+def test_workspace_members_ignore_case_on_windows(tmp_path, monkeypatch):
+    root = tmp_path / "WS"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[tool.uv.workspace]\nmembers = ['packages/*']\n", encoding="utf-8")
+    member = project_at(root / "Packages" / "Srv")
+    monkeypatch.setattr(venv_repair.winenv, "IS_WINDOWS", True)
+    assert venv_repair._workspace_root(member) == str(root)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the doubled output only happened on POSIX")
+def test_a_timed_out_command_keeps_its_output_once():
+    import time
+
+    code, output = venv_repair._run(
+        [sys.executable, "-c", "import time; print('first-line', flush=True); time.sleep(30)"],
+        os.getcwd(),
+        dict(os.environ),
+        time.monotonic() + 1.5,
+    )
+    assert code is None and output.count("first-line") == 1
+
+
+def test_a_server_with_no_tools_is_not_left_out_early(winhand_home, monkeypatch):
+    servers_like({"a": (0, []), "b": (0, [(1, 400)])}, monkeypatch)
+    text = local_mcp.session_text(260)
+    assert "## a\n(no tools)" in text and "## b" in text and "left out" not in text
 
 
 def test_many_servers_are_quick(winhand_home, monkeypatch):

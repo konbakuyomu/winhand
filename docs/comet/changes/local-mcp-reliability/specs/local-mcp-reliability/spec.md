@@ -42,25 +42,26 @@ Scenario: (A2) 服务很多
 
 - 只检查 stdio 服务，且启动命令的文件名（去掉路径，不区分大小写）是 `uv` 或 `uv.exe`。
 - 参数里第一个不是选项的词是 `run`；之后第一个不是选项、也不是选项值的词是要运行的命令，扫描到它或 `--` 为止。
-  - 带值的选项支持 `--opt value`、`--opt=value` 和 `-p3.12` 三种写法；
+  - 带值的选项支持 `--opt value`、`--opt=value`、`-p3.12` 和 `-p=3.12` 四种写法；
   - 已知带值的 uv 选项（全局的和 `uv run` 的）跳过其值，不会被当成命令。
 - 不检查的情况：
-  - `run` 的选项里有 `--no-project`、`--isolated`、`--script`、`-s`、`--gui-script`、`--with-requirements`、`--active`；
+  - `run` 的选项里有 `--no-project`、`--isolated`、`--script`、`-s`、`--gui-script`、`--active`；`run` 之前的全局选项里有 `--isolated` 或 `--no-project`；
   - 环境变量 `UV_NO_PROJECT` 或 `UV_ISOLATED` 为真（先看服务的 env，再看 winhand 的环境变量，下同）。
 - 从哪里找项目：
   - `--directory` 的值（或 `UV_WORKING_DIR`）；
   - 再接上 `--project` 的值（或 `UV_PROJECT`），与 uv 相同；
   - 相对路径以服务的 `cwd` 为准（没有 `cwd` 时以 winhand 的当前目录为准）；
   - 都没有时用服务的 `cwd`，仍没有时不检查。
-- 项目：从那里向上找第一个有 `pyproject.toml` 的目录；直到根目录都没有时不检查（`uv run` 这时不建项目环境）。
+- 项目：从那里（按真实路径，跟随链接）向上找第一个有 `pyproject.toml` 的目录；直到根目录都没有时不检查（`uv run` 这时不建项目环境）。
 - 虚拟环境所在的根：
   - 项目属于某个 uv workspace 时，是 workspace 的根；
     - 判断方法：向上找最近的、`pyproject.toml` 里有 `[tool.uv.workspace]` 的目录；
-    - 项目的相对路径匹配其 `members`、且不匹配 `exclude`，才算属于它；
+    - 项目的相对路径匹配其 `members`、且不匹配 `exclude`，才算属于它（Windows 上不区分大小写）；
+    - `pyproject.toml` 读不了、不是 TOML 或这些键不是表时，视为没有 workspace，不报错；
   - 否则是项目自己。
 - 虚拟环境目录：`UV_PROJECT_ENVIRONMENT`（相对路径以根为准），没有时是 `<根>/.venv`。
 - 重建时原样带上的选项：
-  - 全局选项 `--config-file`、`--cache-dir`、`--allow-insecure-host`、`--offline`、`--no-config`、`--native-tls`、`--system-certs`、`--managed-python`、`--no-managed-python`、`--no-python-downloads`、`--allow-python-downloads`、`--no-cache`；
+  - 全局选项 `--directory`、`--project`、`--python-preference`、`--config-file`、`--cache-dir`、`--allow-insecure-host`、`--offline`、`--no-config`、`--native-tls`、`--system-certs`、`--managed-python`、`--no-managed-python`、`--no-python-downloads`、`--allow-python-downloads`、`--no-cache`；
   - `--python`；
   - `--locked`、`--frozen`。
 
@@ -69,12 +70,13 @@ Scenario: (A2) 服务很多
 - 坏掉的判断（宁可判为完好：只有确实跑不起来的环境才重建）：
   - 虚拟环境目录里有 `pyvenv.cfg`，其中有 `home = <目录>`；
   - Windows：`<目录>` 里没有任何 `python*.exe`；
+  - 只有 `<目录>` 不存在才算“没有”：列不出内容（没有权限、网络共享离线）时视为完好；
   - 其他系统：环境里的 `bin/python`、`bin/python3` 都指不到存在的文件，而且 `<目录>` 里没有 `python` 或 `python3*`；
   - `pyvenv.cfg` 不存在、读不了或没有 `home` 时，视为不需要修复。
 - 修复（服务的 `repair_env` 为 true，默认）：
   1. 在项目目录里运行 `uv venv --clear`，带上 `run` 参数里的 `--python <值>`、`--managed-python`、`--no-managed-python`；
   2. 再运行 `uv sync`，带上同样的参数，以及 `run` 参数里的 `--locked` 或 `--frozen`；
-  3. uv 用服务的启动命令（同一个 uv 可执行文件），环境变量与启动服务时相同；
+  3. uv 用服务的启动命令（同一个 uv 可执行文件），在服务启动时的目录里运行，环境变量与启动服务时相同，所以选项里的相对路径与服务启动时一样解析；
   4. 两步合计最多 600 秒，不计入 `startup_timeout_s`。超时时结束 uv 的整个进程树，错误里带上已有的输出；退出码不为 0 或运行不了 uv 时，修复失败；每一步都记进服务日志。
   5. 修复在单独的线程里进行，不占 winhand 的事件循环和公用线程池。修复期间服务被删除或配置被改时，修复完不再启动它。
 - 修复成功：
@@ -121,7 +123,7 @@ Scenario: (A5) 不检查的情况
   - 错误信息末尾加一句：这个服务的 Python 虚拟环境指向的 Python 已不存在（取 `No Python at` 后的路径，去掉多余的引号）；
   - 再附上修法：
     - R2 适用、winhand 检查的环境确实坏了：写出两条 uv 命令，以及自动修复是否开启；
-    - R2 适用、但 winhand 检查的环境是好的（服务实际用了别的环境）：说明自动修复已开启但检查的环境完好，并说明要重建服务实际使用的那个环境，以及用哪两条命令；
+    - R2 适用、但 winhand 检查的环境是好的或不存在（服务实际用了别的环境）：说明这一点和自动修复是否开启，并说明要重建服务实际使用的那个环境，以及用哪两条命令；
     - 其他服务：说明重建它的虚拟环境。
 - `probe` 的失败结果同样带这句说明，但只看这次测试新写入日志的内容（测试日志是追加写入的，旧的内容不算）。
 

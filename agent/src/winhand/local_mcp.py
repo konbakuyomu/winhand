@@ -411,7 +411,9 @@ def session_text(budget: int) -> str:
         lines = [f"## {name}"]
         if instructions:
             lines.append(_cut(instructions, min(INSTRUCTIONS_CHARS, 2 * cap)))
-        lines += [f"- {tool}: {_cut(line, cap)}" if line else f"- {tool}" for tool, line in tools]
+        lines += [f"- {tool}: {_cut(line, cap)}" if line else f"- {tool}" for tool, line in tools] or [
+            "(no tools)"
+        ]
         return "\n".join(lines)
 
     room = budget - 80  # the line saying how many were left out still fits

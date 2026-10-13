@@ -29,9 +29,14 @@ GLOBAL_VALUED = (
     "--cache-dir",
     "--color",
     "--allow-insecure-host",
+    "--python-preference",
+    "--preview-features",
 )
 # global options a rebuild repeats: they decide where packages and Pythons come from
 CARRIED = (
+    "--directory",
+    "--project",
+    "--python-preference",
     "--config-file",
     "--cache-dir",
     "--allow-insecure-host",
@@ -100,9 +105,9 @@ NO_PROJECT = (
     "--script",
     "-s",
     "--gui-script",
-    "--with-requirements",
     "--active",
 )
+NO_PROJECT_GLOBAL = ("--isolated", "--no-project")  # also accepted before `run`
 NO_PROJECT_ENV = ("UV_NO_PROJECT", "UV_ISOLATED")
 LOCK_FLAGS = ("--locked", "--frozen")
 _NO_PYTHON = re.compile(r"No Python at '(.+?)'\s*$")
@@ -119,6 +124,7 @@ class UvProject:
     python_args: list[str] = field(default_factory=list)  # --python X
     lock_args: list[str] = field(default_factory=list)  # --locked / --frozen
     global_args: list[str] = field(default_factory=list)  # CARRIED options, as given
+    cwd: str = ""  # where the server starts: uv resolves relative paths in those options from here
 
 
 def _split(arg: str) -> tuple[str, str | None]:
@@ -126,7 +132,7 @@ def _split(arg: str) -> tuple[str, str | None]:
         key, value = arg.split("=", 1)
         return key, value
     if not arg.startswith("--") and len(arg) > 2 and arg[:2] in SHORT_VALUED:
-        return arg[:2], arg[2:]  # -p3.12
+        return arg[:2], arg[2:].removeprefix("=")  # -p3.12, -p=3.12
     return arg, None
 
 
@@ -146,9 +152,21 @@ def _read_toml(path: str) -> dict:
         return {}
 
 
+def _strings(value) -> list[str]:
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+
+def _workspace_of(path: str):
+    """[tool.uv.workspace] of a pyproject.toml when it is a table, else None (whatever the file holds)."""
+    node = _read_toml(path)
+    for key in ("tool", "uv", "workspace"):
+        node = node.get(key) if isinstance(node, dict) else None
+    return node if isinstance(node, dict) else None
+
+
 def _workspace_root(project: str) -> str:
     """The root of the uv workspace `project` belongs to (the project itself when none)."""
-    if (_read_toml(os.path.join(project, "pyproject.toml")).get("tool") or {}).get("uv", {}).get("workspace"):
+    if _workspace_of(os.path.join(project, "pyproject.toml")) is not None:
         return project
     here = project
     while True:
@@ -156,13 +174,13 @@ def _workspace_root(project: str) -> str:
         if parent == here:
             return project
         here = parent
-        data = _read_toml(os.path.join(here, "pyproject.toml"))
-        workspace = ((data.get("tool") or {}).get("uv") or {}).get("workspace")
-        if not isinstance(workspace, dict):
+        workspace = _workspace_of(os.path.join(here, "pyproject.toml"))
+        if workspace is None:
             continue
-        rel = PurePosixPath(os.path.relpath(project, here).replace(os.sep, "/"))
-        members = [m for m in workspace.get("members") or [] if isinstance(m, str)]
-        excluded = [m for m in workspace.get("exclude") or [] if isinstance(m, str)]
+        fold = str.lower if winenv.IS_WINDOWS else str  # Windows paths ignore case
+        rel = PurePosixPath(fold(os.path.relpath(project, here).replace(os.sep, "/")))
+        members = [fold(m) for m in _strings(workspace.get("members"))]
+        excluded = [fold(m) for m in _strings(workspace.get("exclude"))]
         if any(rel.full_match(m) for m in members) and not any(rel.full_match(m) for m in excluded):
             return here
         return project  # the nearest workspace does not take it in: a project of its own
@@ -194,7 +212,7 @@ def uv_project(entry: ServerEntry) -> UvProject | None:
             i += 1
             continue
         key, value = _split(arg)
-        if seen_run and key in NO_PROJECT:
+        if key in (NO_PROJECT if seen_run else NO_PROJECT_GLOBAL):
             return None
         valued = key in (RUN_VALUED if seen_run else GLOBAL_VALUED)
         if valued and value is None:
@@ -220,7 +238,7 @@ def uv_project(entry: ServerEntry) -> UvProject | None:
     if start is None:
         return None
     # the project: the nearest folder up from there with a pyproject.toml, as uv finds it
-    here = os.path.abspath(start)
+    here = os.path.realpath(start)  # uv follows links to the real folder
     while not os.path.isfile(os.path.join(here, "pyproject.toml")):
         parent = os.path.dirname(here)
         if parent == here:
@@ -229,14 +247,18 @@ def uv_project(entry: ServerEntry) -> UvProject | None:
     root = _workspace_root(here)
     named = _setting(entry, "UV_PROJECT_ENVIRONMENT")
     venv = os.path.join(root, os.path.expanduser(named)) if named else os.path.join(root, ".venv")
-    return UvProject(os.path.normpath(here), os.path.normpath(venv), python_args, lock_args, global_args)
+    return UvProject(
+        os.path.normpath(here), os.path.normpath(venv), python_args, lock_args, global_args, base
+    )
 
 
 def _has_python(folder: str) -> bool:
     try:
         names = [name.lower() for name in os.listdir(folder)]
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return False
+    except OSError:  # cannot look (permissions, a share that is offline): not proof that it is gone
+        return True
     if winenv.IS_WINDOWS:  # python.exe, or only python3.13t.exe in a free-threaded build
         return any(name.startswith("python") and name.endswith(".exe") for name in names)
     return any(name == "python" or name.startswith("python3") for name in names)
@@ -281,7 +303,7 @@ def _shown(args: list[str]) -> str:
 
 def manual_fix(project: UvProject) -> str:
     first, second = (_shown(c) for c in _commands(project))
-    return f'in "{project.project}" run `uv {first}`, then `uv {second}`'
+    return f'in "{project.cwd or project.project}" run `uv {first}`, then `uv {second}`'
 
 
 def broken_text(entry: ServerEntry, project: UvProject, missing: str) -> str:
@@ -340,7 +362,7 @@ def _run(command: list[str], cwd: str, env: dict, deadline: float) -> tuple[int 
         partial = exc.output or b""
         try:
             out, _ = proc.communicate(timeout=5)
-            partial += out or b""
+            partial = out or partial  # on POSIX this repeats what was already read, from the start
         except subprocess.TimeoutExpired:
             pass
         return None, partial.decode("utf-8", errors="replace")
@@ -350,7 +372,10 @@ def prepare(entry: ServerEntry) -> str | None:
     """Before starting `entry`: when its uv project environment points to a missing Python, rebuild
     it (or, with repair_env false, refuse). Returns a note when it repaired something; raises
     RuntimeError when the server must not be started. Blocking: call it from a worker thread."""
-    project = uv_project(entry)
+    try:
+        project = uv_project(entry)
+    except Exception:  # noqa: BLE001 - an odd configuration: start the server as before
+        return None
     if project is None:
         return None
     with _lock(project.venv):  # another start may be rebuilding this same environment right now
@@ -368,7 +393,7 @@ def prepare(entry: ServerEntry) -> str | None:
         deadline = time.monotonic() + REPAIR_TIMEOUT_S
         for args in _commands(project):
             shown = _shown(args)
-            code, output = _run([uv, *args], project.project, env, deadline)
+            code, output = _run([uv, *args], project.cwd or project.project, env, deadline)
             _log(entry, f"uv {shown} ({'timed out' if code is None else f'exit {code}'}):\n{output.strip()}")
             if code is None:
                 raise RuntimeError(
@@ -393,18 +418,22 @@ def explain(entry: ServerEntry, output_lines) -> str | None:
         if not found:
             continue
         missing = found.group(1).strip().strip('"')
-        project = uv_project(entry)
+        try:
+            project = uv_project(entry)
+        except Exception:  # noqa: BLE001
+            project = None
         if project is None:
             return (
                 f"its Python virtual environment points to {missing}, which no longer exists: rebuild that "
                 "environment (or point the server at an existing Python)"
             )
-        if getattr(entry, "repair_env", True) and missing_python(project.venv) is None:
-            # winhand checked that environment before the start and found it sound: uv used another
+        if missing_python(project.venv) is None:
+            # the environment winhand checks is sound (or absent): uv used another one
+            state = "on" if getattr(entry, "repair_env", True) else "off (repair_env = false)"
             return (
-                f"its Python virtual environment points to {missing}, which no longer exists. Automatic repair "
-                f"is on, but the environment winhand checks ({project.venv}) is sound, so this server runs "
-                "from another one: rebuild that environment (in the folder it belongs to, run "
+                f"its Python virtual environment points to {missing}, which no longer exists. The environment "
+                f"winhand checks ({project.venv}) is sound or absent (automatic repair is {state}), so this "
+                "server runs from another one: rebuild that environment (in the folder it belongs to, run "
                 "`uv venv --clear`, then `uv sync`)"
             )
         how = (
@@ -425,8 +454,11 @@ def checks(entries) -> list[dict]:
     for entry in entries:
         if not entry.enabled:
             continue
-        project = uv_project(entry)
-        missing = missing_python(project.venv) if project else None
+        try:
+            project = uv_project(entry)
+            missing = missing_python(project.venv) if project else None
+        except Exception:  # noqa: BLE001 - one odd configuration does not take the other checks down
+            continue
         if not missing:
             continue
         fix = (
