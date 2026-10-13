@@ -182,18 +182,18 @@ def _rect(value) -> list[int] | None:
     return [left, top, width, height] if width > 0 and height > 0 else None
 
 
-def describe(raw: dict, types: dict[int, str]) -> dict | None:
+def describe(raw: dict, types: dict[int, str], keep: bool = False) -> dict | None:
     """One element as ui lists it, from its cached properties; None when it is not worth listing
-    (the same choice as the PowerShell script made)."""
+    (the same choice as the PowerShell script made) unless `keep`."""
     kind = types.get(raw.get("type"), "") if isinstance(raw.get("type"), int) else ""
     name = raw.get("name") or ""
     if not isinstance(name, str):
         name = ""
-    if raw.get("offscreen") is True and not name:
-        return None
     automation_id = raw.get("automation_id") if isinstance(raw.get("automation_id"), str) else ""
     hwnd = raw.get("hwnd") if isinstance(raw.get("hwnd"), int) else 0
-    if not (name or automation_id or hwnd or kind in ACTIONABLE):
+    if not keep and raw.get("offscreen") is True and not name:
+        return None
+    if not keep and not (name or automation_id or hwnd or kind in ACTIONABLE):
         return None
     patterns = [p for p in PATTERNS if raw.get(p) is True]
     runtime_id = raw.get("runtime_id")
@@ -233,13 +233,24 @@ def _cached(element, property_id):
         return None
 
 
+_tables: dict = {}
+
+
+def _request():
+    """The cache request for every property ui shows, the property ids and the type names."""
+    module, automation = _automation()
+    if "ids" not in _tables:
+        _tables["ids"] = _property_ids(module)
+        _tables["types"] = type_names(module)
+    request = automation.CreateCacheRequest()
+    for property_id in _tables["ids"].values():
+        request.AddProperty(property_id)
+    return request, _tables["ids"], _tables["types"]
+
+
 def _snapshot(hwnd: int, popups: list[int]) -> dict:
     module, automation = _automation()
-    ids = _property_ids(module)
-    types = type_names(module)
-    request = automation.CreateCacheRequest()
-    for property_id in ids.values():
-        request.AddProperty(property_id)
+    request, ids, types = _request()
     root = automation.ElementFromHandle(hwnd)
     try:
         title = root.CurrentName or ""
@@ -279,6 +290,24 @@ def _snapshot(hwnd: int, popups: list[int]) -> dict:
 def snapshot(hwnd: int, timeout: float = TIMEOUT_S) -> dict:
     """The window's controls, as the PowerShell script lists them, each with its live element."""
     return call(_snapshot, hwnd, desktop.menus_of(hwnd), timeout=timeout)
+
+
+def _refresh(element) -> dict | None:
+    request, ids, types = _request()
+    try:
+        fresh = element.BuildUpdatedCache(request)
+    except Exception:  # noqa: BLE001 - the control (or its window) is gone
+        return None
+    item = describe({key: _cached(fresh, property_id) for key, property_id in ids.items()}, types, keep=True)
+    item["_element"] = fresh
+    return item
+
+
+def refresh(element) -> dict | None:
+    """The same control read again (its state after an action), None when it is gone. Reading the
+    element itself is what identifies it: runtime ids of controls that Windows reaches through
+    their old accessibility interface (classic menus, for one) change from one reading to the next."""
+    return call(_refresh, element)
 
 
 # ------------------------------------------------------------------ acting

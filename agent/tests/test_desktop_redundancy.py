@@ -106,7 +106,12 @@ async def test_ui_acts_on_the_element_it_just_read(monkeypatch):
              "_runtime_id": [1, 2], "_element": element},
         ]}  # fmt: skip
 
+    def refresh(e):
+        assert e is element  # the very element that was operated, not a look-alike by runtime id
+        return {**snapshot(11)["elements"][0], "_runtime_id": [9, 9]}
+
     monkeypatch.setattr(uia, "snapshot", snapshot)
+    monkeypatch.setattr(uia, "refresh", refresh)
     monkeypatch.setattr(uia, "act", lambda e, verb, value=None: acted.append((e, verb)) or "expanded")
     monkeypatch.setattr(td, "_run_uia", lambda *a, **k: pytest.fail("the PowerShell script must not run"))
     async with Client(build_server(Config())) as client:

@@ -188,6 +188,18 @@ def _inspect_controls(hwnd: int, *, timeout_s: float = 60) -> dict:
     return snapshot
 
 
+def _read_back(hwnd: int, target: dict) -> dict | None:
+    """The control's state now, from its own UI Automation element read again (None when it is
+    gone), with the classic control's facts merged in as inspect does."""
+    fresh = uia.refresh(target["_element"])
+    if fresh is None:
+        return None
+    fresh["index"] = 0
+    classic = [c for c in desktop.native_controls(hwnd) if fresh.get("hwnd") and c["hwnd"] == fresh["hwnd"]]
+    merged = merge_controls([fresh], classic)
+    return merged[0] if merged else fresh
+
+
 WAIT_POLL_S = 0.7
 
 
@@ -635,23 +647,34 @@ def register(mcp: FastMCP) -> None:
             reason = "Action sent; inspect its outcome before repeating it."
             while True:
                 try:
-                    snapshot = _inspect_controls(hwnd, timeout_s=max(1, min(3, deadline - time.monotonic())))
-                    title = snapshot["window"]
-                    candidates = snapshot["elements"]
-                    if target.get("_runtime_id"):
-                        candidates = [e for e in candidates if e.get("_runtime_id") == target["_runtime_id"]]
-                    elif target.get("hwnd"):
-                        candidates = [e for e in candidates if e.get("hwnd") == target["hwnd"]]
-                    elif target.get("automation_id"):
-                        candidates = [
-                            e
-                            for e in candidates
-                            if e.get("automation_id") == target["automation_id"]
-                            and e.get("type") == target.get("type")
-                        ]
+                    if target.get("_element") is not None:
+                        after = _read_back(hwnd, target)
+                        try:
+                            title = desktop.find_window(hwnd)["title"]
+                        except desktop.DesktopError:
+                            pass  # the window closed: the element read-back says the rest
                     else:
-                        candidates = []  # an old list index cannot identify a control after redraw
-                    after = candidates[0] if len(candidates) == 1 else None
+                        snapshot = _inspect_controls(
+                            hwnd, timeout_s=max(1, min(3, deadline - time.monotonic()))
+                        )
+                        title = snapshot["window"]
+                        candidates = snapshot["elements"]
+                        if target.get("_runtime_id"):
+                            candidates = [
+                                e for e in candidates if e.get("_runtime_id") == target["_runtime_id"]
+                            ]
+                        elif target.get("hwnd"):
+                            candidates = [e for e in candidates if e.get("hwnd") == target["hwnd"]]
+                        elif target.get("automation_id"):
+                            candidates = [
+                                e
+                                for e in candidates
+                                if e.get("automation_id") == target["automation_id"]
+                                and e.get("type") == target.get("type")
+                            ]
+                        else:
+                            candidates = []  # an old list index cannot identify a control after redraw
+                        after = candidates[0] if len(candidates) == 1 else None
                     if after is not None and expected and all(after.get(key) is not None for key in expected):
                         verified = all(after[key] == val for key, val in expected.items())
                         reason = (

@@ -641,7 +641,9 @@ async def test_native_ui_automation_reaches_classic_menus_and_lists(classic_form
         assert chosen["verified"] is True and chosen["element"]["selected"] is True, chosen
 
 
-def test_msinfo32_menus_and_tree_are_visible():
+async def test_msinfo32_menus_and_tree_are_visible():
+    from fastmcp import Client
+
     from winhand import desktop
     from winhand.tools_desktop import _inspect_controls
 
@@ -663,6 +665,21 @@ def test_msinfo32_menus_and_tree_are_visible():
         assert snapshot["backend"] == "native"
         assert kinds.count("MenuItem") >= 4, kinds
         assert any(e["type"] == "TreeItem" and e["name"] for e in snapshot["elements"]), kinds
+        # a menu of the menu bar opens, and the read-back confirms it (classic menus are reached
+        # through their accessibility interface, whose runtime ids change from read to read)
+        menu = [e for e in snapshot["elements"] if e["type"] == "MenuItem"][-2]["name"]
+        async with Client(build_server(Config())) as client:
+            opened = (
+                await client.call_tool(
+                    "ui",
+                    {"window": "msinfo32.exe", "action": "expand", "name": menu, "control_type": "MenuItem"},
+                )
+            ).structured_content
+            assert opened["verified"] is True and opened["element"]["expanded"] == "Expanded", opened
+            await client.call_tool(
+                "ui",
+                {"window": "msinfo32.exe", "action": "collapse", "name": menu, "control_type": "MenuItem"},
+            )
     finally:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
 
