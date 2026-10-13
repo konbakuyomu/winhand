@@ -680,6 +680,15 @@ async def test_msinfo32_menus_and_tree_are_visible():
                 "ui",
                 {"window": "msinfo32.exe", "action": "collapse", "name": menu, "control_type": "MenuItem"},
             )
+            # a node of its (real Win32) tree view can be selected, and the read-back says so
+            node = [e for e in snapshot["elements"] if e["type"] == "TreeItem" and e["name"]][1]["name"]
+            chosen = (
+                await client.call_tool(
+                    "ui",
+                    {"window": "msinfo32.exe", "action": "select", "name": node, "control_type": "TreeItem"},
+                )
+            ).structured_content
+            assert chosen["verified"] is True and chosen["element"]["selected"] is True, chosen
     finally:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
 
