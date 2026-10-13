@@ -124,7 +124,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值 |
 | 一次性命令和进程 | `run`（约 45 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`remote_run`（经本机的 ssh 配置在另一台机器上跑脚本）`proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
-| 桌面 | `screenshot` `window` `input` `ui` `clipboard` |
+| 桌面 | `screenshot`（`wait` 等画面变化或停止变化）`window` `input` `ui` `ocr`（认屏幕上的字）`clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
 | 本机规则 | `context`：这台电脑写给 AI 的规矩（按 Codex、Claude Code 的读法：AGENTS.md、CLAUDE.md、`.claude/rules`、`@` 引用）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务；`repo=owner/name` 可按仓库名找到本机目录。见[本机规则与守卫](#本机规则与守卫) |
@@ -138,6 +138,38 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 截图和图片按大小预算编码（PNG，过大时改用 JPEG 并逐步缩小），保证能通过客户端的结果大小限制；原始分辨率的截图同时保存在本机（结果里的 `original_file`），需要看清细节时用 `fs_read` 加 `region` 放大那一块。
 
 需要看界面或确认某个程序、对话框、安装程序的状态时，模型应自己调用 `screenshot`，不要让人截图；要点击时优先用 `ui`。`ui(action="wait")` 可以一直等到某个控件出现、消失、变为可用或显示某个值（比如安装程序的"下一步"按钮变为可点），`window(action="wait")` 等某个窗口出现或关闭，最多等 40 秒。按进程名选窗口时，优先选该程序的主窗口，不会选中它的提示框或弹出菜单。
+
+操作桌面程序有几条路。一条走不通时换下一条，从最稳的开始：
+
+1. **程序自己的命令行、接口或文件**（例如 KiCad 的 kicad-cli）；
+2. **`ui` 按名字操作控件**：
+   - 用的是 Windows 原生的 UI Automation，在 winhand 进程内调用；
+   - 经典 Win32 程序的菜单栏、展开的菜单、树、列表、工具栏也能读到、能操作；
+   - 原生接口用不了时，自动退回 PowerShell 脚本，结果里的 `backend` 会写明；
+3. **快捷键**：`input(action="keys")`；
+4. **`ocr` 认屏幕上的字**：适合没有控件的界面，例如画布、游戏、远程桌面、自绘界面。它用 Windows 自带的 OCR，不需要安装。
+   - `ocr(action="read")` 列出每行文字和屏幕位置；
+   - `ocr(action="click", text="保存")` 点击那段文字；
+   - `ocr(action="wait", text=...)` 等文字出现，`state="gone"` 时等它消失；
+   - 查找不区分大小写、全角和半角，忽略空格；
+   - 没有完全匹配时，`similar` 给出 OCR 实际读成的相近文字，不会点击；
+5. **坐标点击**：最后才用，每次点击后截图核对。
+
+`screenshot(wait="change")` 等画面和上一次截图相比有变化再返回；`wait="stable"` 等画面停止变化 `stable_ms` 后再返回。这两种等待都可以代替固定的睡眠，文字光标闪烁不算变化。
+
+以下情况不能操作：
+
+- **锁屏、UAC 提示、远程桌面会话已断开时**：
+  - `input`、点击、`window(action="focus")` 直接说明原因，不发送输入；
+  - 整个桌面、显示器或区域的截图和读字也直接说明原因，不返回黑图；
+  - 窗口截图在窗口自己能画出来时照常返回，并附一句说明。
+- **以管理员身份运行的程序**：Windows 会悄悄丢掉普通程序发给它的点击和按键。
+  - 窗口列表里，这类窗口标为 `admin: true`；
+  - `ui`、`input`、`ocr` 的点击会拒绝，并说明原因；
+  - 截图和读字照常；
+  - `sys_info(checks=true)` 也会列出这些情况。
+
+不支持高 DPI 的老程序，在缩放过的显示器上截窗口图时，会放大到窗口在屏幕上的实际大小，坐标与屏幕一致。
 
 `sys_info(checks=true)` 会做一次环境体检，逐项列出 PowerShell 7、代码页、RedirectionGuard、长路径、Git Bash、WSL、scoop/mise shim、ssh、ripgrep 和非 ASCII 用户目录的状态，每项附修复建议。
 

@@ -22,7 +22,8 @@ from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import coalesce, desktop, jobs, media, proc, transfer, winenv
+from . import coalesce, desktop, jobs, media, proc, transfer, uia, winenv
+from . import ocr as screen_text
 from .secret_prompt import PromptUnavailable, ask_pick
 
 UIA_SCRIPT = Path(__file__).parent / "scripts" / "uia.ps1"
@@ -174,12 +175,33 @@ def _public(element: dict) -> dict:
 
 
 def _inspect_controls(hwnd: int, *, timeout_s: float = 60) -> dict:
-    snapshot = _run_uia(hwnd, Mode="inspect", timeout_s=timeout_s)
+    """A window's controls: Windows' native UI Automation in process (each element keeps its live
+    `_element`), or the PowerShell script when that cannot start here; classic controls merged in."""
+    try:
+        snapshot = uia.snapshot(hwnd)  # fast; its own time limit is for programs that hang
+        snapshot["backend"] = "native"
+    except uia.Unavailable as exc:
+        snapshot = _run_uia(hwnd, Mode="inspect", timeout_s=timeout_s)
+        snapshot["backend"] = "powershell"
+        snapshot["backend_note"] = f"native UI Automation unavailable: {exc}"
     snapshot["elements"] = merge_controls(snapshot["elements"], desktop.native_controls(hwnd))
     return snapshot
 
 
+def _read_back(hwnd: int, target: dict) -> dict | None:
+    """The control's state now, from its own UI Automation element read again (None when it is
+    gone), with the classic control's facts merged in as inspect does."""
+    fresh = uia.refresh(target["_element"])
+    if fresh is None:
+        return None
+    fresh["index"] = 0
+    classic = [c for c in desktop.native_controls(hwnd) if fresh.get("hwnd") and c["hwnd"] == fresh["hwnd"]]
+    merged = merge_controls([fresh], classic)
+    return merged[0] if merged else fresh
+
+
 WAIT_POLL_S = 0.7
+INVOKE_WAIT_S = 5.0  # UI Automation's Invoke returns only when the control's handler does
 
 
 def _control_state(element: dict | None, state: str) -> bool:
@@ -210,15 +232,30 @@ def wait_control(
     deadline = began + min(timeout_s, 40)
     element = None
     title = None
+    problem = None  # the latest reading error while the window was there
     while True:
+        unknown = False
         try:
             w = desktop.find_window(window)
-            title = w["title"]
-            found = match_controls(inspect(w["hwnd"]), name, automation_id, control_type)
-            element = found[0] if found else None
         except desktop.DesktopError:
-            element = None  # the window itself is not there (yet, or any more)
-        if _control_state(element, state):
+            w = None  # the window itself is not there (yet, or any more)
+        element = None
+        if w is not None:
+            if w.get("admin"):
+                raise desktop.admin_error(w)
+            title = w["title"]
+            try:
+                found = match_controls(inspect(w["hwnd"]), name, automation_id, control_type)
+                element = found[0] if found else None
+            except uia.NoAnswer:
+                raise  # a hung program is not a control that went away
+            except desktop.DesktopError as exc:
+                try:  # changing under the reading: gone only if the window is gone
+                    desktop.find_window(w["hwnd"])
+                    unknown, problem = True, str(exc)
+                except desktop.DesktopError:
+                    pass
+        if not unknown and _control_state(element, state):
             return {
                 "matched": True,
                 "state": state,
@@ -227,7 +264,7 @@ def wait_control(
                 "waited_s": round(time.monotonic() - began, 1),
             }
         if time.monotonic() >= deadline:
-            return {
+            out = {
                 "matched": False,
                 "state": state,
                 "window": title,
@@ -235,6 +272,9 @@ def wait_control(
                 "waited_s": round(time.monotonic() - began, 1),
                 "note": "not reached yet; call again to keep waiting, or look with screenshot",
             }
+            if unknown and problem:
+                out["last_error"] = problem  # the window could not be read at the end
+            return out
         time.sleep(WAIT_POLL_S)
 
 
@@ -400,14 +440,28 @@ def register(mcp: FastMCP) -> None:
             list[int] | None, Field(description="[left, top, width, height] in screen pixels")
         ] = None,
         max_side: Annotated[int, Field(description="Longest edge of the returned image")] = media.MAX_SIDE,
+        wait: Annotated[
+            str | None,
+            Field(
+                description="change: return once the picture differs from the previous screenshot of the "
+                "same target | stable: once it has stopped changing for stable_ms. Instead of sleeping"
+            ),
+        ] = None,
+        timeout_s: Annotated[float, Field(ge=0, le=40, description="For wait: how long at most")] = 20,
+        stable_ms: Annotated[
+            int, Field(ge=200, le=10_000, description="For wait='stable': how long unchanged")
+        ] = 1000,
     ):
         """Look at the screen: the whole desktop (default), one monitor, a region or one window
         (also when it is covered). Use it whenever you need to see what the person sees or check
         a program's state, instead of asking them for a screenshot. After this, input()
-        coordinates are pixels of this image."""
+        coordinates are pixels of this image. wait='change'/'stable' waits (up to 40 s) for the
+        picture to change or settle (a click's effect, loading, an animation) before returning it."""
 
         def work():
-            data, fmt, facts = desktop.screenshot(window, monitor, region, max_side)
+            data, fmt, facts = desktop.screenshot(
+                window, monitor, region, max_side, wait, timeout_s, stable_ms
+            )
             return media_result(facts, Image(data=data, format=fmt))
 
         return await asyncio.to_thread(_errors, work)
@@ -430,7 +484,11 @@ def register(mcp: FastMCP) -> None:
 
         def work():
             if action == "list":
-                return {"monitors": desktop.monitors(), "windows": desktop.windows()}
+                out = {"monitors": desktop.monitors(), "windows": desktop.windows()}
+                screen = desktop.desktop_state()
+                if screen != "ok":
+                    out.update(desktop=screen, note=desktop.DESKTOP_MESSAGES[screen])
+                return out
             if target is None:
                 raise ValueError("give target (title part, process name or handle)")
             if action == "wait":
@@ -505,8 +563,9 @@ def register(mcp: FastMCP) -> None:
         ] = "exists",
         timeout_s: Annotated[float, Field(ge=0, le=40, description="For wait: how long at most")] = 20,
     ) -> dict:
-        """Read and operate a window's controls (buttons, fields, checkboxes, lists, menus) by
-        name instead of pixels, also in classic Win32/WinForms/Delphi programs and installers.
+        """Read and operate a window's controls (buttons, fields, checkboxes, lists, trees, menus,
+        open menus too) by name instead of pixels, also in classic Win32/WinForms/Delphi programs
+        and installers. A program that draws its own interface (no controls): use ocr.
         inspect lists them; invoke/toggle/select/set_value/... find one by name/automation_id/
         type and use it without moving the mouse; click is a real mouse click on it.
         Actions run once, then read back the control. verified=true means its observable state
@@ -519,8 +578,11 @@ def register(mcp: FastMCP) -> None:
             if action == "wait":
                 return wait_control(window, name, automation_id, control_type, state, timeout_s)
             w = desktop.find_window(window)
+            if w.get("admin"):
+                raise desktop.admin_error(w)
             hwnd = w["hwnd"]
-            elements = _inspect_controls(hwnd)["elements"]
+            snapshot = _inspect_controls(hwnd)
+            elements = snapshot["elements"]
             if action == "inspect":
                 shown = [
                     _public(e)
@@ -529,12 +591,16 @@ def register(mcp: FastMCP) -> None:
                     or filter.lower()
                     in f"{e.get('name')} {e.get('automation_id')} {e.get('type')} {e.get('value')}".lower()
                 ]
-                return {
+                listed = {
                     "window": w["title"],
                     "count": len(elements),
                     "shown": len(shown[:250]),
                     "elements": shown[:250],
+                    "backend": snapshot.get("backend"),
                 }
+                if snapshot.get("backend_note"):
+                    listed["backend_note"] = snapshot["backend_note"]
+                return listed
             found = match_controls(elements, name, automation_id, control_type)
             if not found:
                 raise desktop.DesktopError(
@@ -550,7 +616,29 @@ def register(mcp: FastMCP) -> None:
             if action != "click":
                 patterns = set(target.get("patterns") or ())
                 can = action == "focus" or patterns & _VERB_PATTERNS.get(action, set())
-                if target.get("uia_index") is not None and can:
+                if (
+                    target.get("native")
+                    and action in ("invoke", "toggle", "select")
+                    and target.get("type") in ("Button", "CheckBox", "RadioButton")
+                ):
+                    # a posted click: UI Automation's Invoke waits while the button's handler runs,
+                    # all the time a modal dialog it opens stays open
+                    done = desktop.native_act(target, action, value)
+                if not done and target.get("_element") is not None and can:
+                    handler = action in ("invoke", "toggle", "select", "expand")
+                    try:
+                        done = uia.act(
+                            target["_element"],
+                            action,
+                            value,
+                            timeout=INVOKE_WAIT_S if handler else uia.TIMEOUT_S,
+                        )
+                    except uia.NoAnswer:
+                        if not handler:
+                            raise
+                        # the program is still in the control's handler, typically a dialog it opened
+                        done = "sent; the program has not finished handling it (a dialog it opened may be waiting)"
+                elif not done and target.get("uia_index") is not None and can:
                     done = _run_uia(
                         hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
                         ExpectId=",".join(map(str, target.get("_runtime_id", []))),
@@ -558,8 +646,17 @@ def register(mcp: FastMCP) -> None:
                     )["done"]  # fmt: skip
                 if not done and target.get("native"):
                     done = desktop.native_act(target, action, value)
-            if not done and action in ("click", "invoke", "toggle", "select") and target.get("rect"):
-                left, top, width, height = target["rect"]
+            rect = target.get("rect")
+            if (
+                not done
+                and action in ("click", "invoke", "toggle", "select")
+                and target.get("offscreen")
+                and target.get("_element") is not None
+                and "ScrollItem" in (target.get("patterns") or ())
+            ):
+                rect = uia.scroll_into_view(target["_element"]) or rect  # a list row out of sight
+            if not done and action in ("click", "invoke", "toggle", "select") and rect:
+                left, top, width, height = rect
                 cx, cy = left + width // 2, top + height // 2
                 try:
                     desktop.window_action(hwnd, "focus")
@@ -589,23 +686,34 @@ def register(mcp: FastMCP) -> None:
             reason = "Action sent; inspect its outcome before repeating it."
             while True:
                 try:
-                    snapshot = _inspect_controls(hwnd, timeout_s=max(1, min(3, deadline - time.monotonic())))
-                    title = snapshot["window"]
-                    candidates = snapshot["elements"]
-                    if target.get("_runtime_id"):
-                        candidates = [e for e in candidates if e.get("_runtime_id") == target["_runtime_id"]]
-                    elif target.get("hwnd"):
-                        candidates = [e for e in candidates if e.get("hwnd") == target["hwnd"]]
-                    elif target.get("automation_id"):
-                        candidates = [
-                            e
-                            for e in candidates
-                            if e.get("automation_id") == target["automation_id"]
-                            and e.get("type") == target.get("type")
-                        ]
+                    if target.get("_element") is not None:
+                        after = _read_back(hwnd, target)
+                        try:
+                            title = desktop.find_window(hwnd)["title"]
+                        except desktop.DesktopError:
+                            pass  # the window closed: the element read-back says the rest
                     else:
-                        candidates = []  # an old list index cannot identify a control after redraw
-                    after = candidates[0] if len(candidates) == 1 else None
+                        snapshot = _inspect_controls(
+                            hwnd, timeout_s=max(1, min(3, deadline - time.monotonic()))
+                        )
+                        title = snapshot["window"]
+                        candidates = snapshot["elements"]
+                        if target.get("_runtime_id"):
+                            candidates = [
+                                e for e in candidates if e.get("_runtime_id") == target["_runtime_id"]
+                            ]
+                        elif target.get("hwnd"):
+                            candidates = [e for e in candidates if e.get("hwnd") == target["hwnd"]]
+                        elif target.get("automation_id"):
+                            candidates = [
+                                e
+                                for e in candidates
+                                if e.get("automation_id") == target["automation_id"]
+                                and e.get("type") == target.get("type")
+                            ]
+                        else:
+                            candidates = []  # an old list index cannot identify a control after redraw
+                        after = candidates[0] if len(candidates) == 1 else None
                     if after is not None and expected and all(after.get(key) is not None for key in expected):
                         verified = all(after[key] == val for key, val in expected.items())
                         reason = (
@@ -625,14 +733,63 @@ def register(mcp: FastMCP) -> None:
                 if verified is True or not expected or time.monotonic() >= deadline:
                     break
                 time.sleep(min(0.2, max(0, deadline - time.monotonic())))
-            return {
+            out = {
                 "done": done,
                 "matches": len(found),
                 "window": title,
                 "element": _public(after) if after is not None else None,
                 "verified": verified,
                 "verification": reason,
+                "backend": snapshot.get("backend"),
             }
+            if snapshot.get("backend_note"):
+                out["backend_note"] = snapshot["backend_note"]
+            return out
+
+        return await asyncio.to_thread(_errors, work)
+
+    @mcp.tool
+    async def ocr(
+        action: Annotated[
+            str, Field(description="read | find | click | double_click | right_click | move | wait")
+        ] = "read",
+        text: Annotated[
+            str | None,
+            Field(description="Text to find (all but read); case, full/half width and spaces do not matter"),
+        ] = None,
+        window: Annotated[
+            str | int | None, Field(description="Window title part, process name or handle")
+        ] = None,
+        monitor: Annotated[int | None, Field(description="Monitor index from window(action='list')")] = None,
+        region: Annotated[
+            list[int] | None, Field(description="[left, top, width, height] in screen pixels")
+        ] = None,
+        state: Annotated[str, Field(description="For wait: exists (default) | gone")] = "exists",
+        index: Annotated[int, Field(ge=0, description="Which match: top to bottom, left to right")] = 0,
+        language: Annotated[
+            str | None,
+            Field(description="OCR language (en-US, zh-Hans-CN, ja ...); default: the user's plus English"),
+        ] = None,
+        timeout_s: Annotated[float, Field(ge=0, le=40, description="For wait: how long at most")] = 20,
+    ) -> dict:
+        """Read text on the screen with Windows' built-in OCR, also where there are no controls to
+        read (canvases, games, remote desktops, self-drawn programs). read lists the lines with
+        their rectangles; find locates a text; click/double_click/right_click/move act on it like
+        a person (the window is brought to the front first); wait waits (up to 40 s) until the
+        text appears or, with state='gone', disappears. Without an exact match, `similar` shows
+        how OCR read the closest lines. Rectangles and centers are screen pixels: use them with
+        input(..., coordinates='screen')."""
+
+        def work():
+            if action == "read":
+                return screen_text.read(window, monitor, region, language)
+            if not text:
+                raise ValueError("give the text to find")
+            if action == "find":
+                return screen_text.find(text, window, monitor, region, language)
+            if action == "wait":
+                return screen_text.wait(text, window, monitor, region, state, timeout_s, language)
+            return screen_text.act(action, text, window, monitor, region, index, language)
 
         return await asyncio.to_thread(_errors, work)
 

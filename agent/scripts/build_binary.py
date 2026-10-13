@@ -35,6 +35,14 @@ ICON = REPO / "desktop/windows/Assets/winhand.ico"
 COLLECT_ALL = ["winhand", "pyte", "pypdfium2", "pypdfium2_raw"] + (["winpty"] if IS_WINDOWS else [])
 COLLECT_DATA = ["fastmcp", "mcp"]  # not collect-all: their optional CLIs import typer/rich extras
 HIDDEN = ["tkinter", "serial.urlhandler.protocol_loop", "serial.urlhandler.protocol_socket"]
+# the in-process UI Automation client: its comtypes wrapper is generated before bundling (below)
+# so the frozen program needs no code generation; the generator still ships as a fallback
+WINDOWS_HIDDEN = [
+    "comtypes.client",
+    "comtypes.tools.codegenerator",
+    "comtypes.tools.tlbparser",
+    "comtypes.gen.UIAutomationClient",
+]
 COPY_METADATA = ["fastmcp", "mcp", "pydantic", "pydantic-core", "httpx", "uvicorn", "websockets", "starlette"]
 
 
@@ -84,7 +92,14 @@ def build(run_dir: Path, version: str) -> Path:
         "--workpath", str(run_dir / "work"),
         "--specpath", str(run_dir),
     ]  # fmt: skip
-    for module in HIDDEN:
+    hidden = list(HIDDEN)
+    if IS_WINDOWS:
+        import comtypes.client
+
+        comtypes.client.GetModule("UIAutomationCore.dll")  # writes comtypes/gen/UIAutomationClient.py
+        hidden += WINDOWS_HIDDEN
+        command += ["--collect-submodules", "comtypes.gen"]
+    for module in hidden:
         command += ["--hidden-import", module]
     for package in COLLECT_DATA:
         command += ["--collect-data", package]
@@ -203,8 +218,14 @@ def smoke(executable: Path, run_dir: Path, version: str) -> list[str]:
     if "gdb" not in cli("profiles"):
         raise RuntimeError("built-in profiles are missing from the bundle")
     checks.append("profiles")
-    json.loads(cli("doctor"))
+    doctor = json.loads(cli("doctor"))
     checks.append("doctor")
+    if IS_WINDOWS:
+        if doctor.get("ui_automation") != "native":
+            raise RuntimeError(
+                f"native UI Automation does not work in the bundle: {doctor.get('ui_automation')}"
+            )
+        checks.append("ui_automation")
     if IS_WINDOWS:
         cli("secret-dialog", "--check")  # tkinter + Tcl/Tk data for session_prompt_user
         checks.append("tk")
