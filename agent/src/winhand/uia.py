@@ -95,6 +95,8 @@ def call(fn, *args, timeout: float = TIMEOUT_S):
     future = worker.submit(fn, *args)
     try:
         return future.result(timeout=timeout)
+    except desktop.DesktopError:
+        raise
     except FutureTimeout:
         with _lock:
             if _worker is worker:
@@ -103,6 +105,8 @@ def call(fn, *args, timeout: float = TIMEOUT_S):
             f"the program did not answer UI Automation within {timeout:g} s (it may be busy or hung); "
             "an action may still have taken effect: look before repeating it"
         ) from None
+    except Exception as exc:  # COM errors: the control went away, is disabled, refused ...
+        raise desktop.DesktopError(f"UI Automation: {type(exc).__name__}: {exc}") from exc
 
 
 def _automation():

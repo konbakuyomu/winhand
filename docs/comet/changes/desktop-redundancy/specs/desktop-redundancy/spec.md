@@ -23,11 +23,16 @@
 - **操作**：在同一次调用里，直接作用于读到的元素。
   - invoke：用 Invoke；没有时依次用 Toggle、SelectionItem 的 Select、ExpandCollapse 的 Expand（与 0.4.9 相同）；
   - toggle、select、expand、collapse、set_value：用对应的操作；focus 用 SetFocus；
+  - 经典按钮、复选框、单选按钮（有自己的窗口句柄）做 invoke、toggle、select 时，先用投递的窗口消息（BM_CLICK）。
+    - 原因：UI Automation 的 Invoke 要等按钮的处理程序运行完。按钮打开模态对话框时，这一等就是对话框开着的全部时间。
   - 原有后备不变：
     - 经典控件用窗口消息；
     - click，或控件不支持 invoke、toggle、select 时，用真实鼠标点击控件中心；
   - click 之前，如果控件在屏幕外并且支持 ScrollItem，先滚动到可见，再取位置；
-  - 动作后的回读和 verified 规则不变，按 runtime id 找回同一个控件。
+  - 动作后的回读和 verified 规则不变：
+    - 原生读到的控件，回读时直接重读同一个元素。经典菜单这类经旧版辅助功能接口提供的控件，它们的 runtime id 每次读取都会变；
+    - PowerShell 后备仍按 runtime id 找回控件。
+  - UI Automation 报出的 COM 错误（控件已经不在、被禁用等），转成写明原因的普通错误。
 - **时限**：一次读取或操作超过 20 秒（目标程序没有响应）时：
   - 报错 “the program did not answer UI Automation within 20 s”；
   - 放弃那个工作线程；之后的调用换新线程。

@@ -125,6 +125,46 @@ async def test_ui_acts_on_the_element_it_just_read(monkeypatch):
     assert done["verified"] is True and done["element"]["expanded"] == "Expanded"
 
 
+async def test_classic_buttons_get_a_posted_click_that_a_modal_dialog_cannot_hold_up(monkeypatch):
+    _fake_window(monkeypatch)
+    button = {"index": 0, "type": "Pane", "name": "Browse...", "automation_id": "", "hwnd": 77, "enabled": True,
+              "rect": [1, 2, 3, 4], "patterns": ["Invoke"], "_runtime_id": [7], "_element": object()}  # fmt: skip
+    monkeypatch.setattr(
+        uia, "snapshot", lambda hwnd, timeout=0: {"window": "app", "count": 1, "elements": [button]}
+    )
+    monkeypatch.setattr(td.desktop, "native_controls", lambda hwnd: [
+        {"hwnd": 77, "type": "Button", "name": "Browse...", "class": "Button", "enabled": True, "rect": [1, 2, 3, 4]}
+    ])  # fmt: skip
+    monkeypatch.setattr(uia, "act", lambda *a, **k: pytest.fail("UI Automation Invoke can block"))
+    monkeypatch.setattr(uia, "refresh", lambda e: None)
+    posted = []
+    monkeypatch.setattr(
+        td.desktop, "native_act", lambda control, verb, value: posted.append(verb) or "invoked"
+    )
+    async with Client(build_server(Config())) as client:
+        done = (
+            await client.call_tool(
+                "ui", {"window": "app", "action": "invoke", "name": "Browse...", "verify_wait_s": 0}
+            )
+        ).structured_content
+    assert posted == ["invoke"] and done["done"] == "invoked"
+
+
+async def test_com_errors_become_plain_errors(monkeypatch):
+    monkeypatch.setattr(desktop, "IS_WINDOWS", True)
+    monkeypatch.setattr(uia, "_enter_apartment", lambda: None)
+    monkeypatch.setattr(uia, "_worker", None)
+
+    class COMError(Exception):
+        pass
+
+    def gone():
+        raise COMError(-2147220991, "The element is not available", None)
+
+    with pytest.raises(desktop.DesktopError, match="UI Automation: COMError"):
+        uia.call(gone)
+
+
 async def test_ui_falls_back_to_powershell(monkeypatch):
     _fake_window(monkeypatch)
 

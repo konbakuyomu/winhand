@@ -597,9 +597,17 @@ def register(mcp: FastMCP) -> None:
             if action != "click":
                 patterns = set(target.get("patterns") or ())
                 can = action == "focus" or patterns & _VERB_PATTERNS.get(action, set())
-                if target.get("_element") is not None and can:
+                if (
+                    target.get("native")
+                    and action in ("invoke", "toggle", "select")
+                    and target.get("type") in ("Button", "CheckBox", "RadioButton")
+                ):
+                    # a posted click: UI Automation's Invoke waits while the button's handler runs,
+                    # all the time a modal dialog it opens stays open
+                    done = desktop.native_act(target, action, value)
+                if not done and target.get("_element") is not None and can:
                     done = uia.act(target["_element"], action, value)
-                elif target.get("uia_index") is not None and can:
+                elif not done and target.get("uia_index") is not None and can:
                     done = _run_uia(
                         hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
                         ExpectId=",".join(map(str, target.get("_runtime_id", []))),

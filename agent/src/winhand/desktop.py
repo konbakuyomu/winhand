@@ -174,6 +174,14 @@ if IS_WINDOWS:
     user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
     user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
     user32.MonitorFromWindow.restype = wintypes.HMONITOR
+    user32.GetDpiForSystem.restype = wintypes.UINT
+    try:
+        shcore = ctypes.WinDLL("shcore")
+        shcore.GetDpiForMonitor.argtypes = [
+            wintypes.HMONITOR, ctypes.c_int, ctypes.POINTER(wintypes.UINT), ctypes.POINTER(wintypes.UINT)
+        ]  # fmt: skip
+    except (OSError, AttributeError):  # before Windows 8.1
+        shcore = None
 
 
 # ----------------------------------------------------------- desktop state
@@ -853,7 +861,7 @@ def _content_scale(hwnd) -> float:
             program_dpi = 96 if awareness == 0 else user32.GetDpiForSystem()
         x, y = wintypes.UINT(), wintypes.UINT()
         monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
-        if ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(x), ctypes.byref(y)) != 0:
+        if shcore is None or shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(x), ctypes.byref(y)) != 0:
             return 1.0  # MDT_EFFECTIVE_DPI
         return x.value / program_dpi if program_dpi else 1.0
     except (AttributeError, OSError):
