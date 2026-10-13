@@ -441,12 +441,9 @@ def _root(hwnd) -> int:
     return int(user32.GetAncestor(handle, 2) or handle)  # GA_ROOT
 
 
-def require_operable(hwnd, what: str) -> None:
-    """Refuse (nothing sent) to operate the window's program: winhand's own windows, programs
-    running as administrator, and - with approval on - terminals and programs the person has not
-    allowed (asking them first, see approvals.py). `what` describes the action for that dialog."""
-    root = _root(hwnd)
-    facts = _window_facts(root)
+def refuse_own(hwnd) -> dict:
+    """Refuse WinHand's own windows (never operated, whatever the approvals); the window's facts."""
+    facts = _window_facts(_root(hwnd))
     if is_own(facts["pid"], facts["process"]):
         from .approvals import NotOperable
 
@@ -454,6 +451,15 @@ def require_operable(hwnd, what: str) -> None:
             f"The window {facts['title'][:80]!r} is WinHand's own (its approval dialog, a confirmation it "
             "asked for, or its app): desktop tools never operate it; only the person at the machine answers it."
         )
+    return facts
+
+
+def require_operable(hwnd, what: str) -> None:
+    """Refuse (nothing sent) to operate the window's program: winhand's own windows, programs
+    running as administrator, and - with approval on - terminals and programs the person has not
+    allowed (asking them first, see approvals.py). `what` describes the action for that dialog."""
+    root = _root(hwnd)
+    facts = refuse_own(root)
     if is_elevated(facts["pid"]):
         raise admin_error(facts)
     from . import approvals

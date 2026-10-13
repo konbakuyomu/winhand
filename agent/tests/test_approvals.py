@@ -448,6 +448,7 @@ def _refusing(monkeypatch):
         raise NotOperable("The person refused to let the AI operate app.exe. Nothing was sent.")
 
     monkeypatch.setattr(desktop, "require_operable", refuse)
+    monkeypatch.setattr(desktop, "refuse_own", lambda hwnd: {})  # not WinHand's own window
     return asked
 
 
@@ -503,6 +504,19 @@ async def test_ui_asks_only_once_the_control_is_found(monkeypatch):
         unknown = (await client.call_tool("ui", {"window": "app", "action": "press"})).structured_content
     assert "no control matches" in missing["error"] and "action is one of" in unknown["error"]
     assert asked == []
+
+
+async def test_ui_refuses_winhands_own_window_before_looking_for_the_control(monkeypatch):
+    _window(monkeypatch, "winhand.exe", title="WinHand：AI 想操作一个程序")
+    monkeypatch.setattr(
+        desktop, "find_window", lambda _: {"hwnd": 5, "title": "WinHand", "process": "winhand.exe"}
+    )
+    monkeypatch.setattr(uia, "snapshot", lambda *a, **k: pytest.fail("its controls were read"))
+    async with Client(build_server(Config())) as client:
+        pressed = (
+            await client.call_tool("ui", {"window": "WinHand", "action": "invoke", "name": "一直允许"})
+        ).structured_content
+    assert "WinHand's own" in pressed["error"]
 
 
 async def test_reading_tools_never_ask(monkeypatch):

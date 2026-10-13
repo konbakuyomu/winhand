@@ -598,6 +598,8 @@ def register(mcp: FastMCP) -> None:
             if w.get("admin"):
                 raise desktop.admin_error(w)
             hwnd = w["hwnd"]
+            if action != "inspect":
+                desktop.refuse_own(hwnd)  # WinHand's own dialogs: no need to look for the control first
             snapshot = _inspect_controls(hwnd)
             elements = snapshot["elements"]
             if action == "inspect":

@@ -88,9 +88,9 @@ def _fake_window(monkeypatch, **extra):
     window = {"hwnd": 11, "title": "app", "process": "app.exe", "pid": 9, **extra}
     monkeypatch.setattr(td.desktop, "find_window", lambda _: window)
     monkeypatch.setattr(td.desktop, "native_controls", lambda hwnd: [])
-    monkeypatch.setattr(
-        td.desktop, "require_operable", lambda hwnd, what: None
-    )  # allowed (test_approvals.py)
+    # not WinHand's own window, and allowed (approvals are tested in test_approvals.py)
+    monkeypatch.setattr(td.desktop, "refuse_own", lambda hwnd: {})
+    monkeypatch.setattr(td.desktop, "require_operable", lambda hwnd, what: None)
     return window
 
 
