@@ -34,6 +34,7 @@ def _restrict(path: str) -> None:
         who = f"{domain}\\{user}" if domain else user
         done = subprocess.run(
             ["icacls", winenv.display_path(full), "/inheritance:r", "/grant:r", f"{who}:F"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             creationflags=subprocess.CREATE_NO_WINDOW,
             timeout=30,

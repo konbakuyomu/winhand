@@ -114,7 +114,12 @@ def _run_uia(hwnd: int, *, timeout_s: float = 60, **params: Any) -> dict:
             continue
         argv += [f"-{key}", str(value)]
     done = subprocess.run(
-        argv, capture_output=True, timeout=timeout_s, env=winenv.build_env(), creationflags=0x08000000
+        argv,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=timeout_s,
+        env=winenv.build_env(),
+        creationflags=0x08000000,
     )
     out = done.stdout.decode("utf-8-sig", errors="replace").strip()
     if done.returncode != 0 or not out.startswith("{"):

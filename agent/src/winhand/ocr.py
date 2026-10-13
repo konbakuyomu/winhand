@@ -225,7 +225,12 @@ def recognize(image, left: int, top: int, language: str | None = None) -> tuple[
             argv += ["-Languages", language]
         try:
             done = subprocess.run(
-                argv, capture_output=True, timeout=120, env=winenv.build_env(), creationflags=0x08000000
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=120,
+                env=winenv.build_env(),
+                creationflags=0x08000000,
             )
         except subprocess.TimeoutExpired:
             raise OcrError("Windows OCR did not finish within 120 s") from None

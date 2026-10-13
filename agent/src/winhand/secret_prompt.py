@@ -163,6 +163,10 @@ def _run_dialog(payload: str, timeout_s: float):
     try:
         proc = subprocess.run(
             _dialog_command(payload),
+            # never this process's own stdin: when another thread reads it (the desktop app's
+            # backend reads its requests there, `winhand stdio` its MCP messages), a Python child
+            # blocks at startup on the inherited pipe until that read ends, and no dialog appears
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout_s,
         )

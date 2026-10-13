@@ -557,7 +557,12 @@ def _run_rg(argv: list[str], max_results: int, budget_s: float) -> tuple[list[st
     Returns (lines, returncode or None when stopped early, stderr, timed_out)."""
     kwargs: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if winenv.IS_WINDOWS else {}
     proc = subprocess.Popen(
-        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=winenv.build_env(), **kwargs
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=winenv.build_env(),
+        **kwargs,
     )
     lines: list[str] = []
     errors: list[bytes] = []

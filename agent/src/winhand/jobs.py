@@ -105,7 +105,14 @@ def start(command: str, cwd: str | None = None, name: str | None = None, elevate
             f"$p = Start-Process -FilePath '{shell}' -ArgumentList '{quoted}' -Verb RunAs -WindowStyle Hidden -PassThru; "
             "$p.Id",
         ]  # fmt: skip
-        done = subprocess.run(launcher, capture_output=True, timeout=300, env=env, creationflags=0x08000000)
+        done = subprocess.run(
+            launcher,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=300,
+            env=env,
+            creationflags=0x08000000,
+        )
         output = done.stdout.decode("utf-8", errors="replace").strip()
         if done.returncode != 0 or not output.isdigit():
             error = done.stderr.decode("utf-8", errors="replace")
