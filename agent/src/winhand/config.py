@@ -74,6 +74,8 @@ class ServerEntry:
     idle_stop_minutes: float = 0.0  # 0 = keep it running once started
     description: str = ""
     call_timeout_s: float = 0.0  # 0 = no limit; otherwise a tool call is cancelled after this long
+    # `uv run` servers: rebuild a project environment whose Python was removed (see venv_repair.py)
+    repair_env: bool = True
 
     @property
     def kind(self) -> str:
@@ -107,6 +109,7 @@ def entry_from_dict(name: str, entry: dict) -> ServerEntry:
         idle_stop_minutes=float(entry.get("idle_stop_minutes") or 0),
         description=str(entry.get("description") or ""),
         call_timeout_s=float(entry.get("call_timeout_s") or 0),
+        repair_env=entry.get("repair_env", True) is not False,
     )
 
 
@@ -221,6 +224,8 @@ def save(cfg: Config, path: Path | None = None) -> Path:
             lines.append(f"idle_stop_minutes = {_toml_value(s.idle_stop_minutes)}")
         if s.call_timeout_s:
             lines.append(f"call_timeout_s = {_toml_value(s.call_timeout_s)}")
+        if not s.repair_env:
+            lines.append("repair_env = false")
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
     return path

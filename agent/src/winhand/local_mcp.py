@@ -25,6 +25,7 @@ from .config import ServerEntry
 CACHE_FILE = "mcp-tools.json"
 INSTRUCTIONS_CHARS = 300
 TOOL_LINE_CHARS = 150
+MIN_TOOL_CHARS = 40  # what a tool's line keeps of its description when room is short
 ANSWER_WITHIN_S = 40.0  # clients abandon a tool call after ~60 s (see session/wait.py)
 KEEP_UNCLAIMED_S = 600.0  # a finished call nobody came back for is dropped after this
 _lock = threading.Lock()
@@ -370,9 +371,16 @@ def overview() -> list[dict]:
     return out
 
 
+def _cut(line: str, limit: int) -> str:
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
 def session_text(budget: int) -> str:
     """The tools part of a cloud session's start: every enabled server and its tools, one line each.
-    Masked before it is measured, so the budget holds for what is sent."""
+    When not everything fits, every description is cut to one common length (at least
+    MIN_TOOL_CHARS), so each tool keeps a line of its own; past that, the last servers are listed by
+    tool names only, then left out. Masked before it is measured, so the budget holds for what is
+    sent."""
     from .session_bridge import _size
 
     mask = _masker()
@@ -383,32 +391,76 @@ def session_text(budget: int) -> str:
     rows = _rows()
     if not rows:
         return head + "\n(none are enabled in winhand)"
-    parts = [head]
-    used = _size(head)
-    cut = 0
+    servers = []  # (name, listed, first line of its instructions, [(tool, first line of its description)])
     for entry, item in rows:
         name = mask(entry.name)
         if item is None:
-            block = short = f'## {name}\n(not listed yet: mcp_tools("{name}") starts it and lists its tools)'
+            servers.append((name, False, "", []))
         else:
-            tools = [
-                (mask(t["name"]), _first_line(mask(t["description"]), TOOL_LINE_CHARS)) for t in item["tools"]
-            ]
-            lines = [f"## {name}"]
-            if item["instructions"]:
-                lines.append(_first_line(mask(item["instructions"]), INSTRUCTIONS_CHARS))
-            lines += [f"- {tool}: {line}" if line else f"- {tool}" for tool, line in tools]
-            block = "\n".join(lines)
-            short = f"## {name}\n" + (", ".join(tool for tool, _ in tools) or "(no tools)")
-        if used + _size(block) + 2 > budget - 80:
-            if used + _size(short) + 2 > budget - 80:
-                cut += 1
-                continue
-            block = short
-        parts.append(block)
-        used += _size(block) + 2
-    if cut:
-        parts.append(f"{cut} more server(s) left out for lack of room; mcp_tools() lists them all.")
+            instructions = _first_line(mask(item["instructions"]), 1 << 30) if item["instructions"] else ""
+            tools = [(mask(t["name"]), _first_line(mask(t["description"]), 1 << 30)) for t in item["tools"]]
+            servers.append((name, True, instructions, tools))
+
+    def block(server, cap: int | None) -> str:
+        """cap None: tool names only."""
+        name, listed, instructions, tools = server
+        if not listed:
+            return f'## {name}\n(not listed yet: mcp_tools("{name}") starts it and lists its tools)'
+        if cap is None:
+            return f"## {name}\n" + (", ".join(tool for tool, _ in tools) or "(no tools)")
+        lines = [f"## {name}"]
+        if instructions:
+            lines.append(_cut(instructions, min(INSTRUCTIONS_CHARS, 2 * cap)))
+        lines += [f"- {tool}: {_cut(line, cap)}" if line else f"- {tool}" for tool, line in tools] or [
+            "(no tools)"
+        ]
+        return "\n".join(lines)
+
+    room = budget - 80  # the line saying how many were left out still fits
+
+    def fits(blocks: list[str]) -> bool:
+        return _size(head) + sum(_size(b) + 2 for b in blocks) <= room
+
+    def render(cap: int, described: int, shown: int) -> list[str]:
+        return [block(s, cap if i < described else None) for i, s in enumerate(servers[:shown])]
+
+    n = len(servers)
+    blocks = render(TOOL_LINE_CHARS, n, n)
+    if not fits(blocks):
+        low, high = MIN_TOOL_CHARS, TOOL_LINE_CHARS  # the longest common cap that fits
+        while low < high:
+            mid = (low + high + 1) // 2
+            if fits(render(mid, n, n)):
+                low = mid
+            else:
+                high = mid - 1
+        blocks = render(low, n, n)
+        if not fits(blocks):
+            # as many servers as fit, the last ones by tool names only; as many of them described as fit.
+            # Sizes are summed, not rendered again for each try: many servers stay quick
+            described_size = [_size(block(s, MIN_TOOL_CHARS)) + 2 for s in servers]
+            named_size = [_size(block(s, None)) + 2 for s in servers]
+            space = room - _size(head)
+            best = (0, 0)
+            for shown in range(n, -1, -1):
+                total = sum(named_size[:shown])
+                if total > space:
+                    continue  # even by names only these do not fit: one server fewer
+                described = 0  # a described block is never smaller than the names-only one
+                while (
+                    described < shown and total + described_size[described] - named_size[described] <= space
+                ):
+                    total += described_size[described] - named_size[described]
+                    described += 1
+                best = (described, shown)
+                break
+            described, shown = best
+            blocks = render(MIN_TOOL_CHARS, described, shown)
+    parts = [head, *blocks]
+    if len(blocks) < n:
+        parts.append(
+            f"{n - len(blocks)} more server(s) left out for lack of room; mcp_tools() lists them all."
+        )
     text = "\n\n".join(parts)
     while _size(text) > budget:  # only a single enormous name gets here
         text = text[: -max(1, (_size(text) - budget + 1) // 2)]

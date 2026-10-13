@@ -124,3 +124,33 @@ A1–A8 全部通过，没有遗留的阻断或应修问题。剩下的是真机
 1. 用户同意后填充本机 MCP 工具清单缓存；
 2. 新开云端会话，看到三段开场内容；
 3. 实际 `mcp_call` 一个只读的工具。
+
+## 真机验收（0.4.8，2026-10-13）
+
+**准备**
+- 0.4.8 由 PR #10 合并（8a654df），`v0.4.8` 标签从用户电脑推送，release run 38294091504 成功；用户电脑已更新到 0.4.8。
+- 填充工具清单缓存时，eshop-mcp、fast-context 用应用的测试按钮成功列出。
+- freecad-mcp、pyocd-debug、usb-camera-mcp 启动失败（“No Python at …\mise\installs\python\3.12.14\python.exe”）。原因在用户电脑上，不是 winhand 的问题：
+  - 三个项目的 `.venv` 指向 mise 的 Python 3.12.14；
+  - mise 10 月 5 日装了 3.12.15，10 月 8 日删掉了 3.12.14。
+- 经用户同意的处理：
+  - 在三个项目里用 uv 自己的 Python 3.12 按锁文件重建 `.venv`（`uv sync --locked --managed-python --python 3.12`）。新环境指向 uv 的 `cpython-3.12-…` 目录联接，小版本升级后仍然有效；
+  - 再用 `mcp_tools(server)` 启动并列出：freecad-mcp 14 个工具，pyocd-debug 55 个，usb-camera-mcp 5 个。
+- 测试仓库 winhand-cloud-test 用 `winhand bridge init --write` 换成三段 hook 并推送（a274160）。
+
+**云端会话结果**（新会话，用户转述）
+- 开场有三段来自 MSI 的内容：
+  - 规矩：全局 `~/.codex/AGENTS.md`、`~/.claude/rules/comet-workflow-guard.md`；
+  - 技能清单：带描述，3 个只在点名时使用的技能单独列出；
+  - 本机 MCP 服务清单：5 个服务。
+- 随机挑的 5 个技能都给出了与 SKILL.md 一致的描述。
+- 本机 MCP：
+  - eshop-mcp、fast-context、freecad-mcp、usb-camera-mcp 的工具带一句说明；
+  - pyocd-debug（55 个工具）在开场里只有工具名，原因是放不下整块。会话里的 AI 按名字推测了它的说明。
+- `mcp_call("usb-camera-mcp", "camera_status", {})` 调用成功，返回配置（ffmpeg / dshow、设备 0、640×480 mjpeg）和空闲状态，没有打开摄像头。
+
+结论：A1、A3、A5、A7 在真机上成立。遗留一项改进：工具多的服务在开场里只有名字。
+
+## 归档
+
+用户接受了 0.4.8 的真机结果（2026-10-13），并要求接着做两项改进：开场里每个工具都带说明；本机 MCP 服务的虚拟环境坏了时 winhand 自己发现并修好。两项由 change `local-mcp-reliability` 负责。现行规格发布到 `docs/comet/specs/local-skills-tools/spec.md`。

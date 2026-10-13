@@ -326,6 +326,7 @@ class Backend:
                     "startup_timeout_s": entry.startup_timeout_s,
                     "idle_stop_minutes": entry.idle_stop_minutes,
                     "call_timeout_s": entry.call_timeout_s,
+                    "repair_env": entry.repair_env,
                     "public_url": f"{base}/{entry.name}" if base else None,
                     "status": status.get(entry.name, {}),
                 }
@@ -388,6 +389,7 @@ class Backend:
             description=str(data.get("description") or ""),
             # the app does not edit this yet: keep what config.toml says
             call_timeout_s=float(data.get("call_timeout_s", old.call_timeout_s) or 0),
+            repair_env=data.get("repair_env", old.repair_env) is not False,  # not edited by the app either
         )
         if original:
             self.cfg.servers = [entry if e.name == original else e for e in self.cfg.servers]

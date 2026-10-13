@@ -169,8 +169,10 @@ async def test_local_mcp_servers_are_managed_from_the_app(tmp_path):
             "command": sys.executable,
             "args": ["-u", fake],
             "env": {"API_KEY": "s3cret", "LEVEL": "1"},
+            "repair_env": False,
         }
         state = (await backend.call("mcp_save", entry=entry))["result"]
+        entry.pop("repair_env")  # the app's dialog does not send it: the stored value stays
         (saved,) = state["servers"]
         assert saved["public_url"] == "https://relay.example/mcp/fake"
         assert saved["env"] == {"API_KEY": "••••••••", "LEVEL": "1"}  # secrets never reach the app
@@ -180,6 +182,7 @@ async def test_local_mcp_servers_are_managed_from_the_app(tmp_path):
         await backend.call("mcp_save", entry=entry, original_name="fake")
         stored = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
         assert stored["mcp_servers"]["fake"]["env"] == {"API_KEY": "s3cret", "LEVEL": "1"}
+        assert stored["mcp_servers"]["fake"]["repair_env"] is False
         assert stored["relay"]["device_token"] == "tok"
 
         bad = await backend.call("mcp_save", entry={**entry, "name": "has space"})
