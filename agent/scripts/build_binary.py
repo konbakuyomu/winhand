@@ -218,6 +218,9 @@ def smoke(executable: Path, run_dir: Path, version: str) -> list[str]:
     if "gdb" not in cli("profiles"):
         raise RuntimeError("built-in profiles are missing from the bundle")
     checks.append("profiles")
+    if "desktop-apps.toml" not in cli("apps"):
+        raise RuntimeError("`winhand apps` does not list the desktop program approvals")
+    checks.append("apps")
     doctor = json.loads(cli("doctor"))
     checks.append("doctor")
     if IS_WINDOWS:

@@ -115,6 +115,7 @@ public sealed partial class MainWindow : Window
         _backendVersion = Json.Str(snapshot, "version");
         _sessions = Json.Arr(snapshot, "sessions").ToList();
         ApplyMcp(Json.Obj(snapshot, "mcp"));
+        ApplyApps(Json.Obj(snapshot, "apps"));
         LoadActivity(Json.Arr(snapshot, "activity"));
         RenderSessions();
         RenderSettings();
@@ -139,6 +140,9 @@ public sealed partial class MainWindow : Window
                 break;
             case "mcp":
                 ApplyMcp(e.Data);
+                break;
+            case "apps":
+                ApplyApps(e.Data);
                 break;
         }
     }
@@ -217,6 +221,8 @@ public sealed partial class MainWindow : Window
         _currentPage = page;
         PageTitle.Text = page switch { "activity" => "活动", "sessions" => "会话", "mcp" => "MCP 服务", "settings" => "设置", _ => "概览" };
         PageHost.Content = _pages[page];
+        if (page == "settings")
+            _ = RefreshAppsAsync(); // `winhand apps` or an edited file changes them without an event
         if (!fromNavigation)
             RootNavigation.SelectedItem = RootNavigation.MenuItems.OfType<NavigationViewItem>().First(i => (string)i.Tag == page);
     }

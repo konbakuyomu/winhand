@@ -368,6 +368,67 @@ def rules_for(path: str | None) -> dict:
 
 # ------------------------------------------------------------------------- the middleware
 
+APPROVALS_REFUSAL = (
+    "refused: this file holds which programs the AI may operate on the desktop, and only the person at "
+    "the machine changes it (WinHand's approval dialog, its settings page 程序授权, or `winhand apps`). "
+    "Ask them in the conversation."
+)
+
+
+def _is_link(path: str) -> bool:
+    return os.path.islink(path) or os.path.isjunction(path)  # junctions are not symlinks to Python
+
+
+def _link_chain(path, limit: int = 40) -> set[str]:
+    """Every spelling a file is reached through: walking its path one part at a time, each link met
+    (a folder or the file, a symlink or a junction) is followed and the path through its target
+    noted, so the place of every link on the way stays protected, nested ones included."""
+    places = {os.path.normcase(os.path.realpath(path))}
+    todo = [os.path.abspath(variants(str(path))[0])]  # a home given as \\?\C:\... too
+    hops = 0
+    while todo and hops < limit:
+        full = todo.pop()
+        places.add(os.path.normcase(full))
+        drive, tail = os.path.splitdrive(full)
+        parts = [part for part in tail.replace(os.altsep or os.sep, os.sep).split(os.sep) if part]
+        here = drive + os.sep
+        for index, part in enumerate(parts):
+            here = os.path.join(here, part)
+            if not _is_link(here):
+                continue
+            hops += 1
+            try:
+                target = variants(os.readlink(here))[0]  # without a \\?\ prefix, like other paths
+            except (OSError, ValueError):
+                break
+            todo.append(os.path.abspath(os.path.join(os.path.dirname(here), target, *parts[index + 1 :])))
+            break
+    return places
+
+
+def touches_approvals(actions: list[Action], mkdir: bool = False) -> bool:
+    """Whether a file tool would write, edit, move or delete the desktop approvals file
+    (approvals.py), or write (a folder copied over it), move or delete a folder holding it: built in,
+    whatever the owner's rules say. Creating a folder (`mkdir`) changes nothing in one."""
+    from . import approvals
+
+    targets = _link_chain(approvals.path())
+    for action in actions:
+        if action.kind not in ("write", "edit", "delete", "move"):
+            continue
+        for given in action.paths:
+            for path in variants(given):  # \\?\ prefixes, ::$DATA, short names, junctions
+                try:
+                    full = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+                except (TypeError, ValueError):
+                    continue
+                folder = full.rstrip("\\/") + os.sep
+                inside = action.kind != "edit" and not mkdir and any(t.startswith(folder) for t in targets)
+                if full in targets or inside:
+                    return True
+    return False
+
+
 _OWNER = "This limit is the machine owner's rule: do not try to get around it another way; tell the person if it blocks the task."
 
 
@@ -689,6 +750,10 @@ class GuardActions(Middleware):
 
         if not actions:
             return await call_next(context)
+        arguments = getattr(context.message, "arguments", None) or {}
+        mkdir = getattr(context.message, "name", "") == "fs_op" and arguments.get("action") == "mkdir"
+        if await asyncio.to_thread(touches_approvals, actions, mkdir):  # resolves links: not on the loop
+            return ToolResult(content=[TextContent(type="text", text=APPROVALS_REFUSAL)], is_error=True)
         verdict = await asyncio.to_thread(judge, actions, cache)
         if verdict.decision != "deny":
             await self._hooks(context, actions, verdict)

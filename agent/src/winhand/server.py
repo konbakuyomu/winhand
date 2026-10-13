@@ -116,6 +116,16 @@ Quick rules
   A locked screen, a UAC prompt or a disconnected session cannot be seen or operated, and Windows
   drops clicks and keys to programs running as administrator (window list: admin=true): the
   error says which; screenshots and ocr can still read admin windows. Tell the person what to do.
+  Program approval: before the AI first clicks, types into or operates a program (input, ui
+  actions other than inspect/wait, ocr clicks, window focus/close/move ...), a dialog on the machine
+  asks the person: allow until winhand restarts, always allow, or refuse. A call waits up to ~40 s
+  for the answer; without one it returns "waiting" (the dialog stays open 2 minutes: call again
+  later). After a refusal that program is refused for 10 minutes without asking: ask the person in
+  the conversation instead of retrying. window(action='list') shows each window's `approval`
+  (always | session | denied | terminal | ask | winhand). Terminals (console windows, Windows
+  Terminal, PuTTY ...) are refused: use run or a session, where the guard rules apply. WinHand's own
+  windows (its dialogs, its app) are never operated. Reading (screenshot, ocr read, ui inspect) is
+  never asked about.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
   follow it with job_status(id, wait_s=40).
@@ -168,7 +178,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   prefer its own CLI/API, then ui (controls and menus by name), then keys; without controls (canvases,
   self-drawn apps) ocr(action='click', text=...) finds text on screen; input pixel clicks come last.
   screenshot(wait='change' | 'stable') waits for the screen instead of sleeping. A locked screen or an
-  administrator program's window cannot be operated: the error says so; tell the person.
+  administrator program's window cannot be operated: the error says so; tell the person. The first
+  click, key or ui action on a program waits for the person's OK in a dialog there (window list:
+  `approval`); terminals are not typed into: use run or a session.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts winhand, elevated=true for admin tasks); follow it with job_status(id, wait_s=40).
 - Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the

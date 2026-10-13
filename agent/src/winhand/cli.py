@@ -5,6 +5,7 @@ winhand http [--port 8765]    serve MCP over streamable HTTP on localhost
 winhand connect               connect out to the relay so claude.ai can reach this machine
 winhand mcp list|import|test  local MCP servers offered at <relay>/mcp/<name>
 winhand bridge init|token     cloud Claude Code sessions start with this machine's rules
+winhand apps [allow|revoke X|on|off] programs the AI may operate on the desktop (clicks, keys, controls)
 winhand doctor                print what winhand sees on this machine
 winhand profiles              list session profiles
 """
@@ -63,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
     bridge.add_argument(
         "--write", metavar="REPO", help="init: merge the hook into REPO/.claude/settings.json"
     )
+    apps = sub.add_parser("apps", help="programs the AI may operate on the desktop")
+    apps.add_argument("action", nargs="?", choices=["list", "allow", "revoke", "on", "off"], default="list")
+    apps.add_argument("exe", nargs="?", help="the program's file name, e.g. notepad.exe")
     sub.add_parser("doctor", help="show environment diagnostics")
     sub.add_parser("profiles", help="list session profiles")
     sub.add_parser("desktop-backend", help="engine for the tray app (JSON lines over stdio)")
@@ -169,6 +173,14 @@ def main(argv: list[str] | None = None) -> int:
             print()
         print(session_bridge.setup_text(origin))
         return 0
+    if cmd == "apps":
+        from .approvals import FileBroken
+
+        try:
+            return _apps(args.action, args.exe)
+        except FileBroken as exc:
+            print(f"winhand apps {args.action}: {exc}", file=sys.stderr)
+            return 1
     if cmd == "doctor":
         from . import config, proc
 
@@ -203,6 +215,67 @@ def main(argv: list[str] | None = None) -> int:
         return dialog_main(args.payload)
     parser.print_help()
     return 1
+
+
+def _apps(action: str, exe: str | None) -> int:
+    from . import approvals
+
+    if action == "list":
+        state = approvals.snapshot()
+        print(f"程序授权：{'开启' if state['enabled'] else '关闭'}（winhand apps on | off）")
+        print(f"授权文件：{state['file']}")
+        if state.get("error"):
+            print(f"  文件有错：{state['error']}")
+        print("一直允许：" + (", ".join(e["exe"] for e in state["always"]) or "（无）"))
+        print("终端（所有控制台窗口，以及下列程序；不在一直允许里时拒绝）：" + ", ".join(state["terminals"]))
+        return 0
+    if action == "on":
+        approvals.set_enabled(True)
+        print("程序授权：已开启。AI 第一次操作一个程序前会先问你。")
+        return 0
+    if not exe and action != "off":
+        print(f"winhand apps {action}: give the program's file name, e.g. notepad.exe", file=sys.stderr)
+        return 2
+    if action == "revoke":
+        try:
+            print(f"已撤销：{approvals.revoke(exe)}")
+        except ValueError as exc:
+            print(f"winhand apps revoke: {exc}", file=sys.stderr)
+            return 2
+        return 0
+    from .secret_prompt import PromptUnavailable, ask_confirm
+
+    if approvals.file_error():  # it would not be saved: say so before asking the person
+        raise approvals.FileBroken(f"fix or remove the approvals file first: {approvals.file_error()}")
+    if action == "off":
+        question = (
+            "确定关闭程序授权吗？\n\n关闭后，AI 点击、输入、操作任何程序前都不再先问你"
+            "（WinHand 自己的窗口和管理员窗口仍然不能操作）。\n随时可以用 winhand apps on 或在设置页重新开启。"
+        )
+    else:
+        try:
+            key = approvals.normalize(exe)
+        except ValueError as exc:
+            print(f"winhand apps allow: {exc}", file=sys.stderr)
+            return 2
+        question = (
+            f"确定让 AI 一直可以操作 {key} 吗？\n\n它将可以点击、输入、操作这个程序的控件和窗口，不再先问你。"
+            "\n随时可以在 WinHand 的设置页或用 winhand apps revoke 撤销。"
+        )
+    try:
+        yes = ask_confirm("WinHand：程序授权", question)
+    except PromptUnavailable as exc:
+        print(f"no answer in the confirmation dialog: {exc}", file=sys.stderr)
+        return 1
+    if not yes:
+        print("没有改动（确认框里选了“否”）")
+        return 1
+    if action == "off":
+        approvals.set_enabled(False)
+        print("程序授权：已关闭。")
+        return 0
+    print(f"已允许：{approvals.allow_always(key)}")
+    return 0
 
 
 if __name__ == "__main__":

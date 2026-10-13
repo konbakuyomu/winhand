@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +29,17 @@ from winhand.session import SessionSpec, wait_for
 pytestmark = [
     pytest.mark.skipif(sys.platform != "win32", reason="Windows-only scenarios"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _approval_off():
+    """The desktop scenarios operate test windows with nobody there to answer the approval dialog;
+    the approval scenarios at the end turn it back on (and test_approvals.py covers the rest)."""
+    from winhand import approvals
+
+    approvals.set_enabled(False)
+    yield
+    approvals.forget_session()
 
 
 def need(tool: str) -> str:
@@ -811,3 +823,133 @@ def test_background_job_reports_output_and_exit_code():
         time.sleep(0.25)
     assert status["state"] == "finished" and status["exit_code"] == 3, status
     assert "你好 job" in status["output"]
+
+
+# ------------------------------------------------------------------ program approval
+
+
+async def test_approval_is_asked_once_and_a_refusal_sends_nothing(test_form, monkeypatch):
+    from fastmcp import Client
+
+    from winhand import approvals, desktop
+
+    approvals.set_enabled(True)
+    answers, asked = ["deny", "session"], []
+
+    def person(app, action, warning):
+        asked.append((app.exe, action, warning))
+        return answers.pop(0)
+
+    monkeypatch.setattr(approvals, "_ask_person", person)
+    async with Client(build_server(Config())) as client:
+
+        async def ui(**arguments):
+            return (
+                await client.call_tool("ui", {"window": "winhand-ui-test", **arguments})
+            ).structured_content
+
+        listed = await ui()  # reading is never asked about
+        assert listed["elements"] and asked == []
+        refused = await ui(action="invoke", name="Press me")
+        assert "refused" in refused["error"], refused
+        again = await ui(action="invoke", name="Press me")
+        assert "a short while ago" in again["error"] and len(asked) == 1, again
+        time.sleep(0.5)
+        assert desktop.find_window(test_form["hwnd"])["title"] == "winhand-ui-test"
+        approvals.forget_session()  # as after the ten minutes
+        done = await ui(action="invoke", name="Press me")
+        assert "error" not in done, done
+        time.sleep(0.5)
+        assert desktop.find_window(test_form["hwnd"])["title"].startswith("winhand-ui-test pressed")
+        windows = (await client.call_tool("window", {})).structured_content["windows"]
+    assert asked[0][:2] == ("powershell.exe", "控件操作：invoke「Press me」"), asked
+    assert "终端窗口" in asked[0][2]  # a PowerShell script's form is not a terminal, but allowing it ...
+    form = next(w for w in windows if w["hwnd"] == test_form["hwnd"])
+    assert form["approval"] == "session", form
+
+
+def test_console_windows_are_refused_without_asking(monkeypatch):
+    from winhand import approvals, desktop
+
+    approvals.set_enabled(True)
+    monkeypatch.setattr(approvals, "_ask_person", lambda *a: pytest.fail("a terminal was asked about"))
+    proc = subprocess.Popen(
+        ["cmd.exe", "/k", "title winhand-console-test"], creationflags=subprocess.CREATE_NEW_CONSOLE
+    )
+    try:
+        for _ in range(60):
+            try:
+                window = desktop.find_window("winhand-console-test")
+                break
+            except desktop.DesktopError:
+                time.sleep(0.25)
+        else:
+            pytest.fail("the console window did not appear")
+        entry = next(w for w in desktop.windows() if w["hwnd"] == window["hwnd"])
+        assert entry["approval"] == "terminal", entry
+        with pytest.raises(approvals.NotOperable, match="run or a session"):
+            desktop.window_action(window["hwnd"], "close")
+        with pytest.raises(approvals.NotOperable, match="run or a session"):
+            desktop.require_operable(window["hwnd"], "按键 enter")
+        approvals.allow_always(entry["process"])
+        desktop.require_operable(window["hwnd"], "按键 enter")  # the person allowed this terminal
+    finally:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+
+
+async def test_winhands_own_dialog_cannot_be_operated():
+    import psutil
+    from fastmcp import Client
+
+    from winhand import approvals, desktop, secret_prompt
+
+    approvals.set_enabled(True)
+    outcome: dict = {}
+
+    def ask():
+        try:
+            outcome["answer"] = secret_prompt.ask_approval(
+                "记事本", "notepad.exe", "无标题", "点击 (1, 2)", timeout_s=60
+            )
+        except secret_prompt.PromptUnavailable as exc:
+            outcome["error"] = str(exc)
+
+    asking = threading.Thread(target=ask, daemon=True)
+    asking.start()
+    entry = None
+    try:
+        for _ in range(120):
+            entry = next((w for w in desktop.windows() if w["title"] == "WinHand：AI 想操作一个程序"), None)
+            if entry or not asking.is_alive():
+                break
+            time.sleep(0.25)
+        if entry is None:
+            if "cannot open a dialog" in outcome.get("error", ""):
+                pytest.skip(f"no dialogs on this machine: {outcome}")
+            pytest.fail(f"the approval dialog did not appear: {outcome}")
+        assert entry["approval"] == "winhand", entry
+        for on in (True, False):  # even with asking turned off
+            approvals.set_enabled(on)
+            with pytest.raises(approvals.NotOperable, match="WinHand's own"):
+                desktop.window_action(entry["hwnd"], "close")
+            with pytest.raises(approvals.NotOperable, match="WinHand's own"):
+                desktop.require_operable(entry["hwnd"], "按键 enter")
+        async with Client(build_server(Config())) as client:
+            pressed = (
+                await client.call_tool(
+                    "ui", {"window": entry["hwnd"], "action": "invoke", "name": "一直允许"}
+                )
+            ).structured_content
+        assert "WinHand's own" in pressed["error"], pressed
+        if desktop.user32.GetForegroundWindow() == entry["hwnd"]:
+            with pytest.raises(approvals.NotOperable, match="WinHand's own"):
+                desktop.input_action("keys", keys="enter")
+        assert asking.is_alive() and "answer" not in outcome  # nobody answered it for the person
+    finally:
+        if entry is not None:
+            try:
+                psutil.Process(entry["pid"]).kill()
+            except psutil.Error:
+                pass
+        asking.join(15)
+    assert approvals.status("notepad.exe") == "ask"

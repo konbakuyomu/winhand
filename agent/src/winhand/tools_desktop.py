@@ -22,7 +22,7 @@ from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import coalesce, desktop, jobs, media, proc, transfer, uia, winenv
+from . import approvals, coalesce, desktop, jobs, media, proc, transfer, uia, winenv
 from . import ocr as screen_text
 from .secret_prompt import PromptUnavailable, ask_pick
 
@@ -67,9 +67,24 @@ def media_result(facts: dict, *blocks) -> ToolResult:
     return ToolResult(content=content, structured_content=facts)
 
 
+_UI_ACTIONS = (
+    "inspect",
+    "invoke",
+    "click",
+    "toggle",
+    "select",
+    "expand",
+    "collapse",
+    "set_value",
+    "focus",
+    "wait",
+)
+
+
 def _errors(fn, *args, **kwargs):
     try:
-        return fn(*args, **kwargs)
+        with approvals.one_call():  # every approval this call waits for shares one ~40 s
+            return fn(*args, **kwargs)
     except (
         desktop.DesktopError,
         media.MediaError,
@@ -575,12 +590,16 @@ def register(mcp: FastMCP) -> None:
         e.g. an installer's Next button becoming enabled."""
 
         def work():
+            if action not in _UI_ACTIONS:
+                raise desktop.DesktopError("action is one of " + ", ".join(_UI_ACTIONS))
             if action == "wait":
                 return wait_control(window, name, automation_id, control_type, state, timeout_s)
             w = desktop.find_window(window)
             if w.get("admin"):
                 raise desktop.admin_error(w)
             hwnd = w["hwnd"]
+            if action != "inspect":
+                desktop.refuse_own(hwnd)  # WinHand's own dialogs: no need to look for the control first
             snapshot = _inspect_controls(hwnd)
             elements = snapshot["elements"]
             if action == "inspect":
@@ -612,6 +631,11 @@ def register(mcp: FastMCP) -> None:
             target = found[index]
             if target.get("enabled") is False:
                 raise desktop.DesktopError(f"the control is disabled right now: {_public(target)}")
+            # operating the program: the person's approval first (approvals.py), once the control is known
+            which = target.get("name") or name or automation_id or control_type or ""
+            desktop.require_operable(
+                hwnd, f"控件操作：{action}「{which}」" if which else f"控件操作：{action}"
+            )
             done = None
             if action != "click":
                 patterns = set(target.get("patterns") or ())
@@ -660,6 +684,8 @@ def register(mcp: FastMCP) -> None:
                 cx, cy = left + width // 2, top + height // 2
                 try:
                     desktop.window_action(hwnd, "focus")
+                except approvals.NotOperable:
+                    raise
                 except desktop.DesktopError:
                     pass  # the control may be visible anyway (topmost, or already in front)
                 desktop.input_action("click", cx, cy, coordinates="screen")
