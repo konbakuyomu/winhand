@@ -24,6 +24,14 @@ from .test_mcp_bridge import fake_entry
 UV = shutil.which("uv")
 needs_uv = pytest.mark.skipif(UV is None, reason="uv is needed")
 
+
+@pytest.fixture(autouse=True)
+def _no_uv_settings_of_this_shell(monkeypatch):
+    """The developer's own UV_* settings must not change which environment a test's server uses."""
+    for name in ("UV_PROJECT_ENVIRONMENT", "UV_PROJECT", "UV_WORKING_DIR", "UV_NO_PROJECT", "UV_ISOLATED"):
+        monkeypatch.delenv(name, raising=False)
+
+
 # name and description lengths of the tools on the machine this was reported on (2026-10-13)
 MSI = {
     "eshop-mcp": (
@@ -543,13 +551,55 @@ def test_a_folder_that_cannot_be_read_is_not_taken_for_gone(tmp_path, monkeypatc
     assert venv_repair.missing_python(str(venv)) is None
 
 
-def test_workspace_members_ignore_case_on_windows(tmp_path, monkeypatch):
+def test_workspace_members_match_case_as_uv_does(tmp_path, monkeypatch):
     root = tmp_path / "WS"
     root.mkdir()
     (root / "pyproject.toml").write_text("[tool.uv.workspace]\nmembers = ['packages/*']\n", encoding="utf-8")
-    member = project_at(root / "Packages" / "Srv")
+    other_case = project_at(root / "Packages" / "Srv")
+    same_case = project_at(root / "packages" / "srv")
+    monkeypatch.setattr(venv_repair.winenv, "IS_WINDOWS", True)  # uv's glob ignores no case there either
+    assert venv_repair._workspace_root(other_case) == other_case
+    assert venv_repair._workspace_root(same_case) == str(root)
+
+
+def test_an_enclosing_project_that_is_no_workspace_ends_the_search(tmp_path):
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    (outer / "pyproject.toml").write_text("[tool.uv.workspace]\nmembers = ['mid/*']\n", encoding="utf-8")
+    project_at(outer / "mid")  # a project of its own, not a workspace
+    inner = project_at(outer / "mid" / "inner")
+    assert venv_repair._workspace_root(inner) == inner
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX links")
+def test_a_linked_project_is_taken_as_written_like_uv_does(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "pyproject.toml").write_text("[tool.uv.workspace]\nmembers = ['m']\n", encoding="utf-8")
+    project_at(ws / "m")
+    (tmp_path / "links").mkdir()
+    os.symlink(ws / "m", tmp_path / "links" / "m")
+    by_project = venv_repair.uv_project(entry("--project", str(tmp_path / "links" / "m"), "run", "x"))
+    assert by_project.venv == str(tmp_path / "links" / "m" / ".venv")  # uv does not resolve --project
+    by_directory = venv_repair.uv_project(entry("--directory", str(tmp_path / "links" / "m"), "run", "x"))
+    assert by_directory.venv == str(ws / ".venv")  # but its current directory is the real one
+
+
+def test_odd_home_values_are_not_taken_for_gone(tmp_path, monkeypatch):
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text("home = C:\\gone\x00\n", encoding="utf-8")
+    assert venv_repair.missing_python(str(venv)) is None  # a NUL in the path
+    (venv / "pyvenv.cfg").write_text(f"home = {tmp_path / 'share'}\n", encoding="utf-8")
     monkeypatch.setattr(venv_repair.winenv, "IS_WINDOWS", True)
-    assert venv_repair._workspace_root(member) == str(root)
+
+    def offline(path):
+        error = FileNotFoundError(2, "The network path was not found", str(path))
+        error.winerror = 53
+        raise error
+
+    monkeypatch.setattr(venv_repair.os, "listdir", offline)
+    assert venv_repair.missing_python(str(venv)) is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the doubled output only happened on POSIX")

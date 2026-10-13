@@ -110,6 +110,7 @@ NO_PROJECT = (
 NO_PROJECT_GLOBAL = ("--isolated", "--no-project")  # also accepted before `run`
 NO_PROJECT_ENV = ("UV_NO_PROJECT", "UV_ISOLATED")
 LOCK_FLAGS = ("--locked", "--frozen")
+_UNREACHABLE = (15, 53, 67)  # ERROR_INVALID_DRIVE, ERROR_BAD_NETPATH, ERROR_BAD_NET_NAME
 _NO_PYTHON = re.compile(r"No Python at '(.+?)'\s*$")
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -174,13 +175,18 @@ def _workspace_root(project: str) -> str:
         if parent == here:
             return project
         here = parent
-        workspace = _workspace_of(os.path.join(here, "pyproject.toml"))
-        if workspace is None:
+        path = os.path.join(here, "pyproject.toml")
+        if not os.path.isfile(path):
             continue
-        fold = str.lower if winenv.IS_WINDOWS else str  # Windows paths ignore case
-        rel = PurePosixPath(fold(os.path.relpath(project, here).replace(os.sep, "/")))
-        members = [fold(m) for m in _strings(workspace.get("members"))]
-        excluded = [fold(m) for m in _strings(workspace.get("exclude"))]
+        workspace = _workspace_of(path)
+        if workspace is None:
+            if isinstance(_read_toml(path).get("project"), dict):
+                return project  # uv stops at an enclosing project that is not a workspace
+            continue
+        # matched as uv matches them: case-sensitive, on Windows too
+        rel = PurePosixPath(os.path.relpath(project, here).replace(os.sep, "/"))
+        members = _strings(workspace.get("members"))
+        excluded = _strings(workspace.get("exclude"))
         if any(rel.full_match(m) for m in members) and not any(rel.full_match(m) for m in excluded):
             return here
         return project  # the nearest workspace does not take it in: a project of its own
@@ -233,12 +239,16 @@ def uv_project(entry: ServerEntry) -> UvProject | None:
     directory = options.get("--directory") or _setting(entry, "UV_WORKING_DIR")
     start = os.path.join(base, os.path.expanduser(directory)) if directory else (base if entry.cwd else None)
     named_project = options.get("--project") or _setting(entry, "UV_PROJECT")
-    if named_project:
-        start = os.path.join(start or base, os.path.expanduser(named_project))
-    if start is None:
+    if start is None and not named_project:
         return None
+    # As uv: it starts in its current directory, which POSIX reports with links resolved and Windows
+    # as given, and joins --project to that without resolving links in it
+    start = start or base
+    start = os.path.abspath(start) if winenv.IS_WINDOWS else os.path.realpath(start)
+    if named_project:
+        start = os.path.normpath(os.path.join(start, os.path.expanduser(named_project)))
     # the project: the nearest folder up from there with a pyproject.toml, as uv finds it
-    here = os.path.realpath(start)  # uv follows links to the real folder
+    here = start
     while not os.path.isfile(os.path.join(here, "pyproject.toml")):
         parent = os.path.dirname(here)
         if parent == here:
@@ -248,16 +258,22 @@ def uv_project(entry: ServerEntry) -> UvProject | None:
     named = _setting(entry, "UV_PROJECT_ENVIRONMENT")
     venv = os.path.join(root, os.path.expanduser(named)) if named else os.path.join(root, ".venv")
     return UvProject(
-        os.path.normpath(here), os.path.normpath(venv), python_args, lock_args, global_args, base
+        os.path.normpath(here),
+        os.path.normpath(venv),
+        python_args,
+        lock_args,
+        global_args,
+        entry.cwd and base or "",
     )
 
 
 def _has_python(folder: str) -> bool:
     try:
         names = [name.lower() for name in os.listdir(folder)]
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    except OSError:  # cannot look (permissions, a share that is offline): not proof that it is gone
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        # Windows reports an unreachable share or drive as "not found" too: that is not proof it is gone
+        return getattr(exc, "winerror", None) in _UNREACHABLE
+    except (OSError, ValueError):  # cannot look (permissions; a NUL in the path): not proof that it is gone
         return True
     if winenv.IS_WINDOWS:  # python.exe, or only python3.13t.exe in a free-threaded build
         return any(name.startswith("python") and name.endswith(".exe") for name in names)
@@ -270,7 +286,7 @@ def missing_python(venv: str) -> str | None:
     try:
         with open(os.path.join(venv, "pyvenv.cfg"), encoding="utf-8", errors="replace") as fh:
             text = fh.read(64 * 1024)
-    except OSError:
+    except (OSError, ValueError):
         return None
     home = None
     for line in text.splitlines():
@@ -303,7 +319,8 @@ def _shown(args: list[str]) -> str:
 
 def manual_fix(project: UvProject) -> str:
     first, second = (_shown(c) for c in _commands(project))
-    return f'in "{project.cwd or project.project}" run `uv {first}`, then `uv {second}`'
+    where = f'in "{project.cwd}" ' if project.cwd else ""
+    return f"{where}run `uv {first}`, then `uv {second}`"
 
 
 def broken_text(entry: ServerEntry, project: UvProject, missing: str) -> str:
@@ -336,7 +353,7 @@ def _tail(output: str, lines: int = 5) -> str:
     return " | ".join(kept)
 
 
-def _run(command: list[str], cwd: str, env: dict, deadline: float) -> tuple[int | None, str]:
+def _run(command: list[str], cwd: str | None, env: dict, deadline: float) -> tuple[int | None, str]:
     """Run one uv command until `deadline`: (exit code or None when it ran out of time, its output).
     An overdue one is ended with its whole process tree, so nothing it started keeps the pipes open."""
     kwargs: dict = {"creationflags": 0x08000000} if winenv.IS_WINDOWS else {}  # CREATE_NO_WINDOW
@@ -393,7 +410,7 @@ def prepare(entry: ServerEntry) -> str | None:
         deadline = time.monotonic() + REPAIR_TIMEOUT_S
         for args in _commands(project):
             shown = _shown(args)
-            code, output = _run([uv, *args], project.cwd or project.project, env, deadline)
+            code, output = _run([uv, *args], project.cwd or None, env, deadline)  # where the server starts
             _log(entry, f"uv {shown} ({'timed out' if code is None else f'exit {code}'}):\n{output.strip()}")
             if code is None:
                 raise RuntimeError(
@@ -432,7 +449,7 @@ def explain(entry: ServerEntry, output_lines) -> str | None:
             state = "on" if getattr(entry, "repair_env", True) else "off (repair_env = false)"
             return (
                 f"its Python virtual environment points to {missing}, which no longer exists. The environment "
-                f"winhand checks ({project.venv}) is sound or absent (automatic repair is {state}), so this "
+                f"winhand checks ({project.venv}) is sound or absent, and automatic repair is {state}; so this "
                 "server runs from another one: rebuild that environment (in the folder it belongs to, run "
                 "`uv venv --clear`, then `uv sync`)"
             )
