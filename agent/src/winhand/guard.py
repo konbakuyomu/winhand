@@ -375,10 +375,10 @@ APPROVALS_REFUSAL = (
 )
 
 
-def touches_approvals(actions: list[Action]) -> bool:
+def touches_approvals(actions: list[Action], mkdir: bool = False) -> bool:
     """Whether a file tool would write, edit, move or delete the desktop approvals file
     (approvals.py), or write (a folder copied over it), move or delete a folder holding it: built in,
-    whatever the owner's rules say."""
+    whatever the owner's rules say. Creating a folder (`mkdir`) changes nothing in one."""
     from . import approvals
 
     target = os.path.normcase(os.path.abspath(approvals.path()))
@@ -390,7 +390,7 @@ def touches_approvals(actions: list[Action]) -> bool:
                 full = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
             except (TypeError, ValueError):
                 continue
-            inside = action.kind != "edit" and target.startswith(full.rstrip("\\/") + os.sep)
+            inside = action.kind != "edit" and not mkdir and target.startswith(full.rstrip("\\/") + os.sep)
             if full == target or inside:
                 return True
     return False
@@ -717,7 +717,9 @@ class GuardActions(Middleware):
 
         if not actions:
             return await call_next(context)
-        if touches_approvals(actions):
+        arguments = getattr(context.message, "arguments", None) or {}
+        mkdir = getattr(context.message, "name", "") == "fs_op" and arguments.get("action") == "mkdir"
+        if touches_approvals(actions, mkdir):
             return ToolResult(content=[TextContent(type="text", text=APPROVALS_REFUSAL)], is_error=True)
         verdict = await asyncio.to_thread(judge, actions, cache)
         if verdict.decision != "deny":

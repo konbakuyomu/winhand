@@ -245,6 +245,8 @@ def _apps(action: str, exe: str | None) -> int:
         return 0
     from .secret_prompt import PromptUnavailable, ask_confirm
 
+    if approvals.file_error():  # it would not be saved: say so before asking the person
+        raise approvals.FileBroken(f"fix or remove the approvals file first: {approvals.file_error()}")
     if action == "off":
         question = (
             "确定关闭程序授权吗？\n\n关闭后，AI 点击、输入、操作任何程序前都不再先问你"

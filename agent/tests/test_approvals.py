@@ -302,6 +302,41 @@ def test_a_locked_screen_is_reported_instead_of_a_dialog_nobody_can_see(monkeypa
     assert checked == [("notepad.exe", "点击 (1, 2)")]
 
 
+def test_a_window_whose_program_cannot_be_named_is_not_operated(monkeypatch):
+    _window(monkeypatch, "")
+    monkeypatch.setattr(desktop, "app_of", lambda hwnd: App(""))
+    with pytest.raises(NotOperable, match="Cannot tell which program"):
+        desktop.require_operable(5, "点击 (1, 2)")
+
+
+def test_a_point_outside_every_screen_is_refused(monkeypatch):
+    monkeypatch.setattr(desktop, "root_window_at", lambda x, y: 0)
+    monkeypatch.setattr(desktop, "require_operable", lambda *a: pytest.fail("no window there to check"))
+    monkeypatch.setattr(desktop, "_on_screen", lambda x, y: False)
+    with pytest.raises(desktop.DesktopError, match="outside every screen"):
+        desktop.check_window_at(5000, 10, "点击 (5000, 10)")
+    monkeypatch.setattr(desktop, "_on_screen", lambda x, y: True)  # on a screen, no window: nothing to ask
+    desktop.check_window_at(10, 10, "点击 (10, 10)")
+
+
+def test_wrong_arguments_fail_before_anyone_is_asked(monkeypatch):
+    monkeypatch.setattr(desktop, "IS_WINDOWS", True)
+    monkeypatch.setattr(desktop, "_dpi_aware", lambda: None)
+    monkeypatch.setattr(desktop, "desktop_state", lambda: "ok")
+    monkeypatch.setattr(desktop, "to_screen", lambda x, y, coordinates: (int(x), int(y)))
+    monkeypatch.setattr(desktop, "_check_target", lambda *a: pytest.fail("the person was asked"))
+    for kwargs, error in [
+        ({"action": "keys"}, "keys needs"),
+        ({"action": "keys", "keys": "ctrl+nosuchkey"}, "unknown key"),
+        ({"action": "type"}, "type needs text"),
+        ({"action": "click", "x": 1, "y": 1, "button": "fourth"}, "button is"),
+        ({"action": "drag", "x": 1, "y": 1}, "drag needs"),
+        ({"action": "tap"}, "action is one of"),
+    ]:
+        with pytest.raises(desktop.DesktopError, match=error):
+            desktop.input_action(**kwargs)
+
+
 def test_winhand_dialogs_run_from_source_are_its_own(monkeypatch):
     import os
 
@@ -454,6 +489,22 @@ def test_ocr_reads_without_asking_and_clicks_only_when_allowed(monkeypatch):
     assert len(moved) == 2 and asked == ["按文字点击「OK」"]
 
 
+async def test_ui_asks_only_once_the_control_is_found(monkeypatch):
+    monkeypatch.setattr(desktop, "find_window", lambda _: {"hwnd": 11, "title": "app", "process": "app.exe"})
+    monkeypatch.setattr(
+        uia, "snapshot", lambda hwnd, timeout=0: {"window": "app", "count": 0, "elements": []}
+    )
+    monkeypatch.setattr(desktop, "native_controls", lambda hwnd: [])
+    asked = _refusing(monkeypatch)
+    async with Client(build_server(Config())) as client:
+        missing = (
+            await client.call_tool("ui", {"window": "app", "action": "invoke", "name": "保存"})
+        ).structured_content
+        unknown = (await client.call_tool("ui", {"window": "app", "action": "press"})).structured_content
+    assert "no control matches" in missing["error"] and "action is one of" in unknown["error"]
+    assert asked == []
+
+
 async def test_reading_tools_never_ask(monkeypatch):
     _refusing(monkeypatch)
     monkeypatch.setattr(td.desktop, "monitors", lambda: [])
@@ -503,6 +554,9 @@ async def test_file_tools_cannot_change_who_may_be_operated(tmp_path):
         )
     assert not elsewhere.is_error
     assert approvals.path().read_text(encoding="utf-8") == before
+    async with Client(build_server(Config())) as client:  # making a folder there changes nothing in it
+        made = await client.call_tool("fs_op", {"action": "mkdir", "path": str(approvals.path().parent)})
+    assert not made.is_error
 
 
 def test_cli_allow_and_off_need_the_persons_yes(monkeypatch, capsys):
@@ -524,6 +578,15 @@ def test_cli_allow_and_off_need_the_persons_yes(monkeypatch, capsys):
     assert cli.main(["apps"]) == 0
     out = capsys.readouterr().out
     assert "程序授权：开启" in out and "desktop-apps.toml" in out and "windowsterminal.exe" in out
+
+
+def test_cli_says_a_broken_file_before_asking(monkeypatch, capsys):
+    approvals.path().parent.mkdir(parents=True, exist_ok=True)
+    approvals.path().write_text("[always\n", encoding="utf-8")
+    monkeypatch.setattr(secret_prompt, "ask_confirm", lambda *a, **k: pytest.fail("asked in vain"))
+    assert cli.main(["apps", "allow", "notepad.exe"]) == 1
+    assert cli.main(["apps", "off"]) == 1
+    assert "fix or remove the approvals file" in capsys.readouterr().err
 
 
 def test_the_dialog_starts_on_refuse(monkeypatch, capsys):

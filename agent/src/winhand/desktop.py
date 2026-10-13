@@ -177,6 +177,8 @@ if IS_WINDOWS:
     user32.FindWindowW.restype = wintypes.HWND
     user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
     user32.MonitorFromWindow.restype = wintypes.HMONITOR
+    user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    user32.MonitorFromPoint.restype = wintypes.HMONITOR
     try:
         user32.GetDpiForSystem.restype = wintypes.UINT
     except AttributeError:  # before Windows 10 1607
@@ -458,9 +460,18 @@ def require_operable(hwnd, what: str) -> None:
 
     if approvals.enabled():
         app = app_of(root)
+        if not app.exe:  # the process is gone or cannot be read: whose window it is stays unknown
+            raise approvals.NotOperable(
+                f"Cannot tell which program owns the window {facts['title'][:80]!r} (it may be closing). "
+                "Nothing was sent; take a new screenshot and try again."
+            )
         if approvals.status(app.exe, app.console) == "ask":
             require_desktop()  # locked: nobody could see or answer the dialog; say so at once
         approvals.check(app, what)
+
+
+def _on_screen(x: int, y: int) -> bool:
+    return bool(user32.MonitorFromPoint(wintypes.POINT(x, y), 0))  # MONITOR_DEFAULTTONULL
 
 
 def check_window_at(x: int, y: int, what: str = "") -> None:
@@ -468,6 +479,10 @@ def check_window_at(x: int, y: int, what: str = "") -> None:
     root = root_window_at(x, y)
     if root:
         require_operable(root, what or f"点击 ({x}, {y})")
+    elif not _on_screen(x, y):  # Windows would move it to the screen's edge, onto whatever is there
+        raise DesktopError(
+            f"({x}, {y}) is outside every screen; nothing was sent. Take a screenshot for coordinates."
+        )
 
 
 def check_foreground(what: str = "") -> None:
@@ -1500,12 +1515,38 @@ def _check_target(
     if point is None:
         here = wintypes.POINT()
         if not user32.GetCursorPos(ctypes.byref(here)):
-            return
+            raise DesktopError("cannot tell where the mouse pointer is; nothing was sent (give x and y)")
         point = (here.x, here.y)
     word = _MOUSE_WORDS[action]
     check_window_at(*point, f"{word} {point}")
     if end is not None:
         check_window_at(*end, f"{word}到 {end}")
+
+
+_INPUT_ACTIONS = (
+    "click", "double_click", "right_click", "move", "drag", "scroll", "hscroll", "mouse_down", "mouse_up",
+    "type", "keys",
+)  # fmt: skip
+
+
+def _check_arguments(action, point, drag_end, button, text, keys) -> None:
+    """Wrong arguments fail before anyone is asked to approve the action."""
+    if action not in _INPUT_ACTIONS:
+        raise DesktopError("action is one of " + ", ".join(_INPUT_ACTIONS))
+    if action in ("click", "double_click", "move", "mouse_down", "mouse_up") and button not in _BUTTONS:
+        raise DesktopError("button is left, right or middle")
+    if action == "move" and point is None:
+        raise DesktopError("give x and y")
+    if action == "drag" and (point is None or drag_end is None):
+        raise DesktopError("drag needs x, y, to_x, to_y")
+    if action == "type" and not text:
+        raise DesktopError("type needs text")
+    if action == "keys":
+        if not keys or not keys.split():
+            raise DesktopError("keys needs a combination such as ctrl+s or a sequence like 'tab tab enter'")
+        for combo in keys.split():
+            if not [_vk(part) for part in combo.split("+") if part.strip()]:  # unknown keys raise here
+                raise DesktopError("empty key combination")
 
 
 def input_action(
@@ -1531,6 +1572,7 @@ def input_action(
     drag_end = None
     if action == "drag" and point and to_x is not None and to_y is not None:
         drag_end = to_screen(to_x, to_y, coordinates)
+    _check_arguments(action, point, drag_end, button, text, keys)
     _check_target(action, point, drag_end, keys, text)
     if action in ("click", "double_click", "right_click", "move", "mouse_down", "mouse_up"):
         if action == "right_click":
