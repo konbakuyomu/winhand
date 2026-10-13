@@ -984,10 +984,19 @@ def changed_box(before, after) -> tuple[int, int, int, int] | None:
     return ImageChops.difference(before, after).point(lambda v: 255 if v > 16 else 0).getbbox()
 
 
-def small_change(box) -> bool:
-    """A change that fits a text cursor or a blinking icon (up to 32 x 48 pixels): such a change only
-    counts once it has lasted, or never comes back to an earlier picture."""
-    return box[2] - box[0] <= 32 and box[3] - box[1] <= 48
+def small_change(box, zoom: float = 1.0) -> bool:
+    """A change that fits a text cursor or a blinking icon (up to 32 x 48 pixels at 100 % scaling,
+    `zoom` times that on a scaled screen): such a change only counts once it has lasted, or never
+    comes back to an earlier picture."""
+    return box[2] - box[0] <= 32 * zoom and box[3] - box[1] <= 48 * zoom
+
+
+def _zoom() -> float:
+    """The screen scaling (1.0 = 100 %), for sizes measured in pixels."""
+    try:
+        return max(1.0, user32.GetDpiForSystem() / 96) if IS_WINDOWS else 1.0
+    except (AttributeError, OSError):
+        return 1.0
 
 
 def _remember(key: tuple, grey) -> None:
@@ -1009,7 +1018,7 @@ def _previous(key: tuple):
 WAIT_PICTURE_S = 0.25
 
 
-LASTING_POLLS = 5  # a small change counts once it lasted this many captures (> one cursor blink)
+LASTING_S = 2.0  # a small change counts once it lasted this long: longer than the slowest cursor blink
 
 
 def wait_picture(window, monitor, region, condition: str, timeout_s: float, stable_ms: float):
@@ -1031,8 +1040,9 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     if reference is None:
         reference = grey
     last_change = began
-    lasting = 0
+    small_since = None  # when the small change seen now (for 'change') first appeared
     recent: list = []
+    zoom = _zoom()
 
     def facts(matched: bool) -> dict:
         out = {"condition": condition, "matched": matched, "waited_s": round(time.monotonic() - began, 1)}
@@ -1045,13 +1055,15 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     while True:
         box = changed_box(reference, grey)
         if condition == "change" and box is not None:
-            lasting = lasting + 1 if small_change(box) else LASTING_POLLS
-            if lasting >= LASTING_POLLS:
+            if not small_change(box, zoom):
+                return image, place, facts(True)
+            small_since = small_since or time.monotonic()
+            if time.monotonic() - small_since >= LASTING_S:
                 return image, place, facts(True)
         elif condition == "change":
-            lasting = 0
+            small_since = None
         if condition == "stable" and box is not None:
-            back = small_change(box) and any(grey.tobytes() == seen.tobytes() for seen in recent)
+            back = small_change(box, zoom) and any(changed_box(seen, grey) is None for seen in recent)
             if not back:  # a new picture, not a cursor blinking back
                 reference, last_change = grey, time.monotonic()
         if condition == "stable" and time.monotonic() - last_change >= still_for:

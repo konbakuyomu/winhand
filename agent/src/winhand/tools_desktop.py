@@ -232,6 +232,7 @@ def wait_control(
     deadline = began + min(timeout_s, 40)
     element = None
     title = None
+    problem = None  # the latest reading error while the window was there
     while True:
         unknown = False
         try:
@@ -248,10 +249,10 @@ def wait_control(
                 element = found[0] if found else None
             except uia.NoAnswer:
                 raise  # a hung program is not a control that went away
-            except desktop.DesktopError:
+            except desktop.DesktopError as exc:
                 try:  # changing under the reading: gone only if the window is gone
                     desktop.find_window(w["hwnd"])
-                    unknown = True
+                    unknown, problem = True, str(exc)
                 except desktop.DesktopError:
                     pass
         if not unknown and _control_state(element, state):
@@ -263,7 +264,7 @@ def wait_control(
                 "waited_s": round(time.monotonic() - began, 1),
             }
         if time.monotonic() >= deadline:
-            return {
+            out = {
                 "matched": False,
                 "state": state,
                 "window": title,
@@ -271,6 +272,9 @@ def wait_control(
                 "waited_s": round(time.monotonic() - began, 1),
                 "note": "not reached yet; call again to keep waiting, or look with screenshot",
             }
+            if unknown and problem:
+                out["last_error"] = problem  # the window could not be read at the end
+            return out
         time.sleep(WAIT_POLL_S)
 
 

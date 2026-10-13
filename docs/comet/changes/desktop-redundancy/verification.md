@@ -44,3 +44,39 @@
 | M7 | Windows 10 1607 之前 `GetDpiForSystem` 不存在，导入会失败 | 小 | 加保护 |
 | M8 | 没有窗口句柄的控件 invoke 后打开模态对话框，会一直等到超时并报“没有响应” | 已知限制 | 这类动作最多等 5 秒，之后说明“已发送，程序还在处理（可能是对话框）”，不报错 |
 | — | brief 的 A1 要求选中树节点，但没有测试；R2 的空格规则与 A5 矛盾；“不返回黑图”与 R4 不一致 | 规格 | msinfo32 的树节点 select 加入 Windows 测试；R2 写明按间隙判断；brief 和 README 改为“窗口截图在窗口自己能画出来时返回，并附说明” |
+
+## 第 2 轮（e2b5234，文档 7809af8）
+
+**正式检查**
+- `ruff check`、`ruff format --check` 通过。
+- `pytest`：Linux 594 passed，47 skipped。
+- CI：
+  - `agent.yml`（run 38345690292）：ubuntu 通过；windows-latest 614 passed，27 skipped；
+  - `binary.yml`（run 38345692793）通过，冒烟包含 `ui_automation`。
+- 用户电脑，桌面相关测试：51 passed，1 skipped。msinfo32 的测试现在也展开菜单（verified），并选中树节点（selected=true）。
+
+**独立 Verifier 结论**：第 1 轮的问题都已修好，没有阻断项。
+
+| 验收项 | 结论 |
+|---|---|
+| A1–A9、A11、A12 | 通过。A4、A9 用模拟验证；A12 用 Builder 的真机证据 |
+| A10 | 自动部分通过。普通进程读得到管理员进程的级别（PixPin 0x3000），第 1 轮最大的担心已经消除；真机上“列表标出 → 拒绝操作”整条链还没见过，风险低，留待人工验收 |
+
+| # | 问题 | 级别 | 处理（第 3 轮） |
+|---|---|---|---|
+| 1 | 判断“光标闪回”用逐字节比较，别处有细微抖动时 stable 等不到；小变化的上限没按缩放放大，200%–300% 下的高光标会让 change 误报 | 小 | 改用同样的灰度阈值判断；上限按屏幕缩放放大 |
+| 2 | change 的小变化持续 5 次取图就算，最慢的光标闪烁（每相 1.2 秒）会误报 | 小 | 改为按时间，持续 2 秒才算 |
+| 3 | 在 stable_ms 内累积不到 16 级的极慢渐变，会被当作稳定 | 小 | 写进规格，作为已知限制 |
+| 4 | 被放弃的 UIA 线程做完手上的事后不退出；invoke 打开对话框的情况现在更常见，会积累线程 | 小 | 被放弃、队列又空了就退出 |
+| 5 | wait 时窗口在、每次读取都失败，超时只说“not reached yet”，把错误吞掉 | 小 | 超时结果带上 `last_error`；规格写明 UIA 自己超时时报错 |
+| — | 全角数字和 々〆〇 被当成标点；OSError 先取了 errno；没有映射 UIA_E_NOTSUPPORTED；三处文档没跟上 | 外观 | 都已修正 |
+
+## 真机验收要做的事
+
+已人工整理出真机验收时要做的事（需要人在电脑前）：
+1. 打开一个有可见窗口的管理员程序（例如任务管理器 Ctrl+Shift+Esc，或 regedit）：
+   - `window(list)` 里它有 `admin: true`；
+   - 对它的 `ui`、`input` 点击、`ocr` 点击都被拒绝，错误里有程序名；
+   - `screenshot(window=…)` 照常；
+   - `sys_info(checks=true)` 有 admin_windows。
+2. UAC 提示开着时，`input`、`screenshot` 报 secure；Win+L 锁屏后再调用，报 locked。

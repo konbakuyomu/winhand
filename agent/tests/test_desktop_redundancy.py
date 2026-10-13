@@ -258,7 +258,7 @@ async def test_waiting_for_a_control_tells_a_hung_program_from_a_gone_one(monkey
 
     monkeypatch.setattr(td, "WAIT_POLL_S", 0.01)
     waited = td.wait_control("Setup", "Installing...", None, None, "gone", 0.1, inspect=changing)
-    assert waited["matched"] is False  # still reading, not "gone"
+    assert waited["matched"] is False and "the control is gone" in waited["last_error"]  # not "gone"
     monkeypatch.setattr(td.desktop, "find_window", lambda _: {**window, "admin": True})
     with pytest.raises(td.desktop.DesktopError, match="administrator"):
         td.wait_control("Setup", "Installing...", None, None, "gone", 1, inspect=changing)
@@ -313,6 +313,8 @@ def test_lines_read_as_a_person_reads_them():
     assert ocr.line_text(CHINESE) == "状态：已完成 Done"
     spaced_colon = words(("状", (0, 0, 20, 20)), ("：", (30, 0, 6, 20)), ("已", (50, 0, 20, 20)))
     assert ocr.line_text(spaced_colon) == "状：已"  # full-width punctuation has narrow ink
+    page = words(("Page", (0, 0, 40, 20)), ("１２", (50, 0, 20, 20)))
+    assert ocr.line_text(page) == "Page １２"  # full-width digits are not punctuation
     tight = words(("成", (110, 0, 20, 20)), ("Done", (131, 0, 40, 20)))
     assert ocr.line_text(tight) == "成Done"
     assert ocr.line_text(words(("Press", (0, 0, 40, 20)), ("me", (41, 0, 20, 20)))) == "Press me"
@@ -477,6 +479,52 @@ def test_slow_progress_and_fades_are_not_stillness(monkeypatch):
     _frames(monkeypatch, [bar(10, shade=255 - 2 * i) for i in range(100)])  # a slow fade
     _, _, facts = desktop.wait_picture(1, None, None, "stable", 0.6, 400)
     assert facts["matched"] is False
+
+
+def test_tall_cursors_slow_blinks_and_faint_noise(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(desktop.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(desktop.time, "sleep", lambda s: clock.update(now=clock["now"] + 0.28))
+
+    def frame(on: bool, noise: int = 0, height: int = 18) -> Image.Image:
+        image = Image.new("L", (400, 200), 200 + noise)
+        if on:
+            ImageDraw.Draw(image).rectangle((300, 40, 308, 40 + height), fill=0)
+        return image
+
+    # faint flicker elsewhere (under 16 grey levels) does not hide a cursor blinking back
+    _frames(monkeypatch, [frame(i % 2 == 0, noise=i % 3) for i in range(400)])
+    _, _, facts = desktop.wait_picture(1, None, None, "stable", 6, 1000)
+    assert facts["matched"] is True
+    # a 70 px cursor on a 300 % screen is still a cursor
+    monkeypatch.setattr(desktop, "_zoom", lambda: 3.0)
+    tall = [frame(i % 2 == 0, height=70) for i in range(400)]
+    _frames(monkeypatch, tall)
+    _, _, facts = desktop.wait_picture(1, None, None, "stable", 6, 1000)
+    assert facts["matched"] is True
+    _frames(monkeypatch, tall)
+    _, _, facts = desktop.wait_picture(1, None, None, "change", 3, 1000)
+    assert facts["matched"] is False
+    # the slowest blink setting (1.2 s per phase) is not a change either
+    slow = [frame((i // 5) % 2 == 0) for i in range(400)]
+    _frames(monkeypatch, slow)
+    _, _, facts = desktop.wait_picture(1, None, None, "change", 8, 1000)
+    assert facts["matched"] is False
+
+
+def test_an_abandoned_worker_thread_ends(monkeypatch):
+    monkeypatch.setattr(desktop, "IS_WINDOWS", True)
+    monkeypatch.setattr(uia, "_enter_apartment", lambda: None)
+    monkeypatch.setattr(uia, "_worker", None)
+    import threading
+
+    before = threading.active_count()
+    with pytest.raises(uia.NoAnswer):
+        uia.call(time.sleep, 0.3, timeout=0.05)
+    time.sleep(0.6)
+    assert uia.call(lambda: 7) == 7
+    time.sleep(0.1)
+    assert threading.active_count() <= before + 1  # the given-up thread finished and left
 
 
 def test_a_blinking_cursor_neither_changes_nor_unsettles_the_picture(monkeypatch):

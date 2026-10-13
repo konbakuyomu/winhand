@@ -63,6 +63,10 @@ class _Worker:
                 future.set_result(fn(*args))
             except BaseException as exc:  # noqa: BLE001 - handed to the caller
                 future.set_exception(exc)
+            with _lock:
+                replaced = _worker is not self
+            if replaced and self.jobs.empty():
+                return  # given up on while it waited (a hung program, a dialog): end the thread
 
     def submit(self, fn, *args) -> Future:
         future: Future = Future()
@@ -117,6 +121,7 @@ _HRESULTS = {
     0x80040200: "the control is disabled right now",
     0x80040201: "the control is gone (the window changed); inspect it again",
     0x80040202: "the control has no point that can be clicked",
+    0x80040204: "the control does not support this operation",
     0x80131509: "the control refused this operation in its current state",
     0x80070005: "access denied (is the program running as administrator?)",
 }
@@ -125,10 +130,10 @@ _HRESULTS = {
 def explain(exc: Exception) -> desktop.DesktopError:
     """A COM failure from UI Automation as an error a person can read."""
     code = getattr(exc, "hresult", None)
-    if code is None and exc.args and isinstance(exc.args[0], int):
-        code = exc.args[0]
     if code is None:
-        code = getattr(exc, "winerror", None)
+        code = getattr(exc, "winerror", None)  # an OSError's args[0] is its errno
+    if code is None and exc.args and isinstance(exc.args[0], int):
+        code = exc.args[0]  # comtypes' COMError(hresult, text, details)
     code = code & 0xFFFFFFFF if isinstance(code, int) else None
     if code == 0x80131505:  # UIA_E_TIMEOUT: UI Automation's own time limit
         return NoAnswer(NO_ANSWER)

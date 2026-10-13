@@ -54,7 +54,9 @@ class Pass:
 # ------------------------------------------------------------------- text
 
 _CJK = re.compile(r"[\u2e80-\u9fff\ua960-\ua97f\uac00-\ud7ff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]")
-_WIDE_PUNCTUATION = re.compile(r"[\u3000-\u303f\ufe30-\ufe4f\uff00-\uff20\uff3b-\uff40\uff5b-\uff65]")
+_WIDE_PUNCTUATION = re.compile(
+    r"[\u3000-\u3004\u3008-\u303f\ufe30-\ufe4f\uff00-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]"
+)  # not the ideographs 々〆〇 (U+3005-3007), not the full-width digits
 
 
 def _cjk(char: str) -> bool:
