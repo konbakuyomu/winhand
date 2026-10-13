@@ -348,10 +348,10 @@ def test_the_dialog_text_from_the_program_is_kept_short(monkeypatch):
         secret_prompt, "ask_approval", lambda name, exe, title, action, warning, timeout_s: shown.update(
             name=name, title=title, action=action) or "session"
     )  # fmt: skip
-    long = App("app.exe", "名" * 500, "标题" * 500)
+    long = App("app.exe", "名" * 500, "标题\n" * 500)  # line breaks too: one line in the dialog
     approvals.check(long, "控件操作：select「" + "x" * 5000 + "」")
     assert len(shown["name"]) <= 80 and len(shown["title"]) <= 120 and len(shown["action"]) <= 160
-    assert shown["action"].endswith("…")
+    assert shown["action"].endswith("…") and "\n" not in shown["title"]
 
 
 def test_wrong_arguments_fail_before_anyone_is_asked(monkeypatch):
@@ -620,6 +620,29 @@ async def test_file_tools_cannot_change_who_may_be_operated(tmp_path):
     async with Client(build_server(Config())) as client:  # making a folder there changes nothing in it
         made = await client.call_tool("fs_op", {"action": "mkdir", "path": str(approvals.path().parent)})
     assert not made.is_error
+
+
+async def test_an_approvals_file_kept_elsewhere_through_a_link_is_protected_both_ways(tmp_path):
+    real = tmp_path / "dotfiles" / approvals.FILE_NAME
+    real.parent.mkdir()
+    real.write_text("ask = true\n[always]\n", encoding="utf-8")
+    approvals.path().parent.mkdir(parents=True, exist_ok=True)
+    try:
+        approvals.path().symlink_to(real)
+    except OSError:
+        pytest.skip("creating a file symlink needs a privilege here")
+    backup = tmp_path / "backup" / approvals.path().parent.name
+    backup.mkdir(parents=True)
+    (backup / approvals.FILE_NAME).write_text("ask = false\n", encoding="utf-8")
+    async with Client(build_server(Config())) as client:
+        for tool, arguments in [
+            ("fs_write", {"path": str(real), "content": "ask = false\n"}),  # the file it leads to
+            ("fs_op", {"action": "copy", "path": str(backup), "to": str(tmp_path), "overwrite": True}),
+            ("fs_op", {"action": "delete", "path": str(approvals.path().parent), "recursive": True}),
+        ]:
+            result = await client.call_tool(tool, arguments, raise_on_error=False)
+            assert result.is_error and "only the person at the machine" in result.content[0].text, tool
+    assert real.read_text(encoding="utf-8") == "ask = true\n[always]\n" and approvals.enabled()
 
 
 def test_cli_allow_and_off_need_the_persons_yes(monkeypatch, capsys):

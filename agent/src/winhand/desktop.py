@@ -495,7 +495,10 @@ def check_foreground(what: str = "") -> None:
     """Refuse keys or text while a window that may not be operated has the keyboard."""
     hwnd = user32.GetForegroundWindow()
     if not hwnd:  # Windows is between two windows: where the keys would go is unknown
-        raise DesktopError("no window is in front right now; nothing was sent. Try again in a moment.")
+        raise DesktopError(
+            "no window is in front right now; nothing was sent. Bring one to the front "
+            "(window action='focus') or click into it, then send the keys again."
+        )
     require_operable(hwnd, what or "按键")
 
 

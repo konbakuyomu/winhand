@@ -405,6 +405,7 @@ def _ask_person(app: App, action: str, warning: str | None) -> str:
     from .secret_prompt import ask_approval
 
     def short(text: str, limit: int) -> str:  # titles and control names come from the program
+        text = " ".join(text.split())  # one line each: line breaks cannot stretch the dialog
         return text if len(text) <= limit else text[: limit - 1] + "…"
 
     name, title = short(app.name or app.exe, 80), short(app.title, 120)

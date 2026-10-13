@@ -381,7 +381,8 @@ def touches_approvals(actions: list[Action], mkdir: bool = False) -> bool:
     whatever the owner's rules say. Creating a folder (`mkdir`) changes nothing in one."""
     from . import approvals
 
-    target = os.path.normcase(os.path.realpath(approvals.path()))
+    given_target = os.path.abspath(approvals.path())
+    targets = {os.path.normcase(given_target), os.path.normcase(os.path.realpath(given_target))}
     for action in actions:
         if action.kind not in ("write", "edit", "delete", "move"):
             continue
@@ -391,10 +392,9 @@ def touches_approvals(actions: list[Action], mkdir: bool = False) -> bool:
                     full = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
                 except (TypeError, ValueError):
                     continue
-                inside = (
-                    action.kind != "edit" and not mkdir and target.startswith(full.rstrip("\\/") + os.sep)
-                )
-                if full == target or inside:
+                folder = full.rstrip("\\/") + os.sep
+                inside = action.kind != "edit" and not mkdir and any(t.startswith(folder) for t in targets)
+                if full in targets or inside:
                     return True
     return False
 
@@ -722,7 +722,7 @@ class GuardActions(Middleware):
             return await call_next(context)
         arguments = getattr(context.message, "arguments", None) or {}
         mkdir = getattr(context.message, "name", "") == "fs_op" and arguments.get("action") == "mkdir"
-        if touches_approvals(actions, mkdir):
+        if await asyncio.to_thread(touches_approvals, actions, mkdir):  # resolves links: not on the loop
             return ToolResult(content=[TextContent(type="text", text=APPROVALS_REFUSAL)], is_error=True)
         verdict = await asyncio.to_thread(judge, actions, cache)
         if verdict.decision != "deny":
