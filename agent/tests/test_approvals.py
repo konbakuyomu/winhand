@@ -603,7 +603,12 @@ async def test_file_tools_cannot_change_who_may_be_operated(tmp_path):
         )
     assert not elsewhere.is_error
     link = tmp_path / "link-to-home"
-    link.symlink_to(approvals.path().parent, target_is_directory=True)
+    try:
+        link.symlink_to(approvals.path().parent, target_is_directory=True)
+    except OSError:  # Windows without the symlink privilege: a junction leads to the same folder
+        import _winapi
+
+        _winapi.CreateJunction(str(approvals.path().parent), str(link))
     async with Client(build_server(Config())) as client:  # the same file spelled through a link
         linked = await client.call_tool(
             "fs_write",
