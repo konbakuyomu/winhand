@@ -159,7 +159,10 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 以下情况不能操作：
 
-- **锁屏、UAC 提示、远程桌面会话已断开时**：`screenshot`、`input`、`ocr`、`window(action="focus")` 直接说明原因，不返回黑图，也不发送输入。
+- **锁屏、UAC 提示、远程桌面会话已断开时**：
+  - `input`、点击、`window(action="focus")` 直接说明原因，不发送输入；
+  - 整个桌面、显示器或区域的截图和读字也直接说明原因，不返回黑图；
+  - 窗口截图在窗口自己能画出来时照常返回，并附一句说明。
 - **以管理员身份运行的程序**：Windows 会悄悄丢掉普通程序发给它的点击和按键。
   - 窗口列表里，这类窗口标为 `admin: true`；
   - `ui`、`input`、`ocr` 的点击会拒绝，并说明原因；

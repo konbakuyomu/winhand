@@ -32,7 +32,10 @@
 - `screenshot(wait='change' | 'stable')`：等到画面变了，或停止变化，再返回截图。
 
 **说清原因（R4）**
-- 锁屏、UAC 提示（安全桌面）、远程桌面已断开时，`screenshot`、`input`、`ui`、`ocr`、`window(focus)` 直接说明原因和需要人做什么，不返回黑图，也不发送输入。
+- 锁屏、UAC 提示（安全桌面）、远程桌面已断开时：
+  - `input`、`ui` 的点击、`ocr` 的点击、`window(focus)` 直接说明原因和需要人做什么，不发送输入；
+  - 整个桌面、显示器、区域的截图和读字直接说明原因，不返回黑图；
+  - 窗口截图只在窗口自己能画出来时返回，并附说明。
 - 以管理员身份运行的窗口：
   - 窗口列表标出 `admin: true`；
   - `ui`、`input`、`ocr` 的点击作用在这类窗口上时，拒绝执行，说明原因和办法；
@@ -71,11 +74,14 @@
 # Acceptance examples
 
 - **A1 经典 Win32 覆盖**
-  - 测试窗体包含经典菜单（MainMenu）、树（TreeView）和列表（ListView）：
-    - inspect 列出菜单项、树节点和列表行，并带上可用的操作；
+  - 测试窗体包含经典菜单（MainMenu）和列表（ListView）：
+    - inspect 列出菜单项和列表行，并带上可用的操作；
     - 展开菜单后，能 invoke 其中的菜单项（窗体标题随之改变）；
-    - select 树节点和列表行之后，读回 `selected=true`。
-  - 用户电脑上的 msinfo32：inspect 至少有 100 个元素，包括菜单项“文件(F)”和树节点“系统摘要”。
+    - select 列表行之后，读回 `selected=true`。
+  - 树：.NET Framework 的 WinForms TreeView 自己提供的辅助功能接口不给节点名字（程序自身的问题），改用 msinfo32 真正的 Win32 树：
+    - 展开菜单栏上的菜单，`verified=true`；
+    - select 一个树节点，读回 `selected=true`。
+  - 用户电脑上的 msinfo32：列表加载完后，inspect 至少有 100 个元素，包括菜单项“文件(F)”和树节点“系统摘要”。
 - **A2 兼容**：0.4.9 的 WinForms 测试照常通过：输入文字、勾选、按按钮、密码框不显示内容；元素字段不变。
 - **A3 后备**：原生客户端起不来时（测试中模拟），`ui` 用 PowerShell 脚本完成同样的读取和操作，结果写明 `backend: "powershell"`。
 - **A4 不挂住**：原生调用超过时限时，`ui` 返回错误，说明程序没有响应；之后的调用照常可用。

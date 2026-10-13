@@ -174,7 +174,10 @@ if IS_WINDOWS:
     user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
     user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
     user32.MonitorFromWindow.restype = wintypes.HMONITOR
-    user32.GetDpiForSystem.restype = wintypes.UINT
+    try:
+        user32.GetDpiForSystem.restype = wintypes.UINT
+    except AttributeError:  # before Windows 10 1607
+        pass
     try:
         shcore = ctypes.WinDLL("shcore")
         shcore.GetDpiForMonitor.argtypes = [
@@ -877,6 +880,10 @@ def _fit_drawing(image, scale: float):
 
     width, height = image.size
     drawn = (max(1, round(width / scale)), max(1, round(height / scale)))
+    beside = image.crop((min(drawn[0] + 1, width), 0, width, height)).getbbox()
+    below = image.crop((0, min(drawn[1] + 1, height), width, height)).getbbox()
+    if beside or below:  # the program drew the whole window itself (GDI scaling): keep it
+        return image
     return image.crop((0, 0, *drawn)).resize((width, height), Image.Resampling.BICUBIC)
 
 
@@ -967,18 +974,20 @@ def _grey(image):
     return image.convert("L")
 
 
-def pictures_differ(before, after) -> bool:
-    """Whether two greyscale pictures differ beyond noise. Changed pixels (more than 24 grey levels)
-    whose outline is a thin sliver - a blinking text cursor - do not count."""
+def changed_box(before, after) -> tuple[int, int, int, int] | None:
+    """The outline of the pixels that differ by more than 16 grey levels (None: the same picture);
+    a different size counts as a change of everything."""
     if before.size != after.size:
-        return True
+        return (0, 0, *after.size)
     from PIL import ImageChops
 
-    box = ImageChops.difference(before, after).point(lambda v: 255 if v > 24 else 0).getbbox()
-    if box is None:
-        return False
-    width, height = box[2] - box[0], box[3] - box[1]
-    return not ((width <= 4 and height <= 64) or (height <= 4 and width <= 64))
+    return ImageChops.difference(before, after).point(lambda v: 255 if v > 16 else 0).getbbox()
+
+
+def small_change(box) -> bool:
+    """A change that fits a text cursor or a blinking icon (up to 32 x 48 pixels): such a change only
+    counts once it has lasted, or never comes back to an earlier picture."""
+    return box[2] - box[0] <= 32 and box[3] - box[1] <= 48
 
 
 def _remember(key: tuple, grey) -> None:
@@ -1000,9 +1009,17 @@ def _previous(key: tuple):
 WAIT_PICTURE_S = 0.25
 
 
+LASTING_POLLS = 5  # a small change counts once it lasted this many captures (> one cursor blink)
+
+
 def wait_picture(window, monitor, region, condition: str, timeout_s: float, stable_ms: float):
     """Capture until the picture differs from this target's previous screenshot ('change') or has
-    not changed for stable_ms ('stable'). Returns (image, place, facts)."""
+    not changed for stable_ms ('stable'). Returns (image, place, facts).
+
+    Changes are measured against a reference picture, not the capture before, so slow changes (a
+    progress bar, a fade) add up. A small change counts for 'change' once it has lasted a few
+    captures, and for 'stable' unless the picture returns to one seen just before: a blinking
+    cursor does neither."""
     if condition not in ("change", "stable"):
         raise DesktopError("wait is change or stable")
     began = time.monotonic()
@@ -1010,10 +1027,12 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     still_for = max(200, min(stable_ms, 10_000)) / 1000
     image, place = capture(window, monitor, region)
     grey = _grey(image)
-    baseline = _previous(place["key"]) if condition == "change" else None
-    if baseline is None:
-        baseline = grey
+    reference = _previous(place["key"]) if condition == "change" else None
+    if reference is None:
+        reference = grey
     last_change = began
+    lasting = 0
+    recent: list = []
 
     def facts(matched: bool) -> dict:
         out = {"condition": condition, "matched": matched, "waited_s": round(time.monotonic() - began, 1)}
@@ -1024,18 +1043,25 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
         return out
 
     while True:
-        if condition == "change" and pictures_differ(baseline, grey):
-            return image, place, facts(True)
+        box = changed_box(reference, grey)
+        if condition == "change" and box is not None:
+            lasting = lasting + 1 if small_change(box) else LASTING_POLLS
+            if lasting >= LASTING_POLLS:
+                return image, place, facts(True)
+        elif condition == "change":
+            lasting = 0
+        if condition == "stable" and box is not None:
+            back = small_change(box) and any(grey.tobytes() == seen.tobytes() for seen in recent)
+            if not back:  # a new picture, not a cursor blinking back
+                reference, last_change = grey, time.monotonic()
         if condition == "stable" and time.monotonic() - last_change >= still_for:
             return image, place, facts(True)
         if time.monotonic() >= deadline:
             return image, place, facts(False)
+        recent = [*recent[-3:], grey]
         time.sleep(WAIT_PICTURE_S)
         image, place = capture(window, monitor, region)
-        latest = _grey(image)
-        if condition == "stable" and pictures_differ(grey, latest):
-            last_change = time.monotonic()
-        grey = latest
+        grey = _grey(image)
 
 
 def screenshot(
@@ -1232,11 +1258,11 @@ def type_text(text: str) -> None:
 def _check_target(action: str, point: tuple[int, int] | None, end: tuple[int, int] | None) -> None:
     """Refuse input that Windows would silently drop because it goes to an administrator program:
     the window under the pointer for mouse buttons and wheels, the foreground one for keys."""
-    if action in ("type", "keys"):
-        if point is not None:  # type clicks there first, so the text goes to that window
-            check_window_at(*point)
-        else:
-            check_foreground()
+    if action == "type" and point is not None:  # type clicks there first: the text goes to that window
+        check_window_at(*point)
+        return
+    if action in ("type", "keys"):  # keys go to the foreground window, wherever x, y point
+        check_foreground()
         return
     if action not in (
         "click",

@@ -201,6 +201,7 @@ def _read_back(hwnd: int, target: dict) -> dict | None:
 
 
 WAIT_POLL_S = 0.7
+INVOKE_WAIT_S = 5.0  # UI Automation's Invoke returns only when the control's handler does
 
 
 def _control_state(element: dict | None, state: str) -> bool:
@@ -232,14 +233,28 @@ def wait_control(
     element = None
     title = None
     while True:
+        unknown = False
         try:
             w = desktop.find_window(window)
-            title = w["title"]
-            found = match_controls(inspect(w["hwnd"]), name, automation_id, control_type)
-            element = found[0] if found else None
         except desktop.DesktopError:
-            element = None  # the window itself is not there (yet, or any more)
-        if _control_state(element, state):
+            w = None  # the window itself is not there (yet, or any more)
+        element = None
+        if w is not None:
+            if w.get("admin"):
+                raise desktop.admin_error(w)
+            title = w["title"]
+            try:
+                found = match_controls(inspect(w["hwnd"]), name, automation_id, control_type)
+                element = found[0] if found else None
+            except uia.NoAnswer:
+                raise  # a hung program is not a control that went away
+            except desktop.DesktopError:
+                try:  # changing under the reading: gone only if the window is gone
+                    desktop.find_window(w["hwnd"])
+                    unknown = True
+                except desktop.DesktopError:
+                    pass
+        if not unknown and _control_state(element, state):
             return {
                 "matched": True,
                 "state": state,
@@ -606,7 +621,19 @@ def register(mcp: FastMCP) -> None:
                     # all the time a modal dialog it opens stays open
                     done = desktop.native_act(target, action, value)
                 if not done and target.get("_element") is not None and can:
-                    done = uia.act(target["_element"], action, value)
+                    handler = action in ("invoke", "toggle", "select", "expand")
+                    try:
+                        done = uia.act(
+                            target["_element"],
+                            action,
+                            value,
+                            timeout=INVOKE_WAIT_S if handler else uia.TIMEOUT_S,
+                        )
+                    except uia.NoAnswer:
+                        if not handler:
+                            raise
+                        # the program is still in the control's handler, typically a dialog it opened
+                        done = "sent; the program has not finished handling it (a dialog it opened may be waiting)"
                 elif not done and target.get("uia_index") is not None and can:
                     done = _run_uia(
                         hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
@@ -702,14 +729,18 @@ def register(mcp: FastMCP) -> None:
                 if verified is True or not expected or time.monotonic() >= deadline:
                     break
                 time.sleep(min(0.2, max(0, deadline - time.monotonic())))
-            return {
+            out = {
                 "done": done,
                 "matches": len(found),
                 "window": title,
                 "element": _public(after) if after is not None else None,
                 "verified": verified,
                 "verification": reason,
+                "backend": snapshot.get("backend"),
             }
+            if snapshot.get("backend_note"):
+                out["backend_note"] = snapshot["backend_note"]
+            return out
 
         return await asyncio.to_thread(_errors, work)
 

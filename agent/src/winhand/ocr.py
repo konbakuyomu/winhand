@@ -54,6 +54,7 @@ class Pass:
 # ------------------------------------------------------------------- text
 
 _CJK = re.compile(r"[\u2e80-\u9fff\ua960-\ua97f\uac00-\ud7ff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]")
+_WIDE_PUNCTUATION = re.compile(r"[\u3000-\u303f\ufe30-\ufe4f\uff00-\uff20\uff3b-\uff40\uff5b-\uff65]")
 
 
 def _cjk(char: str) -> bool:
@@ -67,7 +68,9 @@ def line_text(words: list[Word]) -> str:
     previous = None
     for word in words:
         if previous is not None:
-            if _cjk(out[-1:]) or _cjk(word.text[:1]):
+            if _WIDE_PUNCTUATION.match(out[-1:]) or _WIDE_PUNCTUATION.match(word.text[:1]):
+                pass  # full-width punctuation carries its own spacing (its ink is narrow)
+            elif _cjk(out[-1:]) or _cjk(word.text[:1]):
                 gap = word.rect[0] - (previous.rect[0] + previous.rect[2])
                 height = max(previous.rect[3], word.rect[3], 1)
                 if gap >= 0.3 * height:
@@ -181,7 +184,10 @@ def parse(data: dict, scales: list[float], left: int, top: int) -> tuple[list[Pa
     for item in _as_list(data.get("passes")):
         scale = scales[int(item.get("image", 0))]
         lines = []
-        for line in _as_list(item.get("lines")):
+        raw_lines = _as_list(item.get("lines"))
+        if raw_lines and all(isinstance(line, dict) for line in raw_lines):
+            raw_lines = [raw_lines]  # PowerShell 5.1 unwrapped a single line into its words
+        for line in raw_lines:
             words = []
             for word in _as_list(line):
                 if not isinstance(word, dict) or not word.get("t"):
@@ -295,10 +301,7 @@ def act(
         raise desktop.admin_error(target)
     found = find(text, target["hwnd"] if target else None, monitor, region, language)
     if not found["matches"]:
-        raise OcrError(
-            f"{text!r} is not on the screen there"
-            + (f"; closest: {[s['text'] for s in found['similar']]}" if found.get("similar") else "")
-        )
+        return {**found, "error": f"{text!r} is not on the screen there; nothing was clicked"}
     if index >= len(found["matches"]):
         raise OcrError(f"only {len(found['matches'])} matches; index {index} is out of range")
     x, y = found["matches"][index]["center"]

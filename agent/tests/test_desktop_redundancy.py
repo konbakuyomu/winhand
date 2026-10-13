@@ -112,7 +112,9 @@ async def test_ui_acts_on_the_element_it_just_read(monkeypatch):
 
     monkeypatch.setattr(uia, "snapshot", snapshot)
     monkeypatch.setattr(uia, "refresh", refresh)
-    monkeypatch.setattr(uia, "act", lambda e, verb, value=None: acted.append((e, verb)) or "expanded")
+    monkeypatch.setattr(
+        uia, "act", lambda e, verb, value=None, timeout=0: acted.append((e, verb)) or "expanded"
+    )
     monkeypatch.setattr(td, "_run_uia", lambda *a, **k: pytest.fail("the PowerShell script must not run"))
     async with Client(build_server(Config())) as client:
         listed = (await client.call_tool("ui", {"window": "app"})).structured_content
@@ -161,8 +163,20 @@ async def test_com_errors_become_plain_errors(monkeypatch):
     def gone():
         raise COMError(-2147220991, "The element is not available", None)
 
-    with pytest.raises(desktop.DesktopError, match="UI Automation: COMError"):
+    with pytest.raises(desktop.DesktopError, match="the control is gone"):
         uia.call(gone)
+
+    def timed_out():
+        raise COMError(-2146233083, None, None)  # UIA_E_TIMEOUT
+
+    with pytest.raises(uia.NoAnswer):
+        uia.call(timed_out)
+
+    def odd():
+        raise COMError(-2147467259, "Unspecified error", None)
+
+    with pytest.raises(desktop.DesktopError, match="UI Automation failed: COMError"):
+        uia.call(odd)
 
 
 async def test_ui_falls_back_to_powershell(monkeypatch):
@@ -194,6 +208,60 @@ async def test_ui_falls_back_to_powershell(monkeypatch):
     assert listed["backend"] == "powershell" and "comtypes" in listed["backend_note"]
     assert done["done"] == "invoked"
     assert [c["Mode"] for c in calls] == ["inspect", "inspect", "act", "inspect"]
+
+
+async def test_a_dialog_opened_by_invoke_does_not_hold_up_the_call(monkeypatch):
+    _fake_window(monkeypatch)
+    element = object()
+    item = {"index": 0, "type": "MenuItem", "name": "Open...", "automation_id": "", "hwnd": 0, "enabled": True,
+            "rect": [1, 2, 3, 4], "patterns": ["Invoke"], "_runtime_id": [5], "_element": element}  # fmt: skip
+    monkeypatch.setattr(
+        uia, "snapshot", lambda hwnd, timeout=0: {"window": "app", "count": 1, "elements": [item]}
+    )
+    monkeypatch.setattr(uia, "refresh", lambda e: None)
+    timeouts = []
+
+    def act(e, verb, value=None, timeout=uia.TIMEOUT_S):
+        timeouts.append(timeout)
+        raise uia.NoAnswer(uia.NO_ANSWER)
+
+    monkeypatch.setattr(uia, "act", act)
+    async with Client(build_server(Config())) as client:
+        done = (
+            await client.call_tool(
+                "ui", {"window": "app", "action": "invoke", "name": "Open...", "verify_wait_s": 0}
+            )
+        ).structured_content
+        failed = (
+            await client.call_tool(
+                "ui", {"window": "app", "action": "set_value", "name": "Open...", "value": "x"}
+            )
+        ).structured_content
+    assert timeouts[0] <= 5 and "dialog it opened" in done["done"] and done["backend"] == "native"
+    assert "error" in failed  # set_value has no pattern here: nothing to send
+
+
+async def test_waiting_for_a_control_tells_a_hung_program_from_a_gone_one(monkeypatch):
+    window = {"hwnd": 11, "title": "Setup", "process": "setup.exe", "pid": 9}
+    monkeypatch.setattr(td.desktop, "find_window", lambda _: window)
+
+    def hung(hwnd):
+        raise uia.NoAnswer(uia.NO_ANSWER)
+
+    with pytest.raises(uia.NoAnswer):
+        td.wait_control("Setup", "Installing...", None, None, "gone", 1, inspect=hung)
+
+    def changing(hwnd):
+        raise td.desktop.DesktopError(
+            "UI Automation: the control is gone (the window changed); inspect it again"
+        )
+
+    monkeypatch.setattr(td, "WAIT_POLL_S", 0.01)
+    waited = td.wait_control("Setup", "Installing...", None, None, "gone", 0.1, inspect=changing)
+    assert waited["matched"] is False  # still reading, not "gone"
+    monkeypatch.setattr(td.desktop, "find_window", lambda _: {**window, "admin": True})
+    with pytest.raises(td.desktop.DesktopError, match="administrator"):
+        td.wait_control("Setup", "Installing...", None, None, "gone", 1, inspect=changing)
 
 
 async def test_ui_reports_a_hung_program(monkeypatch):
@@ -243,6 +311,8 @@ CHINESE = words(
 
 def test_lines_read_as_a_person_reads_them():
     assert ocr.line_text(CHINESE) == "状态：已完成 Done"
+    spaced_colon = words(("状", (0, 0, 20, 20)), ("：", (30, 0, 6, 20)), ("已", (50, 0, 20, 20)))
+    assert ocr.line_text(spaced_colon) == "状：已"  # full-width punctuation has narrow ink
     tight = words(("成", (110, 0, 20, 20)), ("Done", (131, 0, 40, 20)))
     assert ocr.line_text(tight) == "成Done"
     assert ocr.line_text(words(("Press", (0, 0, 40, 20)), ("me", (41, 0, 20, 20)))) == "Press me"
@@ -288,6 +358,11 @@ def test_script_answers_become_screen_coordinates():
     assert languages == {"available": ["en-US", "zh-Hans-CN"], "user": "zh-Hans-CN"}
     assert passes[0].lines[0][0].rect == (110.0, 220.0, 30.0, 10.0)
     assert passes[1].lines[0][0].text == "Save" and passes[1].lines[0][0].rect == (110.0, 220.0, 30.0, 10.0)
+    # one line of two words with the outer array unwrapped too
+    collapsed = {"passes": [{"image": 0, "language": "en-US", "lines": [{"t": "Press", "r": [0, 0, 40, 10]},
+                                                                      {"t": "me", "r": [45, 0, 20, 10]}]}]}  # fmt: skip
+    passes, _ = ocr.parse(collapsed, [1.0], 0, 0)
+    assert len(passes[0].lines) == 1 and ocr.find_in(passes[0].lines, "press me")
     with pytest.raises(ocr.OcrError, match="Add-WindowsCapability"):
         ocr.parse({"error": "no_language", "available": []}, [1.0], 0, 0)
     with pytest.raises(ocr.OcrError, match="available: en-US, ja"):
@@ -328,8 +403,8 @@ def test_ocr_click_moves_the_mouse_only_on_an_exact_match(monkeypatch):
     monkeypatch.setattr(desktop, "input_action", lambda *a, **k: clicks.append(a) or {"foreground": "app"})
     done = ocr.act("click", "保存", window="app")
     assert clicks == [("click", 31, 20)] and done["done"] == "click at (31, 20)"
-    with pytest.raises(ocr.OcrError, match="closest"):
-        ocr.act("click", "已宛成", window="app")
+    missed = ocr.act("click", "已完成X", window="app")
+    assert "nothing was clicked" in missed["error"] and missed["similar"][0]["score"] >= 0.5
     assert len(clicks) == 1
 
 
@@ -374,10 +449,48 @@ def picture(text="", caret=False, size=(400, 200)):
     return image
 
 
-def test_a_blinking_cursor_is_not_a_change_but_a_small_text_is():
-    assert not desktop.pictures_differ(picture("42%"), picture("42%", caret=True))
-    assert desktop.pictures_differ(picture("42%"), picture("43%"))
-    assert desktop.pictures_differ(picture("42%"), picture("42%", size=(401, 200)))
+def test_changes_are_outlined_and_small_ones_recognized():
+    assert desktop.changed_box(picture("42%"), picture("42%")) is None
+    caret = desktop.changed_box(picture("42%"), picture("42%", caret=True))
+    assert caret and desktop.small_change(caret)
+    digit = desktop.changed_box(picture("42%"), picture("43%"))
+    assert digit and desktop.small_change(digit)  # small, but it lasts: see the waits below
+    assert desktop.changed_box(picture("42%"), picture("42%", size=(401, 200))) == (0, 0, 401, 200)
+    big = desktop.changed_box(picture("Status: waiting"), picture("Status: done, all files copied"))
+    assert big and not desktop.small_change(big)
+
+
+def bar(width: int, block: bool = False, shade: int = 255) -> Image.Image:
+    image = Image.new("L", (400, 200), shade)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20, 100, 20 + width, 115), fill=0)  # a 16 px high progress bar
+    if block:
+        draw.rectangle((300, 40, 308, 57), fill=0)  # a console's 9 x 18 block cursor
+    return image
+
+
+def test_slow_progress_and_fades_are_not_stillness(monkeypatch):
+    # one pixel more per capture: each step alone is tiny, but they add up against the reference
+    _frames(monkeypatch, [bar(10 + i) for i in range(200)])
+    _, _, facts = desktop.wait_picture(1, None, None, "stable", 0.6, 400)
+    assert facts["matched"] is False and "kept changing" in facts["note"]
+    _frames(monkeypatch, [bar(10, shade=255 - 2 * i) for i in range(100)])  # a slow fade
+    _, _, facts = desktop.wait_picture(1, None, None, "stable", 0.6, 400)
+    assert facts["matched"] is False
+
+
+def test_a_blinking_cursor_neither_changes_nor_unsettles_the_picture(monkeypatch):
+    blinking = [bar(50, block=i % 2 == 0) for i in range(300)]
+    _frames(monkeypatch, blinking)
+    _, _, facts = desktop.wait_picture(1, None, None, "stable", 5, 300)
+    assert facts["matched"] is True and facts["waited_s"] < 2
+    _frames(monkeypatch, blinking)
+    _, _, facts = desktop.wait_picture(1, None, None, "change", 0.3, 1000)
+    assert facts["matched"] is False
+    # a small change that stays is a change
+    _frames(monkeypatch, [bar(50)] + [bar(56)] * 50)
+    _, _, facts = desktop.wait_picture(1, None, None, "change", 5, 1000)
+    assert facts["matched"] is True
 
 
 def _frames(monkeypatch, frames):
@@ -427,6 +540,8 @@ def test_dpi_unaware_drawings_are_enlarged_to_the_window():
     assert fitted.size == (600, 400)
     assert fitted.getpixel((590, 390)) == (255, 255, 255)  # no black band left
     assert desktop._fit_drawing(drawing, 1.0) is drawing
+    whole = Image.new("RGB", (600, 400), "white")  # drawn at full size already (GDI scaling)
+    assert desktop._fit_drawing(whole, 1.5) is whole
 
 
 # ------------------------------------------- locked desktop, administrator windows
@@ -473,9 +588,10 @@ def test_input_to_an_administrator_window_is_refused(monkeypatch):
     desktop._check_target("click", (5, 6), None)
     desktop._check_target("drag", (5, 6), (7, 8))
     desktop._check_target("keys", None, None)
+    desktop._check_target("keys", (3, 4), None)  # keys go to the foreground window, not to x, y
     desktop._check_target("type", (1, 2), None)
     desktop._check_target("move", (1, 2), None)  # moving the pointer is not blocked by Windows
-    assert checked == [("at", 5, 6), ("at", 5, 6), ("at", 7, 8), "foreground", ("at", 1, 2)]
+    assert checked == [("at", 5, 6), ("at", 5, 6), ("at", 7, 8), "foreground", "foreground", ("at", 1, 2)]
     error = desktop.admin_error({"title": "PixPin", "process": "PixPin.exe", "pid": 3})
     assert "PixPin.exe, which runs as administrator" in str(error) and "screenshot and ocr" in str(error)
 

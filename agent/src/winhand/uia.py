@@ -98,15 +98,43 @@ def call(fn, *args, timeout: float = TIMEOUT_S):
     except desktop.DesktopError:
         raise
     except FutureTimeout:
+        future.cancel()  # if it has not started, it never will
         with _lock:
             if _worker is worker:
                 _worker = None  # that thread still waits on the program; the next call gets a new one
-        raise NoAnswer(
-            f"the program did not answer UI Automation within {timeout:g} s (it may be busy or hung); "
-            "an action may still have taken effect: look before repeating it"
-        ) from None
-    except Exception as exc:  # COM errors: the control went away, is disabled, refused ...
-        raise desktop.DesktopError(f"UI Automation: {type(exc).__name__}: {exc}") from exc
+        raise NoAnswer(NO_ANSWER) from None
+    except Exception as exc:  # noqa: BLE001 - COM errors: the control went away, is disabled ...
+        raise explain(exc) from exc
+
+
+NO_ANSWER = (
+    "the program did not answer UI Automation in time (it may be busy, hung, or showing a dialog "
+    "it opened); an action may still have taken effect: look before repeating it"
+)
+# UI Automation's own error codes share their numbers with unrelated COM errors, so Windows' message
+# texts for them are misleading ("An event was unable to invoke any of the subscribers")
+_HRESULTS = {
+    0x80040200: "the control is disabled right now",
+    0x80040201: "the control is gone (the window changed); inspect it again",
+    0x80040202: "the control has no point that can be clicked",
+    0x80131509: "the control refused this operation in its current state",
+    0x80070005: "access denied (is the program running as administrator?)",
+}
+
+
+def explain(exc: Exception) -> desktop.DesktopError:
+    """A COM failure from UI Automation as an error a person can read."""
+    code = getattr(exc, "hresult", None)
+    if code is None and exc.args and isinstance(exc.args[0], int):
+        code = exc.args[0]
+    if code is None:
+        code = getattr(exc, "winerror", None)
+    code = code & 0xFFFFFFFF if isinstance(code, int) else None
+    if code == 0x80131505:  # UIA_E_TIMEOUT: UI Automation's own time limit
+        return NoAnswer(NO_ANSWER)
+    if code in _HRESULTS:
+        return desktop.DesktopError(f"UI Automation: {_HRESULTS[code]}")
+    return desktop.DesktopError(f"UI Automation failed: {type(exc).__name__}: {exc}")
 
 
 def _automation():
@@ -365,9 +393,9 @@ def _act(element, verb: str, value: str | None) -> str | None:
     return None
 
 
-def act(element, verb: str, value: str | None = None) -> str | None:
+def act(element, verb: str, value: str | None = None, timeout: float = TIMEOUT_S) -> str | None:
     """Operate the element through its UI Automation pattern; None when it offers none for verb."""
-    return call(_act, element, verb, value)
+    return call(_act, element, verb, value, timeout=timeout)
 
 
 def _scroll_into_view(element) -> list[int] | None:
