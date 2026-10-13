@@ -375,26 +375,33 @@ APPROVALS_REFUSAL = (
 )
 
 
-def _link_chain(path) -> set[str]:
-    """Every place a file is reached through: as given, with the folders on the way resolved, and each
-    link it leads through when it is a link (to a link ...), up to the file at the end."""
+def _is_link(path: str) -> bool:
+    return os.path.islink(path) or os.path.isjunction(path)  # junctions are not symlinks to Python
 
-    def plain(p: str) -> str:
-        if p.startswith(("\\\\?\\", "\\\\.\\")) and not p[4:].upper().startswith("UNC\\"):
-            p = p[4:]  # Windows reports link targets as \\?\C:\...
-        return os.path.abspath(p)
 
+def _link_chain(path, limit: int = 40) -> set[str]:
+    """Every spelling a file is reached through: walking its path one part at a time, each link met
+    (a folder or the file, a symlink or a junction) is followed and the path through its target
+    noted, so the place of every link on the way stays protected, nested ones included."""
     places = {os.path.normcase(os.path.realpath(path))}
-    here = plain(str(path))
-    for _ in range(16):
-        places.add(os.path.normcase(here))
-        here = os.path.join(os.path.realpath(os.path.dirname(here)), os.path.basename(here))
-        places.add(os.path.normcase(here))
-        if not os.path.islink(here):
-            break
-        try:
-            here = plain(os.path.join(os.path.dirname(here), os.readlink(here)))
-        except (OSError, ValueError):
+    todo = [os.path.abspath(str(path))]
+    hops = 0
+    while todo and hops < limit:
+        full = todo.pop()
+        places.add(os.path.normcase(full))
+        drive, tail = os.path.splitdrive(full)
+        parts = [part for part in tail.replace(os.altsep or os.sep, os.sep).split(os.sep) if part]
+        here = drive + os.sep
+        for index, part in enumerate(parts):
+            here = os.path.join(here, part)
+            if not _is_link(here):
+                continue
+            hops += 1
+            try:
+                target = variants(os.readlink(here))[0]  # without a \\?\ prefix, like other paths
+            except (OSError, ValueError):
+                break
+            todo.append(os.path.abspath(os.path.join(os.path.dirname(here), target, *parts[index + 1 :])))
             break
     return places
 

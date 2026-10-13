@@ -645,6 +645,45 @@ async def test_an_approvals_file_kept_elsewhere_through_a_link_is_protected_both
     assert real.read_text(encoding="utf-8") == "ask = true\n[always]\n" and approvals.enabled()
 
 
+async def test_a_folder_link_inside_a_linked_folder_is_protected(tmp_path, monkeypatch):
+    # WINHAND_HOME = T/x/A/B with x/A -> y/A2 and y/A2/B -> z/B2 (a junction inside a junction)
+    for folder in ("x", "y/A2", "z/B2"):
+        (tmp_path / folder).mkdir(parents=True)
+    links = [
+        (tmp_path / "x" / "A", tmp_path / "y" / "A2"),
+        (tmp_path / "y" / "A2" / "B", tmp_path / "z" / "B2"),
+    ]
+    for link, target in links:
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError:  # Windows without the symlink privilege: junctions, as user folders often are
+            import _winapi
+
+            _winapi.CreateJunction(str(target), str(link))
+    monkeypatch.setenv("WINHAND_HOME", str(tmp_path / "x" / "A" / "B"))
+    approvals.allow_always("notepad.exe")
+    before = approvals.path().read_text(encoding="utf-8")
+    backup = tmp_path / "backup" / "A2" / "B"
+    backup.mkdir(parents=True)
+    (backup / approvals.FILE_NAME).write_text("ask = false\n", encoding="utf-8")
+    async with Client(build_server(Config())) as client:
+        for tool, arguments in [
+            (
+                "fs_op",
+                {"action": "copy", "path": str(backup.parent), "to": str(tmp_path / "y"), "overwrite": True},
+            ),
+            ("fs_op", {"action": "delete", "path": str(tmp_path / "y" / "A2"), "recursive": True}),
+            ("fs_op", {"action": "delete", "path": str(tmp_path / "z"), "recursive": True}),
+        ]:
+            result = await client.call_tool(tool, arguments, raise_on_error=False)
+            assert result.is_error and "only the person at the machine" in result.content[0].text, arguments
+        sibling = await client.call_tool(
+            "fs_write", {"path": str(tmp_path / "y" / "notes.txt"), "content": "hi"}
+        )
+    assert not sibling.is_error
+    assert approvals.path().read_text(encoding="utf-8") == before and approvals.enabled()
+
+
 @pytest.mark.parametrize("layout", ["home is a link", "a link to a link"])
 async def test_every_link_on_the_way_to_the_approvals_file_is_protected(tmp_path, monkeypatch, layout):
     real = tmp_path / "dotfiles" / "apps.toml"
