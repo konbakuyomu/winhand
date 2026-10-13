@@ -375,14 +375,37 @@ APPROVALS_REFUSAL = (
 )
 
 
+def _link_chain(path) -> set[str]:
+    """Every place a file is reached through: as given, with the folders on the way resolved, and each
+    link it leads through when it is a link (to a link ...), up to the file at the end."""
+
+    def plain(p: str) -> str:
+        if p.startswith(("\\\\?\\", "\\\\.\\")) and not p[4:].upper().startswith("UNC\\"):
+            p = p[4:]  # Windows reports link targets as \\?\C:\...
+        return os.path.abspath(p)
+
+    places = {os.path.normcase(os.path.realpath(path))}
+    here = plain(str(path))
+    for _ in range(16):
+        places.add(os.path.normcase(here))
+        here = os.path.join(os.path.realpath(os.path.dirname(here)), os.path.basename(here))
+        places.add(os.path.normcase(here))
+        if not os.path.islink(here):
+            break
+        try:
+            here = plain(os.path.join(os.path.dirname(here), os.readlink(here)))
+        except (OSError, ValueError):
+            break
+    return places
+
+
 def touches_approvals(actions: list[Action], mkdir: bool = False) -> bool:
     """Whether a file tool would write, edit, move or delete the desktop approvals file
     (approvals.py), or write (a folder copied over it), move or delete a folder holding it: built in,
     whatever the owner's rules say. Creating a folder (`mkdir`) changes nothing in one."""
     from . import approvals
 
-    given_target = os.path.abspath(approvals.path())
-    targets = {os.path.normcase(given_target), os.path.normcase(os.path.realpath(given_target))}
+    targets = _link_chain(approvals.path())
     for action in actions:
         if action.kind not in ("write", "edit", "delete", "move"):
             continue

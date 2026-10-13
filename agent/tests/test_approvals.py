@@ -645,6 +645,40 @@ async def test_an_approvals_file_kept_elsewhere_through_a_link_is_protected_both
     assert real.read_text(encoding="utf-8") == "ask = true\n[always]\n" and approvals.enabled()
 
 
+@pytest.mark.parametrize("layout", ["home is a link", "a link to a link"])
+async def test_every_link_on_the_way_to_the_approvals_file_is_protected(tmp_path, monkeypatch, layout):
+    real = tmp_path / "dotfiles" / "apps.toml"
+    real.parent.mkdir()
+    real.write_text("ask = true\n", encoding="utf-8")
+    try:
+        if layout == "home is a link":  # WINHAND_HOME -> realhome, its desktop-apps.toml -> dotfiles
+            middle, name = tmp_path / "realhome", approvals.FILE_NAME
+            middle.mkdir()
+            (tmp_path / "linkhome").symlink_to(middle, target_is_directory=True)
+            monkeypatch.setenv("WINHAND_HOME", str(tmp_path / "linkhome"))
+            (middle / name).symlink_to(real)
+        else:  # desktop-apps.toml -> mid/link.toml -> dotfiles
+            middle, name = tmp_path / "mid", "link.toml"
+            middle.mkdir()
+            (middle / name).symlink_to(real)
+            approvals.path().parent.mkdir(parents=True, exist_ok=True)
+            approvals.path().symlink_to(middle / name)
+    except OSError:
+        pytest.skip("creating symlinks needs a privilege here")
+    backup = tmp_path / "backup" / middle.name
+    backup.mkdir(parents=True)
+    (backup / name).write_text("ask = false\n", encoding="utf-8")
+    async with Client(build_server(Config())) as client:
+        for tool, arguments in [
+            ("fs_op", {"action": "copy", "path": str(backup), "to": str(tmp_path), "overwrite": True}),
+            ("fs_op", {"action": "delete", "path": str(middle), "recursive": True}),
+            ("fs_write", {"path": str(middle / name), "content": "ask = false\n"}),
+        ]:
+            result = await client.call_tool(tool, arguments, raise_on_error=False)
+            assert result.is_error and "only the person at the machine" in result.content[0].text, tool
+    assert real.read_text(encoding="utf-8") == "ask = true\n" and approvals.enabled()
+
+
 def test_cli_allow_and_off_need_the_persons_yes(monkeypatch, capsys):
     answers = []
     monkeypatch.setattr(secret_prompt, "ask_confirm", lambda title, message, timeout_s=120: answers.pop(0))
