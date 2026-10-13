@@ -444,6 +444,20 @@ def test_only_a_higher_integrity_level_counts_as_administrator(monkeypatch):
     assert desktop.is_elevated(1) is False
 
 
+async def test_window_list_names_the_desktop_state_and_wait_still_works(monkeypatch):
+    monkeypatch.setattr(td.desktop, "monitors", lambda: [])
+    monkeypatch.setattr(td.desktop, "windows", lambda: [{"hwnd": 1, "title": "Setup", "admin": True}])
+    monkeypatch.setattr(td.desktop, "desktop_state", lambda: "locked")
+    monkeypatch.setattr(td.desktop, "find_window", lambda _: {"hwnd": 1, "title": "Setup"})
+    async with Client(build_server(Config())) as client:
+        listed = (await client.call_tool("window", {})).structured_content
+        waited = (
+            await client.call_tool("window", {"action": "wait", "target": "Setup", "timeout_s": 0})
+        ).structured_content
+    assert listed["desktop"] == "locked" and listed["windows"][0]["admin"] is True
+    assert waited["matched"] is True
+
+
 async def test_ui_refuses_an_administrator_window(monkeypatch):
     _fake_window(monkeypatch, title="Setup", process="setup.exe", admin=True)
     monkeypatch.setattr(uia, "snapshot", lambda *a, **k: pytest.fail("must not read it"))

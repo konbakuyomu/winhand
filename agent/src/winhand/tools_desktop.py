@@ -454,9 +454,9 @@ def register(mcp: FastMCP) -> None:
         def work():
             if action == "list":
                 out = {"monitors": desktop.monitors(), "windows": desktop.windows()}
-                state = desktop.desktop_state()
-                if state != "ok":
-                    out.update(desktop=state, note=desktop.DESKTOP_MESSAGES[state])
+                screen = desktop.desktop_state()
+                if screen != "ok":
+                    out.update(desktop=screen, note=desktop.DESKTOP_MESSAGES[screen])
                 return out
             if target is None:
                 raise ValueError("give target (title part, process name or handle)")
