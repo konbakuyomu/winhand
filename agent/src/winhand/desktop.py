@@ -1026,9 +1026,10 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     not changed for stable_ms ('stable'). Returns (image, place, facts).
 
     Changes are measured against a reference picture, not the capture before, so slow changes (a
-    progress bar, a fade) add up. A small change counts for 'change' once it has lasted a few
-    captures, and for 'stable' unless the picture returns to one seen just before: a blinking
-    cursor does neither."""
+    progress bar, a fade) add up. For 'change' a change must still be there on the next capture (a
+    window drawing itself now and then delivers one half-painted picture), a small one for a few
+    seconds (longer than a cursor blink). For 'stable' a picture that returns to one seen just
+    before is no change: a blinking cursor or such a one-off picture."""
     if condition not in ("change", "stable"):
         raise DesktopError("wait is change or stable")
     began = time.monotonic()
@@ -1040,8 +1041,8 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     if reference is None:
         reference = grey
     last_change = began
-    small_since = None  # when the small change seen now (for 'change') first appeared
-    recent: list = []
+    changed_since = None  # when the change seen now (for 'change') first appeared
+    states = [grey]  # the distinct pictures seen lately ('stable'): coming back to one is no change
     zoom = _zoom()
 
     def facts(matched: bool) -> dict:
@@ -1055,22 +1056,24 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     while True:
         box = changed_box(reference, grey)
         if condition == "change" and box is not None:
-            if not small_change(box, zoom):
-                return image, place, facts(True)
-            small_since = small_since or time.monotonic()
-            if time.monotonic() - small_since >= LASTING_S:
+            seen_before = changed_since
+            changed_since = changed_since or time.monotonic()
+            if not small_change(box, zoom) and seen_before is not None:
+                return image, place, facts(True)  # still there on the next capture
+            if time.monotonic() - changed_since >= LASTING_S:
                 return image, place, facts(True)
         elif condition == "change":
-            small_since = None
+            changed_since = None
         if condition == "stable" and box is not None:
-            back = small_change(box, zoom) and any(changed_box(seen, grey) is None for seen in recent)
-            if not back:  # a new picture, not a cursor blinking back
-                reference, last_change = grey, time.monotonic()
+            back = any(changed_box(state, grey) is None for state in states)
+            if not back:  # a new picture, not a cursor blinking back or a one-off picture going away
+                states = [*states[-3:], grey]
+                last_change = time.monotonic()
+            reference = grey
         if condition == "stable" and time.monotonic() - last_change >= still_for:
             return image, place, facts(True)
         if time.monotonic() >= deadline:
             return image, place, facts(False)
-        recent = [*recent[-3:], grey]
         time.sleep(WAIT_PICTURE_S)
         image, place = capture(window, monitor, region)
         grey = _grey(image)
