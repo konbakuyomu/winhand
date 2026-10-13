@@ -28,6 +28,7 @@ from . import (
     secret_store,
     tools_desktop,
     transfer,
+    venv_repair,
     winenv,
     workspace,
 )
@@ -278,6 +279,8 @@ def build_server(
         info = await asyncio.to_thread(proc.sys_info)
         if checks:
             info["checks"] = await asyncio.to_thread(proc.doctor)
+            entries = [s.entry for s in local_mcp.services().services.values()]
+            info["checks"] += await asyncio.to_thread(venv_repair.checks, entries)
         info["winhand"] = __version__
         info["local_mcp_servers"] = {
             "names": local_servers,

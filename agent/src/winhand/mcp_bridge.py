@@ -37,7 +37,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from . import __version__, winenv
+from . import __version__, venv_repair, winenv
 from .activity import PREVIEW_CHARS, ActivityHub, preview
 from .config import ServerEntry, home
 
@@ -269,6 +269,7 @@ class Service:
         self.last_used: float | None = None
         self.init_params: dict | None = None
         self.init_result: dict | None = None
+        self.note: str | None = None  # e.g. that winhand repaired its Python environment
         self.sessions: dict[str, _Session] = {}
         self.pending: dict[int, _Pending] = {}
         # requests the server has not answered yet (also those whose client gave up), by send time
@@ -293,6 +294,7 @@ class Service:
             if self.entry.kind == "stdio"
             else ("running" if self.entry.enabled else "stopped"),
             "error": self.error,
+            "note": self.note,
             "pid": self.process.pid if self.process and self.process.alive() else None,
             "started_at": self.started_at,
             "last_used": self.last_used,
@@ -332,6 +334,14 @@ class Service:
             if params is not None:
                 self.init_params = params
             self._set_state("starting")
+            try:  # a `uv run` project whose Python was removed: rebuild it first (venv_repair.py)
+                note = await asyncio.to_thread(venv_repair.prepare, self.entry)
+            except RuntimeError as exc:
+                self._set_state("error", str(exc)[:600])
+                raise ServiceError(str(exc)[:1500]) from None
+            if note:
+                self.note = note
+                log.warning("mcp server %s: %s", self.entry.name, note)
             loop = asyncio.get_running_loop()
             try:
                 self.process = StdioProcess(self.entry, loop, self._on_message, self._on_exit)
@@ -350,10 +360,13 @@ class Service:
                 message = f"{self.entry.name} did not initialize: {reason}" + (
                     f" ({tail})" if tail and tail not in reason else ""
                 )
+                why = venv_repair.explain(self.entry, list(process.stderr)[-15:])
+                if why:
+                    message = f"{message[:400]}. Cause: {why}"
                 await asyncio.to_thread(process.stop)
                 self.process = None
-                self._set_state("error", message[:600])
-                raise ServiceError(message[:600]) from None
+                self._set_state("error", message[:1000])
+                raise ServiceError(message[:1000]) from None
             if "error" in answer:
                 await asyncio.to_thread(process.stop)
                 self.process = None
@@ -991,6 +1004,14 @@ async def probe(entry: ServerEntry, timeout: float | None = None) -> dict:
     result: dict[str, Any] = {"name": entry.name, "ok": False}
     errlog_path = home() / "logs" / "mcp" / f"{entry.name}.test.log"
     errlog_path.parent.mkdir(parents=True, exist_ok=True)
+    try:  # a `uv run` project whose Python was removed: rebuild it first (venv_repair.py)
+        note = await asyncio.to_thread(venv_repair.prepare, entry)
+    except RuntimeError as exc:
+        result["error"] = str(exc)[:1500]
+        result["duration_ms"] = round((time.time() - started) * 1000)
+        return result
+    if note:
+        result["repaired"] = note
     try:
         if entry.url:
             transport: Any = StreamableHttpTransport(entry.url, headers=entry.headers or None)
@@ -1044,4 +1065,7 @@ async def probe(entry: ServerEntry, timeout: float | None = None) -> dict:
             result["stderr_tail"] = errlog_path.read_text(encoding="utf-8", errors="replace").splitlines()[
                 -15:
             ]
+    why = venv_repair.explain(entry, result.get("stderr_tail")) if not result["ok"] else None
+    if why:
+        result["error"] = f"{result.get('error') or 'it did not start'}. Cause: {why}"
     return result
