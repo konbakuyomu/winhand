@@ -33,6 +33,7 @@ def _tracked(root: str, paths: list[str]) -> set[str]:
     try:
         done = subprocess.run(
             ["git", "-C", root, "ls-files", "-z", "--", *inside],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

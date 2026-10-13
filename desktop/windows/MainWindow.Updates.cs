@@ -6,7 +6,9 @@ namespace Winhand.Desktop;
 public sealed partial class MainWindow
 {
     private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(6);
-    private TextBlock? _updateSummary, _updateFacts, _updateDetail, _updateNotes;
+    private TextBlock? _updateSummary, _updateFacts, _updateDetail;
+    private StackPanel? _updateNotes;
+    private string? _renderedNotes;
     private Border? _updateNotesBox;
     private Button? _updateAction, _updateCancel;
     private ToggleSwitch? _autoCheckSwitch;
@@ -122,14 +124,48 @@ public sealed partial class MainWindow
         }
     }
 
+    /// <summary>The release notes as headings, bullets and paragraphs (they arrive as Markdown).</summary>
+    private void RenderNotes(string? version, string notes)
+    {
+        var key = $"{version}\n{notes}";
+        if (_updateNotes is null || key == _renderedNotes)
+            return; // RenderUpdate runs on every progress tick; rebuild only when the notes change
+        _renderedNotes = key;
+        _updateNotes.Children.Clear();
+        if (notes.Length == 0)
+            return;
+        _updateNotes.Children.Add(Text($"{version} 更新内容", "LabelCopyStyle"));
+        foreach (var line in ReleaseNotes.Parse(notes, version))
+        {
+            var text = Text(line.Text, line.Kind == NoteKind.Heading ? "LabelCopyStyle" : "BodyCopyStyle");
+            text.IsTextSelectionEnabled = true;
+            if (line.Kind == NoteKind.Heading)
+            {
+                text.Margin = new Thickness(0, 6, 0, 0);
+                _updateNotes.Children.Add(text);
+            }
+            else if (line.Kind == NoteKind.Bullet)
+            {
+                var row = new Grid { ColumnSpacing = 8 };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.Children.Add(Text("•", "BodyCopyStyle"));
+                Grid.SetColumn(text, 1);
+                row.Children.Add(text);
+                _updateNotes.Children.Add(row);
+            }
+            else
+                _updateNotes.Children.Add(text);
+        }
+    }
+
     private UIElement BuildUpdateCard()
     {
         _updateSummary = Text("", "LabelCopyStyle");
         _updateFacts = Text("", "SecondaryCopyStyle");
         _updateDetail = Text("", "SecondaryCopyStyle");
         _updateProgress = new ProgressBar { Minimum = 0, Maximum = 100, Visibility = Visibility.Collapsed };
-        _updateNotes = Text("", "BodyCopyStyle");
-        _updateNotes.IsTextSelectionEnabled = true;
+        _updateNotes = new StackPanel { Spacing = 6 };
         _updateNotesBox = new Border
         {
             Child = new ScrollViewer { Content = _updateNotes, MaxHeight = 220 },
@@ -184,7 +220,7 @@ public sealed partial class MainWindow
         _updateFacts!.Text = facts;
 
         var notes = _updater.ReleaseNotes;
-        _updateNotes!.Text = notes.Length > 0 ? $"{_updater.LatestVersion} 更新内容\n\n{notes}" : "";
+        RenderNotes(_updater.LatestVersion, notes);
         _updateNotesBox!.Visibility = _updater.Available && notes.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         _updateProgress!.Visibility = _updater.Downloading ? Visibility.Visible : Visibility.Collapsed;
         _updateProgress.Value = _updater.Progress;
