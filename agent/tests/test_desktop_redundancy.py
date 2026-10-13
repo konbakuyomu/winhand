@@ -567,10 +567,13 @@ def test_the_tall_cursor_of_a_large_font_is_a_cursor(monkeypatch):
 
 def test_a_large_two_picture_animation_is_not_still(monkeypatch):
     _clock(monkeypatch)
-    for every in (1, 2):  # alternating on every capture, or every second one
-        _frames(monkeypatch, [_form(spinner=(i // every) % 2) for i in range(80)])
+    # alternating on every capture, every second one, and out of step with the captures (0.5 s phases
+    # sampled every 0.3 s): each picture is often caught once, like a one-off half-painted picture
+    for name, phase in (("every capture", lambda i: i % 2), ("every second", lambda i: (i // 2) % 2),
+                        ("out of step", lambda i: int(i * 0.3 / 0.5) % 2)):  # fmt: skip
+        _frames(monkeypatch, [_form(spinner=phase(i)) for i in range(80)])
         _, _, facts = desktop.wait_picture(1, None, None, "stable", 8, 1000)
-        assert facts["matched"] is False, every
+        assert facts["matched"] is False, name
 
 
 def test_large_animations_are_not_still_but_a_one_off_picture_is_overlooked(monkeypatch):
