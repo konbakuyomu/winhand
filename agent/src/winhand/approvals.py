@@ -414,14 +414,7 @@ def _ask_person(app: App, action: str, warning: str | None) -> str:
             _opening.discard(app.exe)
 
     name, title = short(app.name or app.exe, 80), short(app.title, 120)
-    with _lock:
-        _opening.add(app.exe)
-    try:
-        return ask_approval(
-            name, app.exe, title, short(action, 160), warning, timeout_s=DIALOG_S, on_shown=shown
-        )
-    finally:
-        shown()
+    return ask_approval(name, app.exe, title, short(action, 160), warning, timeout_s=DIALOG_S, on_shown=shown)
 
 
 def _dialog(app: App, action: str, future: Future, ask) -> None:
@@ -446,6 +439,7 @@ def _dialog(app: App, action: str, future: Future, ask) -> None:
     finally:
         with _lock:
             _pending.pop(app.exe, None)
+            _opening.discard(app.exe)
         future.set_result(answer)
 
 
@@ -463,6 +457,8 @@ def check(app: App, action: str, ask: Callable[[App, str, str | None], str] | No
             if future is None:
                 future = Future()
                 _pending[key] = future
+                if ask is None:  # the real dialog says when it is on the screen (fakes do not)
+                    _opening.add(key)
                 threading.Thread(
                     target=_dialog,
                     args=(app, action, future, ask or _ask_person),

@@ -130,32 +130,38 @@ def test_a_dialog_opens_while_another_thread_reads_stdin():
     reason="the real dialog on a Windows desktop",
 )
 def test_the_real_approval_dialog_is_seen_on_the_screen(monkeypatch):
-    # the real dialog's process (behind a venv's python.exe, a child of the one started) must count
-    # as shown: it stays up well past SHOW_S, and closing its window answers "deny"
+    # the real dialog's process (behind a venv's python.exe, a child of the one started) must be seen
+    # on the screen; closing its window then answers "deny"
     from winhand import desktop
 
-    monkeypatch.setattr(secret_prompt, "SHOW_S", 2.0)
-    result = {}
+    checks = []
+    real_check = secret_prompt._window_visible
+    monkeypatch.setattr(
+        secret_prompt, "_window_visible", lambda pid: checks.append(real_check(pid)) or checks[-1]
+    )
+    result, shown = {}, threading.Event()
 
     def ask():
         try:
             result["value"] = secret_prompt.ask_approval(
-                "测试程序", "winhand-test.exe", "测试窗口", "点击", timeout_s=60
+                "测试程序", "winhand-test.exe", "测试窗口", "点击", timeout_s=60, on_shown=shown.set
             )
         except secret_prompt.PromptUnavailable as exc:
             result["value"] = f"unavailable: {exc}"
 
+    began = time.monotonic()
     worker = threading.Thread(target=ask, daemon=True)
     worker.start()
-    began, seen, closed = time.monotonic(), None, False
-    while worker.is_alive() and time.monotonic() - began < 40:
-        dialogs = [w for w in desktop.windows() if w["title"].startswith("WinHand：AI 想操作一个程序")]
-        if dialogs and seen is None:
-            seen = time.monotonic()
-        if dialogs and time.monotonic() - seen >= 4:  # twice SHOW_S: a dialog taken for unseen is gone
-            for window in dialogs:
+    assert shown.wait(40), (result, checks[-5:])
+    seen_after = time.monotonic() - began
+    closed = False
+    while worker.is_alive() and time.monotonic() - began < 50:
+        for window in desktop.windows():
+            if window["title"].startswith("WinHand：AI 想操作一个程序"):
                 desktop.user32.PostMessageW(window["hwnd"], 0x0010, 0, 0)  # WM_CLOSE
-            closed = True
+                closed = True
         time.sleep(0.2)
     worker.join(30)
-    assert closed and result.get("value") == "deny", result
+    # seen by the real check, not taken as shown because the check could not run (None)
+    assert True in checks and None not in checks, checks[-5:]
+    assert closed and result.get("value") == "deny", (result, f"seen after {seen_after:.1f}s")

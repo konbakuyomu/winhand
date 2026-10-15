@@ -186,6 +186,11 @@ def test_a_call_out_of_time_says_whether_the_dialog_is_on_the_screen(monkeypatch
     expected = "a dialog is open there" if appears else "is still opening"
     assert expected in str(waiting.value), str(waiting.value)
     released.set()
+    for _ in range(100):  # let the dialog thread finish before the next test's fresh state
+        if not approvals._pending:
+            break
+        time.sleep(0.02)
+    assert not approvals._pending and not approvals._opening
 
 
 # ------------------------------------------------------------------ terminals, cautions (A7, A11)
