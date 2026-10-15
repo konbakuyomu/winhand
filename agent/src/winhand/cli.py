@@ -265,7 +265,7 @@ def _apps(action: str, exe: str | None) -> int:
     try:
         yes = ask_confirm("WinHand：程序授权", question)
     except PromptUnavailable as exc:
-        print(f"no answer in the confirmation dialog: {exc}", file=sys.stderr)
+        print(f"winhand apps {action}: {exc}", file=sys.stderr)
         return 1
     if not yes:
         print("没有改动（确认框里选了“否”）")

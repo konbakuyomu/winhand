@@ -71,6 +71,25 @@ def test_a_dialog_on_the_screen_nobody_answers_times_out(monkeypatch):
     assert started[0].poll() is not None
 
 
+def test_a_dialog_that_fails_after_much_output_reports_its_error(monkeypatch):
+    # its output is read while waiting for the window: a full pipe must not hold it until SHOW_S
+    code = "import sys; sys.stderr.write('x' * 300000 + '\\n_tkinter.TclError: no display'); sys.exit(1)"
+    fake_dialog(monkeypatch, code)
+    monkeypatch.setattr(secret_prompt, "_window_visible", lambda pid: False)
+    monkeypatch.setattr(secret_prompt, "SHOW_S", 5.0)
+    with pytest.raises(secret_prompt.PromptUnavailable, match="cannot open a dialog.*no display") as failed:
+        secret_prompt._run_dialog("{}", timeout_s=30)
+    assert not isinstance(failed.value, secret_prompt.DialogNotShown)
+
+
+def test_nobody_is_asked_while_the_screen_is_locked(monkeypatch):
+    started = fake_dialog(monkeypatch, 'print(\'{"value": "deny"}\')')
+    monkeypatch.setattr(secret_prompt, "_screen_state", lambda: "locked")
+    with pytest.raises(secret_prompt.DialogNotShown, match="screen at the machine is locked"):
+        secret_prompt._run_dialog("{}", timeout_s=30)
+    assert not started  # no dialog process at all
+
+
 def test_a_dialog_opens_while_another_thread_reads_stdin():
     # a process like the desktop backend: one thread waits for requests on stdin, another asks
     script = textwrap.dedent(
@@ -110,11 +129,12 @@ def test_a_dialog_opens_while_another_thread_reads_stdin():
     sys.platform != "win32" or importlib.util.find_spec("tkinter") is None,
     reason="the real dialog on a Windows desktop",
 )
-def test_the_real_approval_dialog_is_seen_on_the_screen():
-    # the real dialog process (behind a venv's python.exe it is a child of the one started) must
-    # count as shown; closing its window answers "deny"
+def test_the_real_approval_dialog_is_seen_on_the_screen(monkeypatch):
+    # the real dialog's process (behind a venv's python.exe, a child of the one started) must count
+    # as shown: it stays up well past SHOW_S, and closing its window answers "deny"
     from winhand import desktop
 
+    monkeypatch.setattr(secret_prompt, "SHOW_S", 2.0)
     result = {}
 
     def ask():
@@ -127,12 +147,15 @@ def test_the_real_approval_dialog_is_seen_on_the_screen():
 
     worker = threading.Thread(target=ask, daemon=True)
     worker.start()
-    began, closed = time.monotonic(), False
+    began, seen, closed = time.monotonic(), None, False
     while worker.is_alive() and time.monotonic() - began < 40:
-        for window in desktop.windows():
-            if window["title"].startswith("WinHand：AI 想操作一个程序"):
+        dialogs = [w for w in desktop.windows() if w["title"].startswith("WinHand：AI 想操作一个程序")]
+        if dialogs and seen is None:
+            seen = time.monotonic()
+        if dialogs and time.monotonic() - seen >= 4:  # twice SHOW_S: a dialog taken for unseen is gone
+            for window in dialogs:
                 desktop.user32.PostMessageW(window["hwnd"], 0x0010, 0, 0)  # WM_CLOSE
-                closed = True
+            closed = True
         time.sleep(0.2)
     worker.join(30)
     assert closed and result.get("value") == "deny", result

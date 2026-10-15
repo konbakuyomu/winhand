@@ -157,6 +157,7 @@ _lock = threading.Lock()
 _session: dict[str, float] = {}  # exe -> when allowed (time.time) until this process ends
 _denied: dict[str, float] = {}  # exe -> when refused (time.monotonic)
 _pending: dict[str, Future] = {}  # exe -> the open dialog's answer
+_opening: set[str] = set()  # exes whose dialog has started but is not on the screen yet
 _file: dict = {"stamp": None, "ask": True, "always": {}, "error": None}
 _listeners: list[Callable[[], None]] = []
 
@@ -408,8 +409,19 @@ def _ask_person(app: App, action: str, warning: str | None) -> str:
         text = " ".join(text.split())  # one line each: line breaks cannot stretch the dialog
         return text if len(text) <= limit else text[: limit - 1] + "…"
 
+    def shown() -> None:
+        with _lock:
+            _opening.discard(app.exe)
+
     name, title = short(app.name or app.exe, 80), short(app.title, 120)
-    return ask_approval(name, app.exe, title, short(action, 160), warning, timeout_s=DIALOG_S)
+    with _lock:
+        _opening.add(app.exe)
+    try:
+        return ask_approval(
+            name, app.exe, title, short(action, 160), warning, timeout_s=DIALOG_S, on_shown=shown
+        )
+    finally:
+        shown()
 
 
 def _dialog(app: App, action: str, future: Future, ask) -> None:
@@ -478,6 +490,13 @@ def check(app: App, action: str, ask: Callable[[App, str, str | None], str] | No
     try:
         answer = future.result(timeout=wait)
     except FutureTimeout:
+        with _lock:
+            opening = key in _opening
+        if opening:  # this call's time ran out before the dialog was on the screen
+            raise NotOperable(
+                f"The dialog asking the person at the machine to allow operating {app.label} is still "
+                "opening. Nothing was sent. Call again in a few seconds."
+            ) from None
         raise NotOperable(
             f"Waiting for the person at the machine to allow operating {app.label}: a dialog is open "
             f"there for up to {int(DIALOG_S / 60)} minutes. Nothing was sent. Call again after they "

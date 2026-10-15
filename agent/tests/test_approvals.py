@@ -31,6 +31,7 @@ def fresh(monkeypatch):
     monkeypatch.setattr(approvals, "_session", {})
     monkeypatch.setattr(approvals, "_denied", {})
     monkeypatch.setattr(approvals, "_pending", {})
+    monkeypatch.setattr(approvals, "_opening", set())
     monkeypatch.setattr(approvals, "_file", {"stamp": None, "ask": True, "always": {}, "error": None})
     monkeypatch.setattr(approvals, "_listeners", [])
 
@@ -166,6 +167,25 @@ def test_a_dialog_that_never_appeared_is_not_reported_as_unanswered():
     assert "Nobody allowed" not in message and "winhand apps allow notepad.exe" in message
     assert approvals.status("notepad.exe") == "ask"  # nothing remembered: the next call asks again
     approvals.check(NOTEPAD, "点击 (1, 2)", person)
+
+
+@pytest.mark.parametrize("appears", [False, True])
+def test_a_call_out_of_time_says_whether_the_dialog_is_on_the_screen(monkeypatch, appears):
+    monkeypatch.setattr(approvals, "WAIT_S", 0.3)
+    released = threading.Event()
+
+    def ask_approval(*args, on_shown=None, **kwargs):
+        if appears:
+            on_shown()
+        released.wait(10)
+        return "deny"
+
+    monkeypatch.setattr(secret_prompt, "ask_approval", ask_approval)
+    with pytest.raises(NotOperable) as waiting:
+        approvals.check(NOTEPAD, "点击 (1, 2)")  # the real _ask_person, with the dialog faked
+    expected = "a dialog is open there" if appears else "is still opening"
+    assert expected in str(waiting.value), str(waiting.value)
+    released.set()
 
 
 # ------------------------------------------------------------------ terminals, cautions (A7, A11)
@@ -358,7 +378,7 @@ def test_keys_are_refused_while_no_window_is_in_front(monkeypatch):
 def test_the_dialog_text_from_the_program_is_kept_short(monkeypatch):
     shown = {}
     monkeypatch.setattr(
-        secret_prompt, "ask_approval", lambda name, exe, title, action, warning, timeout_s: shown.update(
+        secret_prompt, "ask_approval", lambda name, exe, title, action, warning, timeout_s, on_shown: shown.update(
             name=name, title=title, action=action) or "session"
     )  # fmt: skip
     long = App("app.exe", "名" * 500, "标题\n" * 500)  # line breaks too: one line in the dialog
@@ -852,7 +872,9 @@ def test_ask_approval_sends_the_question_and_reads_the_answer(monkeypatch):
     sent = []
     replies = ["always", "something else"]
     monkeypatch.setattr(
-        secret_prompt, "_run_dialog", lambda payload, timeout_s: sent.append(payload) or replies.pop(0)
+        secret_prompt,
+        "_run_dialog",
+        lambda payload, timeout_s, on_shown: sent.append(payload) or replies.pop(0),
     )
     assert secret_prompt.ask_approval("记事本", "notepad.exe", "无标题", "点击 (1, 2)") == "always"
     assert secret_prompt.ask_approval("记事本", "notepad.exe", "无标题", "点击 (1, 2)") == "deny"
