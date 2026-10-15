@@ -16,6 +16,7 @@ public sealed partial class MainWindow
     private const double PageInset = 24;
     private const double ContentMaxWidth = 920;
     private Action? _feedbackAction;
+    private string? _noticeTitle;
     private bool _uiErrorShown;
 
     // ------------------------------------------------------------------ pages
@@ -352,6 +353,7 @@ public sealed partial class MainWindow
     /// <summary>Show an operation message in the header flyout (reachable again until cleared).</summary>
     private void ShowNotice(string title, string message, InfoBarSeverity severity, string? actionText = null, Action? action = null)
     {
+        _noticeTitle = title;
         FeedbackTitle.Text = title;
         FeedbackMessage.Text = message;
         FeedbackIcon.Glyph = severity switch
@@ -377,6 +379,7 @@ public sealed partial class MainWindow
 
     private void HideNotice()
     {
+        _noticeTitle = null;
         FeedbackFlyout.Hide();
         FeedbackTitle.Text = FeedbackMessage.Text = "";
         _feedbackAction = null;

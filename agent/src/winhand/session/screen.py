@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import threading
 import time
+import unicodedata
 
 import pyte
 from pyte.screens import wcwidth  # the width measure pyte used to lay the cells out
@@ -13,21 +14,23 @@ from pyte.screens import wcwidth  # the width measure pyte used to lay the cells
 def _render(row, columns: int) -> str:
     """One row as text, the way a terminal shows it.
 
-    pyte keeps a wide character (Chinese, emoji) in one cell and an empty stub in the next. A
-    program that redraws over half of one (Codex's TUI does, behind ConPTY) leaves the other half
-    alone; a terminal blanks it, while pyte keeps it and its own `display` then fails with
-    IndexError on the lone stub."""
+    pyte keeps a wide character (Chinese, emoji) in one cell and a stub in the next: empty, or
+    holding the combining marks that followed the character (pyte puts them on the cell before
+    the cursor). A program that redraws over half of a wide character (Codex's TUI does, behind
+    ConPTY) leaves the other half alone; a terminal blanks it, while pyte keeps it and its own
+    `display` then fails with IndexError on the lone stub."""
     out = []
     x = 0
     while x < columns:
         data = row[x].data
-        if not data:  # the right half of a wide character whose left half was overwritten
+        if not data or wcwidth(data[0]) <= 0:  # a stub whose wide character was overwritten
             out.append(" ")
         elif x + 1 < columns and wcwidth(data[0]) == 2:
-            if row[x + 1].data:  # its right half was overwritten
+            stub = row[x + 1].data
+            if stub and wcwidth(stub[0]) > 0:  # its right half was overwritten
                 out.append(" ")
             else:
-                out.append(data)
+                out.append(unicodedata.normalize("NFC", data + stub))
                 x += 1  # past its stub
         else:
             out.append(data)

@@ -32,7 +32,8 @@ internal static class CrashGuard
         };
         try
         {
-            // Windows does this only for a process that ran at least a minute, so it cannot loop
+            // Windows does this only for a process that ran at least a minute: a start that fails
+            // at once is not retried over and over
             RegisterApplicationRestart(Autostart.BackgroundArgument, RestartNoPatch | RestartNoReboot);
         }
         catch (Exception)

@@ -26,6 +26,7 @@ public sealed partial class MainWindow : Window
     private string _currentPage = "overview";
     private int _restartAttempts;
     private bool _starting, _shuttingDown, _allowClose, _everShown;
+    private const string BackendFailedTitle = "后端启动失败";
 
     public MainWindow()
     {
@@ -72,12 +73,13 @@ public sealed partial class MainWindow : Window
             _backendError = null;
             _restartAttempts = 0;
             ApplySnapshot(snapshot);
-            HideNotice();
+            if (_noticeTitle == BackendFailedTitle)
+                HideNotice(); // only its own notice: one about a caught UI error stays
         }
         catch (Exception error)
         {
             _backendError = error.Message;
-            ShowNotice("后端启动失败", error.Message, InfoBarSeverity.Error);
+            ShowNotice(BackendFailedTitle, error.Message, InfoBarSeverity.Error);
             ScheduleRestart();
         }
         finally
