@@ -155,6 +155,19 @@ def test_an_unanswered_dialog_refuses_this_time_only():
     assert len(person.asked) == 2
 
 
+def test_a_dialog_that_never_appeared_is_not_reported_as_unanswered():
+    # 0.6.0's dialog never appeared under the desktop app, and the AI told the person they had not clicked
+    shown_nothing = secret_prompt.DialogNotShown("the dialog did not appear on the screen within 15s")
+    person = Person(shown_nothing, "session")
+    with pytest.raises(NotOperable) as refused:
+        approvals.check(NOTEPAD, "点击 (1, 2)", person)
+    message = str(refused.value)
+    assert "did not appear on the screen" in message and "not a refusal" in message
+    assert "Nobody allowed" not in message and "winhand apps allow notepad.exe" in message
+    assert approvals.status("notepad.exe") == "ask"  # nothing remembered: the next call asks again
+    approvals.check(NOTEPAD, "点击 (1, 2)", person)
+
+
 # ------------------------------------------------------------------ terminals, cautions (A7, A11)
 
 

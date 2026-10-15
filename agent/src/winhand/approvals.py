@@ -413,8 +413,12 @@ def _ask_person(app: App, action: str, warning: str | None) -> str:
 
 
 def _dialog(app: App, action: str, future: Future, ask) -> None:
+    from .secret_prompt import DialogNotShown
+
     try:
         answer = ask(app, action, caution(app.exe))
+    except DialogNotShown as exc:
+        answer = f"notshown: {exc}"
     except Exception as exc:  # noqa: BLE001 - PromptUnavailable (no answer, no desktop) and the like
         answer = f"unavailable: {exc}"
     try:
@@ -485,6 +489,13 @@ def check(app: App, action: str, ask: Callable[[App, str, str | None], str] | No
         raise NotOperable(
             f"The person refused to let the AI operate {app.label}. Nothing was sent. Ask them in the "
             "conversation before trying again; they can allow it in WinHand's settings (程序授权)."
+        )
+    if answer.startswith("notshown: "):
+        raise NotOperable(
+            f"The dialog asking the person at the machine to allow {app.label} did not appear on the "
+            f"screen ({answer.removeprefix('notshown: ')}). Nobody was asked, so this is not a refusal: "
+            f"tell the person it failed. Nothing was sent. They can allow {key} in WinHand's settings "
+            f"(程序授权) or with `winhand apps allow {key}`."
         )
     reason = answer.removeprefix("unavailable: ")
     raise NotOperable(
