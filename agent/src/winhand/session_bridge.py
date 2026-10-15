@@ -412,8 +412,8 @@ def setup_text(origin: str) -> str:
    - 值：hook 令牌（winhand bridge token 生成，与中转的 HOOK_TOKEN 相同）
    令牌由代理在请求离开容器后加上，不进容器。
 2. 没有 Network secrets 时：
-   - Network access 选 Custom，Allowed domains 加上 {host}，并勾上 Also include default list of
-     common package managers（不勾就只剩你填的域名）；
+   - Network access 选 Custom，Allowed domains 加上 {host}；
+     再勾上 Also include default list of common package managers（不勾就只剩你填的域名）；
    - Environment variables 里设 WINHAND_HOOK_TOKEN=<hook 令牌>（使用这个环境的人都能看到）。
 两种方式只用一种。之后新开的会话，开场就会带上这台电脑的规矩和技能名单。"""
 

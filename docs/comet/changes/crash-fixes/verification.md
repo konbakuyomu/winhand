@@ -56,3 +56,32 @@ Verifier 未能验证的：
 | 2 | 界面错误的提示与后端提示共用一个位置：启动阶段接住的错误，提示会被后端启动成功时的 `HideNotice()` 清掉 | 低 | 后端启动成功时只清掉它自己的“后端启动失败”；后端启动失败的提示仍然优先 |
 | 3 | “不会循环重启”说得过满：每次运行一分钟以上才崩的，Windows 每次都会重启 | 低 | brief 和代码注释改为准确的说法 |
 | 4 | `winhand bridge init` 第二种方式没写“选 Custom、勾上 Also include default list…” | 低 | 已补上 |
+
+## 第 2 轮（f55105e）
+
+- 本地：ruff 通过；pytest 656 passed，51 skipped（多出的 2 个是组合符号的新用例）。
+- CI（f55105e）：agent（ubuntu、windows）、binary（两个平台）、desktop（编译、便携包、安装包）都通过。
+- 用户电脑：桌面端 f55105e 编译通过；带后端启动测试实例并触发自检：后端启动成功（状态“未配置”）后，“界面出了一个错误”的提示仍在，带“打开日志”按钮。
+- 真实日志回放：按 1、512、4096 个字符一段，0 次失败。
+
+**独立 Verifier 结论（第 2 轮）**：4 处修复都确认。
+- 组合符号：pyte 的 `draw` 确实把它放进宽字符的占位格。另验了 12 种边界情况，与真实终端一致：两个组合符号、插入模式、最后一列、emoji 等。日志回放按 1、7、512、4096 个字符一段都是 0 失败。
+- 提示：`_noticeTitle` 只在 `ShowNotice` 设、在 `HideNotice` 清，所有启动后端的路径都经过 `StartBackendAsync`。
+- 说明文字：与 Windows 文档和 code.claude.com 的现行说明一致。
+
+| # | 问题 | 级别 | 处理（第 3 轮提交） |
+|---|---|---|---|
+| 1 | NFC 合并在占位格为空时也做，1,004 个宽字符会被换成别的码位：兼容汉字 U+F900…，以及 U+2329/U+232A。AI 抄出的文件名会对不上 | 低 | 只在占位格里有组合符号时才合并；新增测试用例 `樂〈x` 原样显示 |
+| 2 | brief 里“修复前前三种失败”已过时 | 提示 | 已改 |
+| 3 | `winhand bridge init` 里设置项名称断成两行；README 第二种方式仍是旧说法 | 提示 | 名称放在一行；README 同步 |
+
+## 第 3 轮（265b617 及其后）：确认框必须真的出现
+
+- 新测试（`tests/test_dialog_launch.py`、`tests/test_approvals.py`）在旧代码上 4 个失败，新代码上都通过。
+- 用户电脑（Windows 11）：
+  - `tests/test_dialog_launch.py` 6 个都通过，包括真弹窗那个：真的授权对话框（venv 的 python.exe 下，窗口属于它的子进程）被认作已显示，`WM_CLOSE` 后答复 deny。
+  - 用 `scripts/build_binary.py` 打包 265b617（与发布相同的 PyInstaller onedir）。在临时 `WINHAND_HOME` 下运行 `winhand.exe apps allow winhand-test.exe`：
+    - 是/否确认框 0.8 秒出现；
+    - 18.2 秒时命令仍在等待，确认框仍在屏幕上，即过了 15 秒检查线没有误判；
+    - 发送“否”后，命令输出“没有改动（确认框里选了“否”）”，退出码 1。
+  - 没有窗口的假对话框（`SHOW_S` 设为 3）用真实的窗口检查：3.0 秒后报 `DialogNotShown: the dialog did not appear on the screen within 3s, although its process was running`。

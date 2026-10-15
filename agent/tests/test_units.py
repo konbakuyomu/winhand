@@ -131,6 +131,7 @@ def test_screen_reports_cursor_and_highlight():
         ("\x1b[1;1H中文ok", "中文ok"),  # nothing overwritten
         ("\x1b[1;1Hがx", "がx"),  # a combining mark after a wide character (pyte puts it on the stub)
         ("\x1b[1;1Hが\x1b[1;1Ha\x1b[1;3Hz", "a z"),  # ... and that character's left half overwritten
+        ("\x1b[1;1H樂〈x", "樂〈x"),  # shown as printed: no normalization without a mark
     ],
 )
 def test_screen_shows_half_overwritten_wide_characters_like_a_terminal(redraw, shown):

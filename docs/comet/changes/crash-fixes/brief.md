@@ -27,6 +27,10 @@
 3. **一次性文件链接被云端沙箱的代理拦下（403）时，说明不够。**
    - 云端会话的网络设置里，只有一条 Path prefixes 为 `/hook/` 的 Network secret 放行中转域名，于是 `/t/…` 被代理拒绝（`X-Proxy-Error: … allows the host but not path "/t/…"`）。
    - 那个会话不知道原因，改为分段写文件绕过。README 里云环境的设置名称也已经过时。
+4. **云端会话操作桌面程序屡次失败，被说成“你没点确认框”。**
+   - 现象：10-15 操作 Telegram、10-16 操作 Edge，每次都是“等电脑前的人允许，确认框开着 2 分钟”，最后“120 秒内没人回答”。云端会话只好改成让用户手动操作。
+   - 原因：用户电脑还是 0.6.0。0.6.0 在桌面端里的确认框进程卡在启动，窗口从没出现（0.6.1 已修，用户还没装）。
+   - 设计上的问题：WinHand 只看对话框进程有没有回答，不看它有没有真的显示出来。所以确认框弹不出来时，被当成“没人点”。以后要是因为别的原因弹不出来，也会是同样的误导。
 
 # Scope
 
@@ -50,6 +54,12 @@
   - `fs_upload_url` / `fs_download_url` 的 note 写明：HTTP 403 来自沙箱自己的网络策略，应请对方放行域名，而不是绕路。
   - README 按现在的界面写：Network access 选 Custom，在 Allowed domains 加上域名，勾上 Also include default list of common package managers。
   - README 和 `winhand bridge init` 的说明写明：Network secret 的 Path prefixes 要留空，只填 `/hook/` 会挡住 `/t/`。
+- **确认框必须真的出现在屏幕上**（`secret_prompt._run_dialog`，所有弹窗共用：程序授权、守卫确认、密码框、选文件框）：
+  - 对话框进程启动后，最多 15 秒（`SHOW_S`）内要在屏幕上看到它的窗口：顶层、可见、没被隐藏、大小不为零。也看它的子进程，因为 venv 的 python.exe 会再启动真正的解释器。
+  - 看不到就结束对话框进程（连同子进程），抛 `DialogNotShown`（`PromptUnavailable` 的子类）。
+  - 程序授权对这种情况单独说明：确认框没有出现，没人被问到，不是拒绝；请告诉对方，可以在设置页或用 `winhand apps allow` 允许。不记成拒绝，下次调用重新弹。
+  - 其他弹窗经由 `PromptUnavailable` 报出同样的原因（如守卫：not confirmed: the dialog did not appear on the screen …）。
+  - 非 Windows 或检查本身出错时不检查，照旧等回答。
 - 版本 0.6.2。
 
 # Non-goals
@@ -69,7 +79,8 @@
   - 窄字符压住宽字符的右半：` b`；
   - 没被压住的宽字符：`中文ok`。
   - 宽字符后跟组合符号：`か` + U+3099 + `x` 显示 `がx`；这个字的左半再被盖掉时显示 `a z`。
-  - 新测试 `test_screen_shows_half_overwritten_wide_characters_like_a_terminal`：修复前前三种失败，修复后都通过。
+  - 兼容汉字（如 U+F914）和 U+2329 照原样显示：只有带组合符号时才做 NFC 合并。
+  - 新测试 `test_screen_shows_half_overwritten_wide_characters_like_a_terminal`：第 1 轮之前 7 种里 5 种失败；第 1 轮的代码在两种组合符号的情况失败；现在都通过。
 - **C2**：真实日志回放：按 1、7、512、4096 个字符一段喂入，每段后读屏幕，修复后 0 次失败（修复前在第 107,008 个字符后失败）。最终画面与 Codex 界面一致。
 - **C3**：0.6.2 装好后，在用户电脑上用会话启动 Codex TUI，发中文插话；整个过程中 `session_screen` 都能读出画面。
 - **D1**：从 XAML 事件里抛出的异常不再结束桌面端。
@@ -78,4 +89,11 @@
 - **D2**：桌面端向 Windows 登记了崩溃后重启：`GetApplicationRestartSettings` 读回命令行 `--background`，标志 12（不因补丁、不因系统更新重启）。
 - **D3**：0.6.2 装好后日常使用：桌面端不再闪退；如果 `desktop-app.log` 出现 `ui` 记录，说明接住了一次，按记录的调用栈继续修。
 - **E1**：`fs_upload_url` / `fs_download_url` 的 note 提到 403 来自沙箱的网络策略；README 和 `winhand bridge init` 的说明与现在的云环境设置一致。
+- **G1**：对话框进程一直没有窗口时，`_run_dialog` 在 `SHOW_S` 内抛 `DialogNotShown`，并结束该进程；有窗口时一直等到回答或超时（超时仍报 nobody answered）。新测试在旧代码上失败，新代码上通过。
+- **G2**：程序授权遇到 `DialogNotShown` 时，提示里有“did not appear on the screen”“not a refusal”和 `winhand apps allow <exe>`，没有“Nobody allowed”；状态仍是 ask，下次调用重新弹。
+- **G3**：真机：
+  - 真的授权对话框（开发环境，venv 的 python.exe 下）被认作已显示，关窗后答复为 deny；
+  - 打包版 `winhand.exe apps allow` 的是/否确认框过了 15 秒仍在等回答，选“否”后报“没有改动”；
+  - 没有窗口的假对话框在设定时间内报 `DialogNotShown`。
+- **G4**：0.6.2 装好后，云端会话第一次操作某个程序时，用户屏幕上出现授权框。
 - **F1**：原有测试全部通过，ruff 通过；CI（agent、两个平台的打包冒烟、桌面端编译和打包）通过。

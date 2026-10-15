@@ -29,8 +29,8 @@ def _render(row, columns: int) -> str:
             stub = row[x + 1].data
             if stub and wcwidth(stub[0]) > 0:  # its right half was overwritten
                 out.append(" ")
-            else:
-                out.append(unicodedata.normalize("NFC", data + stub))
+            else:  # only with marks: NFC would also swap compatibility ideographs (U+F900…) for others
+                out.append(unicodedata.normalize("NFC", data + stub) if stub else data)
                 x += 1  # past its stub
         else:
             out.append(data)
