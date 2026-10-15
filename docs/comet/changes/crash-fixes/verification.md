@@ -85,3 +85,24 @@ Verifier 未能验证的：
     - 18.2 秒时命令仍在等待，确认框仍在屏幕上，即过了 15 秒检查线没有误判；
     - 发送“否”后，命令输出“没有改动（确认框里选了“否”）”，退出码 1。
   - 没有窗口的假对话框（`SHOW_S` 设为 3）用真实的窗口检查：3.0 秒后报 `DialogNotShown: the dialog did not appear on the screen within 3s, although its process was running`。
+
+**独立 Verifier 结论（第 3 轮，f55105e..d8122c6）**：G1、G2、C1 通过；G3、G4 要真机。
+
+| # | 问题 | 级别 | 处理（第 4 轮提交 874a8b0） |
+|---|---|---|---|
+| 1 | 真弹窗测试在窗口出现约 0.2 秒后就关窗，即使 `_window_visible` 恒为 False 也会通过，所以 venv 子进程那条路没有被真正检验 | 中 | `SHOW_S` 设为 2 秒，窗口出现 4 秒后才关：要是把它当成没出现，窗口会在 2 秒时被关掉，测试失败 |
+| 2 | 等窗口期间不读管道，出窗口前写满管道（Windows 约 4 KB）的子进程会卡住，被误报为没出现，原本的错误丢了 | 低 | 改为反复 `communicate(timeout=0.1)`，一直读输出；新测试：写 300 KB 再报错退出，报出的是它自己的错误 |
+| 3 | `_close` 结束某个子进程失败会跳过后面的；最后的 `communicate()` 没有时限 | 低 | 逐个结束，各自吞掉错误；最后读取限 5 秒 |
+| 4 | 命令行前缀“no answer in the confirmation dialog: …”暗示框已出现、只是没人答 | 低 | 改为 `winhand apps <动作>: <原因>` |
+| 5 | 锁屏、远程断开时，`IsWindowVisible` 仍为真，守卫确认、密码框、选文件框会等到超时，报“没人答” | 低 | 启动前看屏幕状态（锁定、安全桌面、断开），直接报 `DialogNotShown`：现在没人能看到弹窗；新测试 |
+| 6 | 固定 15 秒可能误杀很慢才出来的真弹窗（选文件框要先打开很慢的网络文件夹；冷启动时杀毒扫描）；本次调用时间不足 15 秒时，“确认框已开着”的说法不一定对 | 低 | 普通弹窗 20 秒，选文件框 60 秒；程序授权分清“还在打开”和“已开着”；“within 0s”改用 `:g` 格式 |
+
+## 第 4 轮（874a8b0）
+
+- 本地：ruff 通过；新测试在第 3 轮的代码上失败，现在通过；`tests/test_dialog_launch.py`、`tests/test_approvals.py`：57 passed，2 skipped（Windows 才跑的两个）。
+- 用户电脑（Windows 11）：
+  - `tests/test_dialog_launch.py` 8 个都通过，其中真弹窗测试按新办法检验：窗口撑过 2 秒的检查线，4 秒后才关，答复 deny。
+  - 874a8b0 重新打包（PyInstaller onedir），`winhand.exe apps allow winhand-test.exe`：
+    - 是/否确认框 0.6 秒出现；
+    - 23.1 秒时（过了 20 秒的检查线）命令仍在等待，确认框仍在屏幕上；
+    - 选“否”后输出“没有改动（确认框里选了“否”）”，退出码 1。

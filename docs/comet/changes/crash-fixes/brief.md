@@ -55,9 +55,13 @@
   - README 按现在的界面写：Network access 选 Custom，在 Allowed domains 加上域名，勾上 Also include default list of common package managers。
   - README 和 `winhand bridge init` 的说明写明：Network secret 的 Path prefixes 要留空，只填 `/hook/` 会挡住 `/t/`。
 - **确认框必须真的出现在屏幕上**（`secret_prompt._run_dialog`，所有弹窗共用：程序授权、守卫确认、密码框、选文件框）：
-  - 对话框进程启动后，最多 15 秒（`SHOW_S`）内要在屏幕上看到它的窗口：顶层、可见、没被隐藏、大小不为零。也看它的子进程，因为 venv 的 python.exe 会再启动真正的解释器。
+  - 屏幕锁定、安全桌面（如 UAC 提示）或远程会话断开时，不启动对话框，直接抛 `DialogNotShown`：现在没人能看到弹窗。
+  - 对话框进程启动后，要在屏幕上看到它的窗口：顶层、可见、没被隐藏、大小不为零。也看它的子进程，因为 venv 的 python.exe 会再启动真正的解释器。
+    - 普通弹窗最多等 20 秒（`SHOW_S`）；选文件框 60 秒，它可能先要打开很慢或连不上的网络文件夹。
+    - 等的时候一直读对话框进程的输出，输出很多也不会卡住，原本的出错原因照常报出。
   - 看不到就结束对话框进程（连同子进程），抛 `DialogNotShown`（`PromptUnavailable` 的子类）。
   - 程序授权对这种情况单独说明：确认框没有出现，没人被问到，不是拒绝；请告诉对方，可以在设置页或用 `winhand apps allow` 允许。不记成拒绝，下次调用重新弹。
+    - 本次调用的时间用完时，区分“确认框还在打开，过几秒再试”和“确认框已开着，在等人回答”。
   - 其他弹窗经由 `PromptUnavailable` 报出同样的原因（如守卫：not confirmed: the dialog did not appear on the screen …）。
   - 非 Windows 或检查本身出错时不检查，照旧等回答。
 - 版本 0.6.2。
@@ -89,11 +93,11 @@
 - **D2**：桌面端向 Windows 登记了崩溃后重启：`GetApplicationRestartSettings` 读回命令行 `--background`，标志 12（不因补丁、不因系统更新重启）。
 - **D3**：0.6.2 装好后日常使用：桌面端不再闪退；如果 `desktop-app.log` 出现 `ui` 记录，说明接住了一次，按记录的调用栈继续修。
 - **E1**：`fs_upload_url` / `fs_download_url` 的 note 提到 403 来自沙箱的网络策略；README 和 `winhand bridge init` 的说明与现在的云环境设置一致。
-- **G1**：对话框进程一直没有窗口时，`_run_dialog` 在 `SHOW_S` 内抛 `DialogNotShown`，并结束该进程；有窗口时一直等到回答或超时（超时仍报 nobody answered）。新测试在旧代码上失败，新代码上通过。
-- **G2**：程序授权遇到 `DialogNotShown` 时，提示里有“did not appear on the screen”“not a refusal”和 `winhand apps allow <exe>`，没有“Nobody allowed”；状态仍是 ask，下次调用重新弹。
+- **G1**：对话框进程一直没有窗口时，`_run_dialog` 在 `SHOW_S` 内抛 `DialogNotShown`，并结束该进程；有窗口时一直等到回答或超时（超时仍报 nobody answered）。输出很多后出错的对话框报出它自己的错误；屏幕锁定时不启动对话框。新测试在旧代码上失败，新代码上通过。
+- **G2**：程序授权遇到 `DialogNotShown` 时，提示里有“did not appear on the screen”“not a refusal”和 `winhand apps allow <exe>`，没有“Nobody allowed”；状态仍是 ask，下次调用重新弹。调用时间用完时，确认框还没上屏说“still opening”，已上屏说“a dialog is open there”。
 - **G3**：真机：
-  - 真的授权对话框（开发环境，venv 的 python.exe 下）被认作已显示，关窗后答复为 deny；
-  - 打包版 `winhand.exe apps allow` 的是/否确认框过了 15 秒仍在等回答，选“否”后报“没有改动”；
+  - 真的授权对话框（开发环境，venv 的 python.exe 下）被认作已显示：`SHOW_S` 设为 2 秒，窗口出现 4 秒后才关，答复为 deny；
+  - 打包版 `winhand.exe apps allow` 的是/否确认框过了 20 秒仍在等回答，选“否”后报“没有改动”；
   - 没有窗口的假对话框在设定时间内报 `DialogNotShown`。
 - **G4**：0.6.2 装好后，云端会话第一次操作某个程序时，用户屏幕上出现授权框。
 - **F1**：原有测试全部通过，ruff 通过；CI（agent、两个平台的打包冒烟、桌面端编译和打包）通过。
