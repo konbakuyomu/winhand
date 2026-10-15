@@ -47,6 +47,9 @@ public sealed partial class MainWindow : Window
         InitializeFeedback();
         BuildPages();
         ShowPage("overview", fromNavigation: true); // the XAML already selects it; setting it again misplaces the indicator
+        // Check that an error escaping a XAML callback is logged and survived (CrashGuard).
+        if (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_SELFTEST") == "ui-error")
+            RootNavigation.Loaded += (_, _) => throw new ArgumentException("WINHAND_DESKTOP_SELFTEST=ui-error");
         _ticker = DispatcherQueue.CreateTimer();
         _ticker.Interval = TimeSpan.FromSeconds(1);
         _ticker.Tick += (_, _) => RefreshStatus();
