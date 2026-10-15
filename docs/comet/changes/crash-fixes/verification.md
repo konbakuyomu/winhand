@@ -124,3 +124,7 @@ Verifier 未能验证的：
 
 - 本地：ruff 通过；`tests/test_dialog_launch.py`、`tests/test_approvals.py`：57 passed，2 skipped。
 - 用户电脑：两个文件 56 passed，3 skipped；真弹窗测试按新办法通过：真实检查判定窗口已出现，关窗后答复 deny。
+- CI（4fe7ead）：agent（ubuntu、windows-latest，含真弹窗测试）、binary（两个平台）、desktop（编译、便携包、安装包）都通过。
+- 按用户的要求，第 5 轮不再请独立 Verifier：改动只涉及测试写法、`_opening` 的记录时机和测试收尾。由上面的本地测试、用户电脑上的测试和 CI 覆盖。
+
+**待真机验收（装上 0.6.2 后）**：C3、D3、G4。
