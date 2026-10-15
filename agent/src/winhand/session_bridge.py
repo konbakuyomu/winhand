@@ -407,7 +407,7 @@ def setup_text(origin: str) -> str:
     return f"""云端环境里还要做一次设置（会话标题栏的云环境菜单 → Edit）：
 
 1. 推荐：Network secrets（Pro/Max 才有）里加一条
-   - 网站：{host}
+   - 网站：{host}；Path prefixes 留空（只填 /hook/ 会挡住一次性文件链接 /t/）
    - 类型：自定义请求头，名称 X-Winhand-Hook-Token，前缀留空
    - 值：hook 令牌（winhand bridge token 生成，与中转的 HOOK_TOKEN 相同）
    令牌由代理在请求离开容器后加上，不进容器。

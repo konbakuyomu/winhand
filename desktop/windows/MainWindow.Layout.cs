@@ -16,6 +16,7 @@ public sealed partial class MainWindow
     private const double PageInset = 24;
     private const double ContentMaxWidth = 920;
     private Action? _feedbackAction;
+    private bool _uiErrorShown;
 
     // ------------------------------------------------------------------ pages
 
@@ -381,5 +382,17 @@ public sealed partial class MainWindow
         _feedbackAction = null;
         FeedbackButton.IsEnabled = false;
         ToolTipService.SetToolTip(FeedbackButton, "操作提示");
+    }
+
+    /// <summary>After the window recovered from an error (see <see cref="CrashGuard"/>): say so once per run.</summary>
+    internal void ShowUiErrorNotice()
+    {
+        if (_uiErrorShown)
+            return;
+        _uiErrorShown = true;
+        // not from inside the failed callback: the notice is a layout change of its own
+        DispatcherQueue.TryEnqueue(() => ShowNotice("界面出了一个错误",
+            "winhand 已接住它并继续运行，Claude 的连接不受影响。详情记在 desktop-app.log。",
+            InfoBarSeverity.Warning, "打开日志", () => OpenPath(CrashGuard.LogPath, select: true)));
     }
 }

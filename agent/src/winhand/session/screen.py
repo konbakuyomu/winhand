@@ -7,6 +7,32 @@ import threading
 import time
 
 import pyte
+from pyte.screens import wcwidth  # the width measure pyte used to lay the cells out
+
+
+def _render(row, columns: int) -> str:
+    """One row as text, the way a terminal shows it.
+
+    pyte keeps a wide character (Chinese, emoji) in one cell and an empty stub in the next. A
+    program that redraws over half of one (Codex's TUI does, behind ConPTY) leaves the other half
+    alone; a terminal blanks it, while pyte keeps it and its own `display` then fails with
+    IndexError on the lone stub."""
+    out = []
+    x = 0
+    while x < columns:
+        data = row[x].data
+        if not data:  # the right half of a wide character whose left half was overwritten
+            out.append(" ")
+        elif x + 1 < columns and wcwidth(data[0]) == 2:
+            if row[x + 1].data:  # its right half was overwritten
+                out.append(" ")
+            else:
+                out.append(data)
+                x += 1  # past its stub
+        else:
+            out.append(data)
+        x += 1
+    return "".join(out)
 
 
 class VirtualScreen:
@@ -79,7 +105,7 @@ class VirtualScreen:
         with self._lock:
             self._process()
             screen = self._screen
-            lines = [line.rstrip() for line in screen.display]
+            lines = [_render(screen.buffer[y], screen.columns).rstrip() for y in range(screen.lines)]
             highlighted = []
             for y in range(screen.lines):
                 row = screen.buffer[y]
@@ -108,5 +134,6 @@ class VirtualScreen:
     def cursor_line(self) -> str:
         with self._lock:
             self._process()
-            y = self._screen.cursor.y
-            return self._screen.display[y].rstrip() if y < self._screen.lines else ""
+            screen = self._screen
+            y = screen.cursor.y
+            return _render(screen.buffer[y], screen.columns).rstrip() if y < screen.lines else ""

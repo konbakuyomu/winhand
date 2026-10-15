@@ -112,7 +112,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 `fs_upload_url` / `fs_download_url` 发出一次性链接，模型在自己的沙箱里用 `curl -T 文件 链接` 上传、`curl -o 名字 链接` 下载，文件内容不经过对话。这样传 100 KB 的补丁只要几秒，不必再分段写 base64。传上来的补丁可以直接交给 `fs_apply_patch(root, patch_file=...)`：它会自动判断 `-p`，保留每个文件原来的编码和 CRLF，所有 hunk 都对得上才写入。
 
-要在 Claude Code 云端会话里用这个功能，得在云环境的网络设置里放行中转域名：打开会话标题栏的云环境菜单 → Edit → Network access，在 Allowed domains 里加上 `mcp.你的域名`，Allow package managers 保持勾选。中转更新后要重新执行 `npx wrangler deploy`。
+要在 Claude Code 云端会话里用这个功能，得在云环境的网络设置里放行中转域名：打开会话标题栏的云环境菜单 → Edit → Network access 选 Custom，在 Allowed domains 里加上 `mcp.你的域名`，并勾上 Also include default list of common package managers（不勾就只剩你填的域名）。改完约一分钟生效，正在运行的会话也会跟着生效。只靠下面“云端会话开场就带上本机规矩”里的 Network secret 放行时，它的 Path prefixes 要留空：填了 `/hook/` 的话，一次性链接（`/t/…`）会被沙箱的代理拦下，curl 报 403。中转更新后要重新执行 `npx wrangler deploy`。
 
 端到端测试（CI 中自动运行）：`relay/test/e2e.py` 在 `wrangler dev` 上模拟 claude.ai，走完注册 → 授权 → 换 token → 经隧道调用 MCP 工具的整个流程。
 
@@ -424,7 +424,7 @@ timeout_s = 30                       # 每个 hook 最多等多久
 
 2. 把 hook 放进仓库：`winhand bridge init --write <仓库目录>`，然后提交并推送。它会合并进 `.claude/settings.json`，保留已有内容；只想看片段时去掉 `--write`。所有仓库用同一份配置：仓库由云端的 `git remote get-url origin` 决定，本机按仓库名找到检出目录（同 `context(repo=…)`）。
 3. 在云端环境里放令牌（会话标题栏的云环境菜单 → Edit），`winhand bridge init` 会打印具体做法：
-   - 推荐用 Network secrets（Pro/Max 才有）：网站填中转的域名，自定义请求头 `X-Winhand-Hook-Token`，前缀留空。令牌由代理在请求离开容器后加上，不进容器；
+   - 推荐用 Network secrets（Pro/Max 才有）：网站填中转的域名，Path prefixes 留空（只填 `/hook/` 会挡住一次性文件链接），自定义请求头 `X-Winhand-Hook-Token`，前缀留空。令牌由代理在请求离开容器后加上，不进容器；
    - 没有 Network secrets 时：Network access 里放行中转的域名，再设环境变量 `WINHAND_HOOK_TOKEN`。使用这个环境的人都能看到这个变量。
 
 hook 令牌只能取开场上下文：中转只为 `/hook/session-start` 认它，不能调用任何工具，也打不开 `/mcp`。生成的配置里写着中转的域名，提交后看得到仓库的人都能看到它，建议只用于私有仓库；没有令牌的请求会被拒绝。内容与 `context()` 一样经过守卫的 `read` 规则和脱敏。本机的 Claude Code 不受影响：hook 只在 `CLAUDE_CODE_REMOTE=true`（云端）时运行，出任何错都安静退出，不打断会话。多仓库的云端会话不读仓库的 hooks，这个功能不生效。
