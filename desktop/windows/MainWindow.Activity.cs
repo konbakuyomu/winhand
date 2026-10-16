@@ -6,9 +6,9 @@ namespace Winhand.Desktop;
 
 public sealed partial class MainWindow
 {
-    private sealed class ActivityRow(Grid root, ContentControl pill, TextBlock duration, TextBlock detail)
+    private sealed class ActivityRow(ListViewItem root, ContentControl pill, TextBlock duration, TextBlock detail)
     {
-        public Grid Root { get; } = root;
+        public ListViewItem Root { get; } = root;
         public ContentControl Pill { get; } = pill;
         public TextBlock Duration { get; } = duration;
         public TextBlock Detail { get; } = detail;
@@ -62,6 +62,8 @@ public sealed partial class MainWindow
         var listHost = new Grid();
         // Rows are prepended and can change height when a tool completes. Keep the scroll
         // offset to avoid WinUI's KeepItemsInView re-anchoring failure in this live list.
+        // Each row is a ListViewItem of its own, as in the other lists: a bare element as an item
+        // is moved in and out of containers the ListView makes and recycles.
         _activityList = new ListView
         {
             SelectionMode = ListViewSelectionMode.Single,
@@ -172,7 +174,7 @@ public sealed partial class MainWindow
 
     private ActivityRow CreateRow(ActivityEntry entry)
     {
-        var grid = new Grid { ColumnSpacing = 12, Padding = new Thickness(4, 6, 4, 6), Tag = entry.Id };
+        var grid = new Grid { ColumnSpacing = 12, Padding = new Thickness(4, 6, 4, 6) };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -209,7 +211,8 @@ public sealed partial class MainWindow
         Grid.SetColumn(pill, 3);
         grid.Children.Add(pill);
 
-        var row = new ActivityRow(grid, pill, duration, detail);
+        var item = new ListViewItem { Content = grid, Tag = entry.Id, HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        var row = new ActivityRow(item, pill, duration, detail);
         UpdateRow(entry, row);
         return row;
     }

@@ -122,6 +122,27 @@ def test_screen_reports_cursor_and_highlight():
     assert snap["cursor"]["row"] == 3
 
 
+@pytest.mark.parametrize(
+    ("redraw", "shown"),
+    [
+        ("\x1b[1;2H中\x1b[1;1H文\x1b[1;4Hz", "文 z"),  # a wide character over the left half of another
+        ("\x1b[1;1H中\x1b[1;1Ha\x1b[1;3Hz", "a z"),  # a narrow one over the left half
+        ("\x1b[1;1H中\x1b[1;2Hb", " b"),  # a narrow one over the right half
+        ("\x1b[1;1H中文ok", "中文ok"),  # nothing overwritten
+        ("\x1b[1;1Hがx", "がx"),  # a combining mark after a wide character (pyte puts it on the stub)
+        ("\x1b[1;1Hが\x1b[1;1Ha\x1b[1;3Hz", "a z"),  # ... and that character's left half overwritten
+        ("\x1b[1;1H樂〈x", "樂〈x"),  # shown as printed: no normalization without a mark
+    ],
+)
+def test_screen_shows_half_overwritten_wide_characters_like_a_terminal(redraw, shown):
+    # Codex's TUI redraws Chinese text shifted by a column; pyte's own rendering then raised
+    # IndexError ("string index out of range") and session_screen failed until the session ended
+    screen = VirtualScreen(20, 3)
+    screen.feed(redraw)
+    assert screen.snapshot()["lines"][0] == shown
+    assert screen.cursor_line() == shown
+
+
 # ----------------------------------------------------------------- state
 
 

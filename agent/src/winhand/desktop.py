@@ -656,6 +656,25 @@ def windows() -> list[dict]:
     return out
 
 
+def shows_window(pids: set[int]) -> bool:
+    """Whether one of these processes has a window on the screen: top-level, visible, not cloaked
+    and not empty. A dialog that only started has none yet."""
+    _require_windows()
+    found = False
+
+    def callback(hwnd, _):
+        nonlocal found
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in pids and user32.IsWindowVisible(hwnd) and not _cloaked(hwnd):
+            rect = _rect(hwnd)
+            found = rect["width"] > 0 and rect["height"] > 0
+        return not found
+
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    return found
+
+
 def _approval_of(hwnd, pid: int, process: str, kind: str) -> str | None:
     """What operating this window needs: winhand (never), or with approval on always | session |
     denied | terminal | ask."""

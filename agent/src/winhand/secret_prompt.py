@@ -14,6 +14,16 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
+from collections.abc import Callable
+
+SHOW_S = 20.0  # a dialog's window appears within a few seconds, the frozen winhand.exe and Tk included
+PICK_SHOW_S = 60.0  # a file dialog first opens its folder, which can be a slow or unreachable share
+SCREENS = {
+    "locked": "the screen at the machine is locked",
+    "secure": "a secure screen (a UAC prompt or the like) is in front at the machine",
+    "disconnected": "the remote desktop session to the machine is disconnected",
+}
 
 
 def dialog_main(payload: str) -> int:
@@ -124,6 +134,10 @@ class PromptUnavailable(RuntimeError):
     pass
 
 
+class DialogNotShown(PromptUnavailable):
+    """The dialog's process started, but no window of it appeared on the screen: nobody was asked."""
+
+
 def ask_secret(title: str, message: str, timeout_s: float = 300) -> str | None:
     """Return what the person typed, or None if they cancelled."""
     return _run_dialog(json.dumps([title, message]), timeout_s)
@@ -136,7 +150,7 @@ def ask_pick(title: str, mode: str = "file", initial: str | None = None, timeout
     payload = json.dumps(
         {"kind": "pick", "title": title, "mode": mode, "initial": initial}, ensure_ascii=False
     )
-    return _run_dialog(payload, timeout_s)
+    return _run_dialog(payload, timeout_s, show_s=PICK_SHOW_S)
 
 
 def ask_confirm(title: str, message: str, timeout_s: float = 120) -> bool:
@@ -147,37 +161,130 @@ def ask_confirm(title: str, message: str, timeout_s: float = 120) -> bool:
 
 
 def ask_approval(
-    name: str, exe: str, title: str, action: str, warning: str | None = None, timeout_s: float = 120
+    name: str,
+    exe: str,
+    title: str,
+    action: str,
+    warning: str | None = None,
+    timeout_s: float = 120,
+    on_shown: Callable[[], None] | None = None,
 ) -> str:
     """'deny', 'session' or 'always' as the person answered; PromptUnavailable when nobody answered
-    in time or no dialog can be shown here."""
+    in time or no dialog can be shown here. `on_shown` hears when the dialog is on the screen."""
     payload = json.dumps(
         {"kind": "approve", "name": name, "exe": exe, "title": title, "action": action, "warning": warning},
         ensure_ascii=False,
     )
-    value = _run_dialog(payload, timeout_s)
+    value = _run_dialog(payload, timeout_s, on_shown=on_shown)
     return value if value in ("deny", "session", "always") else "deny"
 
 
-def _run_dialog(payload: str, timeout_s: float):
+def _run_dialog(
+    payload: str,
+    timeout_s: float,
+    show_s: float | None = None,
+    on_shown: Callable[[], None] | None = None,
+):
+    # A dialog nobody can see must not pass for one nobody answered: the AI would wait the full
+    # timeout and then tell the person they did not click (0.6.0 did exactly that).
+    if (state := _screen_state()) != "ok":
+        raise DialogNotShown(f"no dialog can be seen now: {SCREENS.get(state, state)}")
+    show_s = min(SHOW_S if show_s is None else show_s, timeout_s)
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        _dialog_command(payload),
+        # never this process's own stdin: when another thread reads it (the desktop app's
+        # backend reads its requests there, `winhand stdio` its MCP messages), a Python child
+        # blocks at startup on the inherited pipe until that read ends, and no dialog appears
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    shown = False
     try:
-        proc = subprocess.run(
-            _dialog_command(payload),
-            # never this process's own stdin: when another thread reads it (the desktop app's
-            # backend reads its requests there, `winhand stdio` its MCP messages), a Python child
-            # blocks at startup on the inherited pipe until that read ends, and no dialog appears
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise PromptUnavailable(f"nobody answered the dialog within {int(timeout_s)}s") from exc
+        while True:
+            # read its output all along: a child that writes much before its window appears
+            # would otherwise block on a full pipe
+            wait = max(0.0, started + timeout_s - time.monotonic()) if shown else 0.1
+            try:
+                out, err = proc.communicate(timeout=wait)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            elapsed = time.monotonic() - started
+            if not shown:
+                visible = _window_visible(proc.pid)
+                if visible is None or visible:  # None: cannot be checked here
+                    shown = True
+                    if on_shown is not None:
+                        on_shown()
+                elif elapsed >= show_s:
+                    raise DialogNotShown(
+                        f"the dialog did not appear on the screen within {show_s:g}s, "
+                        "although its process was running"
+                    )
+            if shown and elapsed >= timeout_s:
+                raise PromptUnavailable(f"nobody answered the dialog within {timeout_s:g}s")
+    except BaseException:
+        _close(proc)
+        raise
     if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        lines = err.decode("utf-8", errors="replace").strip().splitlines()
         raise PromptUnavailable(
-            "cannot open a dialog on this machine: " + (err[-1] if err else "unknown error")
+            "cannot open a dialog on this machine: " + (lines[-1] if lines else "unknown error")
         )
     try:
-        return json.loads(proc.stdout.decode("utf-8", errors="replace"))["value"]
+        return json.loads(out.decode("utf-8", errors="replace"))["value"]
     except (ValueError, KeyError) as exc:
         raise PromptUnavailable("dialog returned no answer") from exc
+
+
+def _screen_state() -> str:
+    """'ok', or why nobody can see a dialog at the machine now: locked, secure, disconnected."""
+    if sys.platform != "win32":
+        return "ok"
+    try:
+        from . import desktop
+
+        return desktop.desktop_state()
+    except Exception:  # noqa: BLE001 - a failed check must not stop the dialog itself
+        return "ok"
+
+
+def _window_visible(pid: int) -> bool | None:
+    """Whether the dialog's process, or a child of it (a venv's python.exe starts the real one),
+    shows a window on the screen; None where that cannot be checked."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import psutil
+
+        from . import desktop
+
+        try:
+            pids = {pid, *(child.pid for child in psutil.Process(pid).children(recursive=True))}
+        except psutil.Error:
+            pids = {pid}
+        return desktop.shows_window(pids)
+    except Exception:  # noqa: BLE001 - a failed check must not stop the dialog itself
+        return None
+
+
+def _close(proc: subprocess.Popen) -> None:
+    """End the dialog: its process and any child of it."""
+    try:
+        import psutil
+
+        children = psutil.Process(proc.pid).children(recursive=True)
+    except Exception:  # noqa: BLE001 - psutil.Error, or the process is gone already
+        children = []
+    for child in children:
+        try:
+            child.kill()
+        except Exception:  # noqa: BLE001 - gone already
+            pass
+    proc.kill()
+    try:
+        proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass  # something still holds its pipes; what it wrote is not needed

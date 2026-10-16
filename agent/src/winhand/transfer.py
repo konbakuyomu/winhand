@@ -135,7 +135,8 @@ def issue_upload(
         "max_bytes": max_bytes,
         "expires_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires)),
         "note": "Single use. Upload from your own shell/sandbox; the reply is JSON with bytes and sha256. "
-        "The sandbox's network must allow the relay's domain.",
+        "The sandbox's network must allow the relay's domain: an HTTP 403 comes from the sandbox's own "
+        "network policy, so ask the person to allow the domain there instead of working around it.",
     }
 
 
@@ -154,7 +155,8 @@ def issue_download(path: str, ttl_s: float = DEFAULT_TTL_S) -> dict:
         "size": os.path.getsize(full),
         "sha256": fs.sha256_of(target),
         "expires_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires)),
-        "note": "Single use. Download from your own shell/sandbox; check the sha256 afterwards.",
+        "note": "Single use. Download from your own shell/sandbox; check the sha256 afterwards. "
+        "An HTTP 403 comes from the sandbox's own network policy: ask the person to allow the relay's domain.",
     }
 
 

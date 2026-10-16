@@ -157,6 +157,7 @@ _lock = threading.Lock()
 _session: dict[str, float] = {}  # exe -> when allowed (time.time) until this process ends
 _denied: dict[str, float] = {}  # exe -> when refused (time.monotonic)
 _pending: dict[str, Future] = {}  # exe -> the open dialog's answer
+_opening: set[str] = set()  # exes whose dialog has started but is not on the screen yet
 _file: dict = {"stamp": None, "ask": True, "always": {}, "error": None}
 _listeners: list[Callable[[], None]] = []
 
@@ -408,13 +409,21 @@ def _ask_person(app: App, action: str, warning: str | None) -> str:
         text = " ".join(text.split())  # one line each: line breaks cannot stretch the dialog
         return text if len(text) <= limit else text[: limit - 1] + "…"
 
+    def shown() -> None:
+        with _lock:
+            _opening.discard(app.exe)
+
     name, title = short(app.name or app.exe, 80), short(app.title, 120)
-    return ask_approval(name, app.exe, title, short(action, 160), warning, timeout_s=DIALOG_S)
+    return ask_approval(name, app.exe, title, short(action, 160), warning, timeout_s=DIALOG_S, on_shown=shown)
 
 
 def _dialog(app: App, action: str, future: Future, ask) -> None:
+    from .secret_prompt import DialogNotShown
+
     try:
         answer = ask(app, action, caution(app.exe))
+    except DialogNotShown as exc:
+        answer = f"notshown: {exc}"
     except Exception as exc:  # noqa: BLE001 - PromptUnavailable (no answer, no desktop) and the like
         answer = f"unavailable: {exc}"
     try:
@@ -430,6 +439,7 @@ def _dialog(app: App, action: str, future: Future, ask) -> None:
     finally:
         with _lock:
             _pending.pop(app.exe, None)
+            _opening.discard(app.exe)
         future.set_result(answer)
 
 
@@ -447,6 +457,8 @@ def check(app: App, action: str, ask: Callable[[App, str, str | None], str] | No
             if future is None:
                 future = Future()
                 _pending[key] = future
+                if ask is None:  # the real dialog says when it is on the screen (fakes do not)
+                    _opening.add(key)
                 threading.Thread(
                     target=_dialog,
                     args=(app, action, future, ask or _ask_person),
@@ -474,6 +486,13 @@ def check(app: App, action: str, ask: Callable[[App, str, str | None], str] | No
     try:
         answer = future.result(timeout=wait)
     except FutureTimeout:
+        with _lock:
+            opening = key in _opening
+        if opening:  # this call's time ran out before the dialog was on the screen
+            raise NotOperable(
+                f"The dialog asking the person at the machine to allow operating {app.label} is still "
+                "opening. Nothing was sent. Call again in a few seconds."
+            ) from None
         raise NotOperable(
             f"Waiting for the person at the machine to allow operating {app.label}: a dialog is open "
             f"there for up to {int(DIALOG_S / 60)} minutes. Nothing was sent. Call again after they "
@@ -485,6 +504,13 @@ def check(app: App, action: str, ask: Callable[[App, str, str | None], str] | No
         raise NotOperable(
             f"The person refused to let the AI operate {app.label}. Nothing was sent. Ask them in the "
             "conversation before trying again; they can allow it in WinHand's settings (程序授权)."
+        )
+    if answer.startswith("notshown: "):
+        raise NotOperable(
+            f"The dialog asking the person at the machine to allow {app.label} did not appear on the "
+            f"screen ({answer.removeprefix('notshown: ')}). Nobody was asked, so this is not a refusal: "
+            f"tell the person it failed. Nothing was sent. They can allow {key} in WinHand's settings "
+            f"(程序授权) or with `winhand apps allow {key}`."
         )
     reason = answer.removeprefix("unavailable: ")
     raise NotOperable(
