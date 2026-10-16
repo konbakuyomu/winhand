@@ -171,8 +171,9 @@ def test_cmd_and_bat_wrappers(weird_dir):
     assert "wrapper-ok arg1" in res["stdout"], res
     npm = shutil.which("npm")
     if npm:
-        res = proc.run("npm", ["--version"])  # resolved to npm.cmd via PATHEXT
-        assert res["exit_code"] == 0 and res["stdout"].strip()[0].isdigit(), res
+        # resolved to npm.cmd via PATHEXT; its first start on a fresh CI runner has taken over 45 s
+        res = proc.run("npm", ["--version"], timeout_s=180, reply_within_s=180)
+        assert res.get("exit_code") == 0 and res["stdout"].strip()[:1].isdigit(), res
 
 
 def test_shell_command_line_with_pipes_and_cjk():
@@ -471,7 +472,7 @@ def test_form(tmp_path):
     from winhand import desktop
 
     try:
-        for _ in range(60):
+        for _ in range(240):  # PowerShell loading WinForms on a fresh CI runner has taken over 15 s
             try:
                 window = desktop.find_window("winhand-ui-test")
                 break
@@ -609,7 +610,7 @@ def classic_form(tmp_path):
     from winhand import desktop
 
     try:
-        for _ in range(60):
+        for _ in range(240):  # PowerShell loading WinForms on a fresh CI runner has taken over 15 s
             try:
                 window = desktop.find_window("winhand-classic-test")
                 break
