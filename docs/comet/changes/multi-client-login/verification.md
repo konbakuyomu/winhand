@@ -17,6 +17,7 @@
 - `npm run typecheck`（tsc）通过；`npm test`（bridge、hook 单元测试）31 passed。
 - `relay/test/e2e.py` 全部通过，57 项 PASS。
 - 对照：把新测试跑在改动前的中转代码上，失败在“two sign-ins of the same client both stay valid”。说明这项测试能复现用户遇到的掉线。
+- CI：`relay.yml`（run 39025433203，9f6d429）通过，包括类型检查、单元测试和 `wrangler dev` 上的 e2e。
 
 **逐项结论**
 
