@@ -9,6 +9,7 @@ const STYLE = `
          font: 15px/1.55 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; padding:16px; }
   main { width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:28px; }
   h1 { font-size:20px; margin:0 0 6px; }
+  h2 { font-size:16px; margin:22px 0 4px; }
   p { margin:8px 0; color:var(--muted); }
   code { font-size:13px; word-break:break-all; }
   label { display:block; margin:18px 0 6px; font-weight:600; }
@@ -40,7 +41,11 @@ ${opts.error ? `<p class="err">${escape(opts.error)}</p>` : ""}
 </form></main></body></html>`;
 }
 
-export function statusPage(status: Record<string, unknown>, mcpUrl: string): string {
+export function statusPage(
+  status: Record<string, unknown>,
+  mcpUrl: string,
+  logins: { signedIn: number | null; notice?: { text: string; error?: boolean } },
+): string {
   const online = Boolean(status.online);
   const agent = (status.agent ?? {}) as Record<string, string>;
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -52,5 +57,13 @@ export function statusPage(status: Record<string, unknown>, mcpUrl: string): str
 <p>在 claude.ai 添加自定义连接器，地址填：</p>
 <p><code>${escape(mcpUrl)}</code></p>
 <p>本机的其他 MCP 服务（在 winhand 应用的“MCP 服务”页启用）各有自己的地址：<code>${escape(mcpUrl)}/&lt;名称&gt;</code>，分别添加为连接器。</p>
+<h2>登录</h2>
+<p>${logins.signedIn === null ? "现在读不到登录数。" : `现在有 ${logins.signedIn} 个登录。`}多个 Claude 账号和会话可以同时登录；30 天不用的登录自动失效，最多保留最新的 20 个。</p>
+${logins.notice ? `<p${logins.notice.error ? ' class="err"' : ""}>${escape(logins.notice.text)}</p>` : ""}
+<form method="post" action="/signout">
+  <label for="passphrase">主人口令</label>
+  <input id="passphrase" name="passphrase" type="password" autocomplete="current-password" required>
+  <div class="row"><button type="submit">退出所有登录</button></div>
+</form>
 </main></body></html>`;
 }
