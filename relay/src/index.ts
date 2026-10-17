@@ -113,7 +113,8 @@ async function authorize(request: Request, env: Env): Promise<Response> {
       revokeExistingGrants: false,
     });
     try {
-      await revokeOldGrants(oauth, MAX_GRANTS);
+      const { failed } = await revokeOldGrants(oauth, MAX_GRANTS);
+      if (failed) console.warn(`could not trim ${failed} old sign-ins`); // the next sign-in tries again
     } catch (error) {
       console.warn("could not trim old sign-ins:", error); // the next sign-in tries again
     }
@@ -151,11 +152,12 @@ async function grants(oauth: OAuthHelpers): Promise<GrantSummary[]> {
   return all;
 }
 
-/** Keep the newest `keep` sign-ins and revoke the rest; returns how many were revoked. */
-async function revokeOldGrants(oauth: OAuthHelpers, keep: number): Promise<number> {
+/** Keep the newest `keep` sign-ins and revoke the rest; counts the revocations that went through and failed. */
+async function revokeOldGrants(oauth: OAuthHelpers, keep: number): Promise<{ revoked: number; failed: number }> {
   const old = (await grants(oauth)).sort((a, b) => b.createdAt - a.createdAt).slice(keep);
-  await Promise.allSettled(old.map((grant) => oauth.revokeGrant(grant.id, OWNER)));
-  return old.length;
+  const results = await Promise.allSettled(old.map((grant) => oauth.revokeGrant(grant.id, OWNER)));
+  const failed = results.filter((result) => result.status === "rejected").length;
+  return { revoked: old.length - failed, failed };
 }
 
 async function home(request: Request, env: Env, notice?: { text: string; error?: boolean }, status = 200) {
@@ -171,7 +173,8 @@ async function signOutAll(request: Request, env: Env): Promise<Response> {
   const form = await request.formData();
   const refused = await checkPassphrase(request, env, String(form.get("passphrase") ?? ""));
   if (refused) return home(request, env, { text: refused.error, error: true }, refused.status);
-  const revoked = await revokeOldGrants(env.OAUTH_PROVIDER, 0);
+  const { revoked, failed } = await revokeOldGrants(env.OAUTH_PROVIDER, 0);
+  if (failed) return home(request, env, { text: `已退出 ${revoked} 个登录，${failed} 个没退出成功，请再试一次。`, error: true }, 500);
   return home(request, env, { text: `已退出 ${revoked} 个登录。各处再用时，重新输入主人口令登录。` });
 }
 
