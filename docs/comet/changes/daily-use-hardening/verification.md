@@ -44,4 +44,4 @@
   3. `test_repo_found_near_a_known_project`：Windows 上 tmp 目录在 AppData 下，而附近目录从不扫 AppData。测试改为把 HOME、USERPROFILE 指到临时目录。
   4. `test_ui_automation_fills_and_presses_controls`：测试窗体里有文本框和密码框两个 Edit。只按 `control_type="Edit"` 定位时，新规则不操作并列出两者，这是本次要的行为。测试改为先验证这一点，再给 `index=0`。另给 classic 窗体的 focus 加了断言，免得它被拒后测试仍然空过。
 
-**第 2 次**（8a12c42；agent run 39147794173）：Ubuntu、Windows 都通过。Windows 上 751 passed、32 skipped，包括 ConPTY 会话、真实的 PowerShell 5.1/7、Git Bash、后台任务、UI Automation、OCR 和程序授权等场景测试。
+**第 2 次**（8a12c42；agent run 39147794173）：Ubuntu、Windows 都通过。Windows 上 751 passed、32 skipped：Windows 专属的场景测试（ConPTY 会话、PowerShell、后台任务、UI Automation 等）在真实的 Windows 上跑；缺工具或硬件的（gdb、串口对等）跳过，跳过的明细没有逐条核对。
