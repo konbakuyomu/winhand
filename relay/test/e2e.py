@@ -152,7 +152,7 @@ async def dropped_mid_stream(http: httpx.AsyncClient, rpc_headers: dict, ws_url:
 
         async def answer_then_drop() -> None:
             while (frame := json.loads(await agent.recv()))["type"] != "req_end":
-                rid = frame["id"]
+                rid = frame.get("id", "")  # `welcome` (this relay can resume) has none
             await agent.send(json.dumps({"type": "head", "id": rid, "status": 200,
                                          "headers": [["content-type", "text/event-stream"]]}))
             await agent.send(json.dumps({"type": "body", "id": rid,
@@ -172,6 +172,79 @@ async def dropped_mid_stream(http: httpx.AsyncClient, rpc_headers: dict, ws_url:
     check(last.get("id") == 5 and "disconnected" in last.get("error", {}).get("message", ""),
           f"a drop mid-stream ends the call with a JSON-RPC error event ({events[-1][:160] if events else text!r})")
     check(took < 10, f"the client learns of the drop at once ({took:.1f}s)")
+
+
+class CutProxy:
+    """A TCP proxy in front of the relay whose connections can be cut, like a flaky network."""
+
+    def __init__(self, base: str) -> None:
+        target = urlparse(base)
+        self.host, self.target_port = target.hostname, target.port or 80
+        self.links: list[tuple[asyncio.StreamWriter, asyncio.StreamWriter]] = []
+
+    async def start(self) -> str:
+        self.server = await asyncio.start_server(self._link, "127.0.0.1", 0)
+        return f"ws://127.0.0.1:{self.server.sockets[0].getsockname()[1]}/agent"
+
+    async def _link(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        up_reader, up_writer = await asyncio.open_connection(self.host, self.target_port)
+        self.links.append((writer, up_writer))
+
+        async def pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            try:
+                while data := await src.read(65536):
+                    dst.write(data)
+                    await dst.drain()
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                dst.close()
+
+        await asyncio.gather(pump(reader, up_writer), pump(up_reader, writer))
+
+    def cut(self) -> None:
+        for down, up in self.links:
+            down.transport.abort()
+            up.transport.abort()
+        self.links.clear()
+
+    async def close(self) -> None:
+        self.cut()
+        self.server.close()
+        await self.server.wait_closed()
+
+
+async def resumed_across_a_drop(http: httpx.AsyncClient, token: str) -> None:
+    """The real agent behind a flaky link: the link is cut while a call runs, the agent reconnects
+    within the grace period, and the client gets the whole answer as if nothing happened."""
+    proxy = CutProxy(BASE)
+    url = await proxy.start()
+    stop = asyncio.Event()
+    agent = asyncio.create_task(run_forever(url, AGENT_TOKEN, mcp=build_server(Config()), stop=stop))
+    try:
+        for _ in range(100):
+            if "电脑在线" in (await http.get(f"{BASE}/")).text:
+                break
+            await asyncio.sleep(0.1)
+        transport = StreamableHttpTransport(f"{BASE}/mcp", headers={"Authorization": f"Bearer {token}"})
+        async with Client(transport) as mcp:
+            script = "import time; print('前半', flush=True); time.sleep(3); print('后半')"
+            began = time.monotonic()
+            call = asyncio.create_task(mcp.call_tool("run", {"command": sys.executable, "args": ["-c", script]}))
+            await asyncio.sleep(1.0)
+            check(bool(proxy.links), "the agent is connected through the cuttable link")
+            proxy.cut()  # the network drops while `run` is still going
+            done = (await call).structured_content
+            took = time.monotonic() - began
+            check("前半" in done["stdout"] and "后半" in done["stdout"] and done["exit_code"] == 0,
+                  f"a call in flight survives the connection dropping ({done['stdout']!r})")
+            check(took < GRACE_S + 6, f"and is answered once the agent is back ({took:.1f}s)")
+            again = (await mcp.call_tool("run", {"command": sys.executable, "args": ["-c", "print('ok')"]})).structured_content
+            check(again["stdout"].strip() == "ok", "the next call goes through the new connection")
+    finally:
+        stop.set()
+        await asyncio.wait_for(agent, 15)
+        await proxy.close()
 
 
 async def main() -> None:
@@ -216,6 +289,7 @@ async def main() -> None:
         check("offline, did not answer in time, or failed" in said, f"PC offline: the session is told so ({away.status_code} {away.text[:120]})")
 
         await dropped_mid_stream(http, rpc_headers, ws_url)
+        await resumed_across_a_drop(http, token)
 
         # a call made while the agent is (re)connecting waits for it instead of failing
         initialize = {"jsonrpc": "2.0", "id": 7, "method": "initialize", "params": {

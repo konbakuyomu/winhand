@@ -210,7 +210,7 @@ async def run_script(monkeypatch, script, *, stop_online=False):
     if hasattr(rc, "random"):
         monkeypatch.setattr(rc.random, "uniform", lambda *_: 1.0)
     monkeypatch.setattr(rc, "_free_port", lambda: 0)
-    monkeypatch.setattr(rc, "hello_frame", lambda: {"type": "hello"})
+    monkeypatch.setattr(rc, "hello_frame", lambda *_: {"type": "hello"})
     monkeypatch.setattr(mb, "compose_app", lambda app, services: app)
 
     async def serve_local(*_):

@@ -17,16 +17,30 @@ export type RequestHead = {
 export type RequestBody = { type: "req_body"; id: string; data: string };
 export type RequestEnd = { type: "req_end"; id: string };
 export type Cancel = { type: "cancel"; id: string };
+// Resuming calls across a dropped agent connection. `welcome` goes out first on every connection:
+// this relay can resume. A `hello` with resume: 1 lists in `pending` the calls the agent still
+// serves; each gets `resume` (send again from frame `from`, counting the head as frame 0) or
+// `cancel` (the relay gave up on it). `ack` confirms a finished answer, so the agent can drop it.
+export type Welcome = { type: "welcome"; resume: 1 };
+export type Resume = { type: "resume"; id: string; from: number };
+export type Ack = { type: "ack"; id: string };
 
 // agent -> relay
 export type ResponseHead = { type: "head"; id: string; status: number; headers: [string, string][] };
 export type ResponseBody = { type: "body"; id: string; data: string };
 export type ResponseEnd = { type: "end"; id: string };
 export type ResponseError = { type: "error"; id: string; message: string };
-export type Hello = { type: "hello"; version: string; hostname: string; platform: string };
+export type Hello = {
+  type: "hello";
+  version: string;
+  hostname: string;
+  platform: string;
+  resume?: number;
+  pending?: string[];
+};
 
 export type AgentFrame = ResponseHead | ResponseBody | ResponseEnd | ResponseError | Hello;
-export type RelayFrame = RequestHead | RequestBody | RequestEnd | Cancel;
+export type RelayFrame = RequestHead | RequestBody | RequestEnd | Cancel | Welcome | Resume | Ack;
 
 export function toBase64(bytes: Uint8Array): string {
   let binary = "";
