@@ -33,8 +33,10 @@ from . import (
     winenv,
     workspace,
 )
+from . import history as history_mod
 from .aliases import ArgumentAliases
 from .config import Config
+from .config import home as config_home
 from .config import load as load_config
 from .guard import GuardActions
 from .history import RecentCalls
@@ -1112,13 +1114,27 @@ def build_server(
 
     @mcp.tool
     def history(
+        ctx: Context,
         limit: Annotated[int, Field(ge=1, le=100)] = 20,
         tool: Annotated[str | None, Field(description="Only calls of this tool, e.g. run")] = None,
     ) -> dict:
         """The most recent tool calls this machine handled (newest first): status, summary, exit code
         and run id. After a connection error, check here whether your call ran before resending it.
-        A tool reached through call() is listed under its own name, with via="call"."""
-        out = {"calls": recent.list(limit, tool), "winhand": __version__}
+        Other clients may use this machine too: `client` names each call's client and, where the
+        client keeps an MCP session, this_session=true marks your own (a reconnect may start a new
+        one). A tool reached through call() is listed under its own name, with via="call"."""
+        session, _ = history_mod.caller(ctx)
+        calls = recent.list(limit, tool, session)
+        out = {"calls": calls, "winhand": __version__}
+        if len(calls) < limit:
+            before = history_mod.earlier(config_home() / "activity", recent.started, limit - len(calls), tool)
+            if before:
+                calls += before
+                out["restarted"] = (
+                    f"winhand started at {history_mod.stamp(recent.started)}; the calls marked "
+                    "before_restart ran before that and their run ids are gone: check what they did "
+                    "before sending one again"
+                )
         if transfer.recent:
             out["transfers"] = list(transfer.recent)[::-1][:10]
         return out
