@@ -1435,6 +1435,11 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         "names": mask([s.name for s in cfg.servers if s.enabled]),
         "note": "mcp_tools() lists their tools, mcp_call(server, tool, arguments) calls one",
     }
+    from . import harmonia
+
+    keys = harmonia.summary()  # keys synced from the owner's phone, and how to use them unseen
+    if keys is not None:
+        out["harmonia"] = mask(keys)
     out["next"] = (
         "Follow these rules while you work here. Call context again for another folder, and after the "
         "conversation is compacted."

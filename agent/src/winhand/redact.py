@@ -20,6 +20,7 @@ The file tools refuse content that contains it (see `refuse_placeholders`).
 
 from __future__ import annotations
 
+import asyncio
 import glob
 import os
 import re
@@ -145,10 +146,16 @@ class Redactor:
         self.rules: list[tuple[str, re.Pattern[str]]] = []
         if known:
             self.rules.append(("token", re.compile("|".join(f"(?:{k})" for k in known))))
+        # every literal value in one alternation, longest first, each with its own label: one
+        # pass per kind would let a shorter value of another kind cut a longer one in two
+        self.labels: dict[str, str] = {}
         for kind, items in (values or {}).items():
-            unique = sorted({v for v in items if v and v not in _HARMLESS}, key=len, reverse=True)
-            if unique:
-                self.rules.append((kind, re.compile("|".join(re.escape(v) for v in unique))))
+            for v in items:
+                if v and v not in _HARMLESS:
+                    self.labels.setdefault(v, kind)
+        if self.labels:
+            ordered = sorted(self.labels, key=len, reverse=True)
+            self.rules.append(("", re.compile("|".join(re.escape(v) for v in ordered))))
         for pattern in patterns:
             try:
                 self.rules.append(("pattern", re.compile(pattern)))
@@ -164,7 +171,10 @@ class Redactor:
     def text(self, value: str) -> tuple[str, int]:
         total = 0
         for kind, regex in self.rules:
-            value, n = regex.subn(f"{PLACEHOLDER}{kind}»", value)
+            if kind:
+                value, n = regex.subn(f"{PLACEHOLDER}{kind}»", value)
+            else:
+                value, n = regex.subn(lambda m: f"{PLACEHOLDER}{self.labels[m.group(0)]}»", value)
             total += n
         return value, total
 
@@ -218,12 +228,12 @@ def remember(value: str) -> None:
 
 
 def _config_stamp() -> tuple:
-    from . import config
+    from . import config, harmonia
 
     try:
-        return (config.config_path().stat().st_mtime,)
+        return (config.config_path().stat().st_mtime, harmonia.version())
     except OSError:
-        return (None,)
+        return (None, harmonia.version())
 
 
 def own_secrets(cfg) -> list[str]:
@@ -267,10 +277,19 @@ def build(settings: dict, cfg=None) -> Redactor:
         files = [files]
     if files:
         values["file"] = file_values(files, min_length)
+    if harmonia_on(settings):
+        from . import harmonia
+
+        values.update(harmonia.masks(min_length))  # keys synced from the owner's phone (harmonia.py)
     patterns = settings.get("patterns") or []
     patterns = [patterns] if isinstance(patterns, str) else list(patterns)
     known = KNOWN_SECRETS if settings.get("known_secrets", True) is not False else ()
     return Redactor(values, patterns, bool(settings.get("ipv4")), known)
+
+
+def harmonia_on(settings: dict) -> bool:
+    """[redact] harmonia = false stops masking what Harmonia syncs here (on by default)."""
+    return settings.get("harmonia", True) is not False
 
 
 def current() -> Redactor:
@@ -291,6 +310,13 @@ def current() -> Redactor:
     return redactor
 
 
+def _refresh_harmonia() -> None:
+    from . import config, harmonia
+
+    if harmonia_on(config.load().redact):
+        harmonia.refresh()
+
+
 def reset() -> None:
     global _cache
     with _lock:
@@ -309,6 +335,10 @@ class RedactOutput(Middleware):
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         result = await call_next(context)
+        from . import harmonia
+
+        if harmonia.changed():  # a key added on the phone since: read before this result goes out
+            await asyncio.to_thread(_refresh_harmonia)
         redactor = current()
         if redactor.empty:
             return result

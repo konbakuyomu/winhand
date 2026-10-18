@@ -220,6 +220,9 @@ def describe(
         return one("write", a.get("path"), expand_vars=True)
     if tool == "secret_prompt" and a.get("save_to"):
         return [Action("write", tool, (_abs(a.get("save_to"), vars_first=True),))]
+    if tool == "secret_prompt" and a.get("harmonia"):  # what winhand runs to store it (harmonia.py)
+        env, _, name = str(a["harmonia"]).rpartition("/")
+        return [Action("command", tool, text=f"harmonia var set {env} {name}")]
     if tool == "fs_edit":  # editing needs the content: a read rule covers it too
         return one("edit", a.get("path")) + one("read", a.get("path"))
     if tool == "fs_apply_patch":

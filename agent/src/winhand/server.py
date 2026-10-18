@@ -79,6 +79,11 @@ Quick rules
 - A token or password that must be stored on the machine: secret_prompt(message, save_to=...) lets the
   person type it into a masked dialog; you never see it. «redacted:…» in results marks masked values:
   never write such text back to a file.
+- Keys the owner keeps in Harmonia (context() then has a `harmonia` part with its environments): run
+  the program that needs them as run(command='harmonia', args=['exec', '--env', '<environment>', '--',
+  'npx', 'wrangler', 'deploy']); the program gets them, you do not, and their values are masked as
+  «redacted:harmonia:NAME». A new key goes there with secret_prompt(message, harmonia='<environment>/NAME').
+  Printing them (harmonia export, var list --show) needs the person's OK; Harmonia's files are off limits.
 - session_wait ORs its conditions across several sessions at once (e.g. gdb prompt OR serial "PANIC").
   A timeout is not a failure: call it again to keep waiting; already-returned output is not repeated.
   One wait at a time is enough: identical parallel waits share one answer, and calls sent in
@@ -892,6 +897,14 @@ def build_server(
         validate: Annotated[
             str | None, Field(description="Regex the value must match (format check; asks again if not)")
         ] = None,
+        harmonia: Annotated[
+            str | None,
+            Field(
+                description="Or: <environment>/<NAME> to store it in Harmonia, which syncs it to the "
+                "owner's other machines (context() lists the environments); then run programs with "
+                "harmonia exec --env <environment> -- ..."
+            ),
+        ] = None,
     ) -> dict:
         """Ask the person at the machine to type a secret (masked dialog) and store it there without it
         ever reaching you: you get back only where it was saved. It is also masked in later results.
@@ -899,7 +912,9 @@ def build_server(
 
         def work():
             try:
-                return secret_store.prompt_and_save(message, save_to, key, credential, validate)
+                return secret_store.prompt_and_save(
+                    message, save_to, key, credential, validate, harmonia_target=harmonia
+                )
             except (secret_store.SecretError, PromptUnavailable, fs.FsError, OSError) as exc:
                 return {"error": str(exc)}
 

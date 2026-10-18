@@ -2,8 +2,9 @@
 
 The model needs a token to exist (a Cloudflare API token, a panel password) but should never
 see it. secret_prompt opens a masked dialog; the answer goes straight into a file (whole file,
-or one KEY=VALUE line of an .env file) readable only by this user, or into the Windows
-Credential Manager. The value is also masked in every later tool result (redact.remember).
+or one KEY=VALUE line of an .env file) readable only by this user, into the Windows Credential
+Manager, or into a Harmonia environment, which syncs it to the owner's other machines
+(harmonia.py). The value is also masked in every later tool result (redact.remember).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import re
 import subprocess
 import sys
 
-from . import fs, proc, redact, winenv
+from . import fs, harmonia, proc, redact, winenv
 from .secret_prompt import ask_secret
 
 IS_WINDOWS = sys.platform == "win32"
@@ -111,6 +112,15 @@ def save_to_credential_manager(target: str, value: str, user: str | None = None)
     return {"saved": True, "credential": target, "chars": len(value)}
 
 
+def _harmonia_target(spec: str) -> tuple[str, str]:
+    env, sep, name = spec.rpartition("/")
+    if not sep or not env.strip() or not _KEY.match(name):
+        raise SecretError(
+            f"harmonia is <environment>/<VARIABLE_NAME>, e.g. Cloudflare/CLOUDFLARE_API_TOKEN, not {spec!r}"
+        )
+    return env.strip(), name
+
+
 def prompt_and_save(
     message: str,
     save_to: str | None = None,
@@ -119,9 +129,14 @@ def prompt_and_save(
     validate: str | None = None,
     title: str = "winhand",
     attempts: int = 3,
+    harmonia_target: str | None = None,
 ) -> dict:
-    if (save_to is None) == (credential is None):
-        raise SecretError("give save_to (a file) or credential (a Credential Manager name)")
+    if sum(x is not None for x in (save_to, credential, harmonia_target)) != 1:
+        raise SecretError(
+            "give one of save_to (a file), credential (a Credential Manager name) or harmonia "
+            "(<environment>/<NAME> in Harmonia)"
+        )
+    target = _harmonia_target(harmonia_target) if harmonia_target is not None else None
     pattern = None
     if validate:
         try:
@@ -141,6 +156,11 @@ def prompt_and_save(
             question = "格式不对，请检查是否复制完整后重新输入。\n\n" + message
             continue
         redact.remember(value)
+        if target is not None:
+            try:
+                return harmonia.store(*target, value)
+            except harmonia.HarmoniaError as exc:
+                raise SecretError(str(exc)) from exc
         if credential is not None:
             return save_to_credential_manager(credential, value, key)
         return save_to_file(save_to, value, key)

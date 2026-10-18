@@ -251,6 +251,27 @@ ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 
 短暂断网后，agent 会重连，本机仍存活的会话继续运行。连接恢复时先用 `history` 看刚才的调用是否已经执行（带 run id 和退出码；几个客户端同时用这台电脑时，`client` 写明每条是谁发的，客户端保持 MCP 会话时 `this_session` 标出你自己的；winhand 重启后，桌面端日志里重启前的调用也列出来，标 `before_restart`），再用 `session_list` 找原会话，再用 `session_read(since=上次实际收到的 cursor)` 补读；游标未知时可从 `since=0` 开始。丢失回复不能证明操作失败，不要直接重发原命令。agent 进程重启属于另一种情况：交互会话不会自动恢复；需要跨 agent 重启继续的非交互工作用 `job_start`，之后以 `job_status` 查询。
 
+### 用 Harmonia 管理密钥
+
+[Harmonia](https://github.com/harmonia-vault/harmonia)（和弦）在手机上管理 API Key，端到端加密后同步到你批准的电脑和服务器；`harmonia exec -- <程序>` 只把密钥交给这一个程序。这台电脑装好 Harmonia 并接入账号后，winhand 会自动配合它：
+
+- **遮挡**：Harmonia 给这台电脑的每个值（所有环境的，同名变量在不同环境里的值也都算），在任何工具结果里都换成 `«redacted:harmonia:变量名»`。手机上新加的变量同步到电脑后，从下一个结果起就被遮挡。winhand 用 `harmonia export` 自己读这些值，值只留在 winhand 进程里。`[redact]` 里写 `harmonia = false` 可以关掉。
+- **保护**：AI 读不到、也改不了 Harmonia 的数据目录（`~/.harmonia`，里面的设备密钥能解开同步到这台电脑的全部变量）；`harmonia manager` 一律拒绝；`harmonia export`、`var list --show`、`var rm`、`logout`、`uninstall` 这类会输出明文或改变设置的命令，要你在电脑上点允许。这几条规则是 winhand 内置的，不用写进 guards.toml，`context()` 里能看到。
+- **使用**：`context()` 列出可用的环境，AI 用 `run(command='harmonia', args=['exec', '--env', 'Cloudflare', '--', 'npx', 'wrangler', 'deploy'])` 这样运行需要密钥的程序。
+- **存新密钥**：`secret_prompt(message, harmonia='Cloudflare/CLOUDFLARE_API_TOKEN')` 在电脑上弹出掩码输入框，输入的值直接写进 Harmonia 的这个环境，再同步到其他设备，AI 看不到。这台电脑对该环境要有读写权限。
+
+接入 Harmonia（按它自己的说明）：
+
+1. 部署服务端：Fork [harmonia-worker](https://github.com/harmonia-vault/harmonia-worker)，在 Cloudflare 控制台 Workers & Pages → Create → Import a repository 选这个 Fork 部署，免费套餐即可。部署后立即用手机 App 注册：默认只有第一个注册的账号能成功。
+2. 手机装 App（Android 直接装 APK；iPhone 需要用 AltStore 这类工具自签），建环境（例如 Cloudflare、GitHub），添加变量。
+3. 电脑上装命令行：在 PowerShell 里运行 `$env:HARMONIA_YES = '0'; irm https://github.com/harmonia-vault/harmonia/releases/download/update-feed/install.ps1 | iex`，再运行 `harmonia login <服务器地址>`，在手机上核对核对码后批准，只勾选需要的环境。
+
+几点建议：
+
+- Windows 上不要开 Harmonia 的“写入用户环境变量”（它的 Shell 集成）：值会以明文写进注册表，之后启动的每个程序都读得到。只用 `harmonia exec`，范围最小。
+- Harmonia 还在 v0.x，作者建议先用于非关键密钥。
+- 遮挡是安全带，不是沙箱：存心绕过的程序可以把值编码后再输出。
+
 ## 本机规则与守卫
 
 任何客户端连上 winhand，都能读到这台电脑写好的规矩和技能，并受这台电脑上的规则约束。这一层与客户端无关，只用标准 MCP；没写规则时什么都不拦。
