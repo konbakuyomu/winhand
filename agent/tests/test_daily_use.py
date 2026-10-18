@@ -51,6 +51,7 @@ def test_git_bash_found_from_gits_exec_path(monkeypatch, tmp_path):
 # ------------------------------------------------------------------ arguments as models send them
 
 import json  # noqa: E402
+import os  # noqa: E402
 import sys  # noqa: E402
 import textwrap  # noqa: E402
 
@@ -339,3 +340,201 @@ def test_a_job_named_run_something_is_not_taken_for_a_run(monkeypatch):
     )
     assert tools_desktop._job_fetch("run-all-sim-1016122643", 0, 100)["state"] == "finished"
     assert seen == ["run-all-sim-1016122643"]
+
+
+# ------------------------------------------------------------------ PowerShell: no BOM, clear hints
+
+
+def test_powershell_prologue_has_no_bom():
+    from winhand import winenv
+
+    assert "UTF8Encoding $false" in winenv._PWSH_UTF8 and "[Text.Encoding]::UTF8" not in winenv._PWSH_UTF8
+
+
+def test_hints_for_crlf_curly_quotes_and_bash_escapes():
+    crlf = proc._failure_hint(None, False, "bash: line 1: $'K=abc\\r': command not found")
+    assert "CRLF" in crlf and "remote_run" in crlf
+    curly = proc._failure_hint(None, False, "ParserError: missing the terminator", "Write-Host “你好”")
+    assert "curly quotes" in curly
+    escaped = proc._failure_hint(None, False, "ParserError: Unexpected token", 'echo "a \\"b\\""')
+    assert 'write it twice ("")' in escaped
+    assert proc._failure_hint(None, False, "fine", "x") is None
+
+
+# ------------------------------------------------------------------ job_start runs a program directly
+
+
+def test_job_start_with_args_is_judged_with_its_arguments_and_stdin():
+    from winhand import actions
+
+    (act,) = actions.describe("job_start", {"command": "git", "args": ["push", "--force"], "stdin": "y"})
+    assert act.kind == "command" and act.text == "git push --force\ny"
+
+
+def test_whole_characters_keeps_a_half_written_one_for_next_time():
+    from winhand.jobs import _whole_characters
+
+    text = "进度 50%".encode()
+    assert _whole_characters(text) == len(text)
+    assert _whole_characters(text[:-4] + "完".encode()[:2]) == len(text) - 4
+    assert _whole_characters(b"abc") == 3 and _whole_characters(b"") == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="background jobs are Windows-only")
+def test_a_program_job_gets_utf8_stdin_and_shows_stderr_while_running(tmp_path):
+    import time
+
+    from winhand import jobs
+
+    code = (
+        "import sys, time\n"
+        "data = sys.stdin.buffer.read()\n"
+        "sys.stderr.write('progress ' + data.decode('utf-8') + '\\n'); sys.stderr.flush()\n"
+        "time.sleep(2)\n"
+        "print(data.hex())\n"
+    )
+    script = tmp_path / "p.py"
+    script.write_text(code, encoding="utf-8")
+    started = jobs.start(sys.executable, args=["-u", str(script)], stdin="中文 brief", name="prog")
+    deadline = time.time() + 30
+    status = started
+    while time.time() < deadline:
+        status = jobs.status(started["id"])
+        if "progress" in status.get("stderr", "") or status["state"] != "running":
+            break
+        time.sleep(0.3)
+    assert "progress 中文 brief" in status.get("stderr", ""), status
+    while status["state"] == "running" and time.time() < deadline:
+        time.sleep(0.3)
+        status = jobs.status(started["id"])
+    assert status["exit_code"] == 0 and "中文 brief".encode().hex() in status["output"], status
+
+
+# ------------------------------------------------------------------ fs_search in GBK sources
+
+
+@pytest.fixture
+def gbk_tree(tmp_path):
+    root = tmp_path / "10_客户项目" / "固件"
+    (root / "user" / "sub").mkdir(parents=True)
+    (root / "projects" / "source").mkdir(parents=True)
+    (root / "user" / "process.c").write_bytes("TestOut_Pulse(); //切换至工作模式完成\nint x;\n".encode("gbk"))
+    (root / "user" / "sub" / "gpio.h").write_text("#define PIN 1\n", encoding="utf-8")
+    (root / "projects" / "source" / "main.c").write_text("int x; // 中文 UTF-8\n", encoding="utf-8")
+    (root / "notes.md").write_text("int x 不该出现\n", encoding="utf-8")
+    return root
+
+
+def test_search_keeps_paths_readable_beside_gbk_lines(gbk_tree):
+    from winhand import fs
+
+    found = fs.fs_search("TestOut_Pulse|PIN", str(gbk_tree))
+    assert sorted(found["matches"]) == [
+        "user/process.c:1:TestOut_Pulse(); //切换至工作模式完成".replace("/", os.sep),
+        "user/sub/gpio.h:1:#define PIN 1".replace("/", os.sep),
+    ]
+
+
+def test_a_chinese_pattern_finds_gbk_and_utf8_files(gbk_tree):
+    from winhand import fs
+
+    found = fs.fs_search("切换至|中文", str(gbk_tree))
+    texts = " ".join(found["matches"])
+    assert "切换至工作模式" in texts and "中文 UTF-8" in texts and "gb18030" in found["engine"]
+
+
+def test_globs_with_folders_and_counts_without_context_lines(gbk_tree):
+    from winhand import fs
+
+    found = fs.fs_search("int x", str(gbk_tree), glob="{user,projects/source}/**/*.{c,h}")
+    assert len(found["matches"]) == 2 and not any("notes.md" in m for m in found["matches"])
+    first = fs.fs_search("int x", str(gbk_tree), context=20, max_results=1)
+    assert first["truncated"] and any(":1:" in m or ":2:" in m for m in first["matches"])
+
+
+def test_a_single_file_search_keeps_its_format(gbk_tree):
+    from winhand import fs
+
+    found = fs.fs_search("int", str(gbk_tree / "user" / "process.c"))
+    assert found["matches"] == ["2:int x;"]
+
+
+# ------------------------------------------------------------------ local MCP servers added by hand
+
+
+async def test_a_server_added_to_config_toml_is_there_without_a_restart(winhand_home):
+    from winhand import local_mcp
+
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    (winhand_home / "config.toml").write_text(
+        '[mcp_servers.first]\ncommand = "python"\nargs = []\n', encoding="utf-8"
+    )
+    await local_mcp.refresh()
+    assert [e.name for e in local_mcp.enabled_entries()] == ["first"]
+    with open(winhand_home / "config.toml", "a", encoding="utf-8") as fh:  # what fs_write(append) does
+        fh.write('\n[mcp_servers.rigol-scope-mcp]\ncommand = "python"\nargs = ["-m", "scope"]\n')
+    await local_mcp.refresh()
+    assert sorted(e.name for e in local_mcp.enabled_entries()) == ["first", "rigol-scope-mcp"]
+
+
+async def test_the_app_does_not_overwrite_changes_made_to_the_file(winhand_home, monkeypatch):
+    from winhand import desktop_backend as db
+    from winhand import local_mcp
+
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    path = winhand_home / "config.toml"
+    path.write_text('[mcp_servers.a]\ncommand = "python"\nargs = []\n', encoding="utf-8")
+    backend = db.Backend(lambda _line: None)
+    try:
+        assert local_mcp.reload_hook == backend._reload_from_disk
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(
+                '\n[context]\nrepo_roots = ["D:\\\\code"]\n\n[mcp_servers.b]\ncommand = "python"\nargs = []\n'
+            )
+        import os as _os
+
+        stat = path.stat()
+        _os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))  # a later write
+        await backend.handle(
+            json.dumps(
+                {"id": 1, "method": "mcp_set_enabled", "params": {"name": "a", "enabled": False}}
+            ).encode()
+        )
+        saved = path.read_text(encoding="utf-8")
+        assert "[mcp_servers.b]" in saved and "repo_roots" in saved and "enabled = false" in saved
+    finally:
+        await backend.close()
+
+
+# ------------------------------------------------------------------ sessions: escapes and device codes
+
+
+def test_cursor_save_restore_and_keypad_escapes_are_stripped():
+    from winhand.session.text import strip_ansi
+
+    raw = "\x1b7      \x1b8? Authenticate Git with your GitHub credentials? (Y/n) \x1b=\x1b>no\x1b7\x1b8\x1bc"
+    assert strip_ansi(raw) == "      ? Authenticate Git with your GitHub credentials? (Y/n) no"
+    assert strip_ansi("\x1b#8line") == "line"
+
+
+def test_a_device_code_sign_in_needs_the_person():
+    from winhand.session.state import Detectors, infer
+
+    screen = (
+        "! First copy your one-time code: 2F1B-8C3A\n"
+        "Press Enter to open github.com/login/device in your browser... "
+    )
+    got = infer(
+        alive=True,
+        exit_code=None,
+        last_line=screen.splitlines()[-1],
+        since_input=screen,
+        idle_s=2.0,
+        det=Detectors(),
+    )
+    assert got["state"] == "needs_user" and got["kind"] == "browser_auth", got
+    code_only = "! First copy your one-time code: 2F1B-8C3A"
+    got = infer(
+        alive=True, exit_code=None, last_line=code_only, since_input=code_only, idle_s=2.0, det=Detectors()
+    )
+    assert got["state"] == "needs_user", got

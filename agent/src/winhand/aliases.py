@@ -394,7 +394,7 @@ class Normalized:
         if self.args.pop("run_in_background", None):
             self.notes.append(
                 "run_in_background is not a run option: it ran as usual (job_start runs PowerShell in the "
-                "background; a run still going after ~45 s continues anyway, see still_running)"
+                "background; a run still going after ~40 s continues anyway, see still_running)"
             )
 
     def _remote_run(self) -> None:

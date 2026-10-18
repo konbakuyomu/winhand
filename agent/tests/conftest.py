@@ -51,6 +51,8 @@ def _no_local_mcp_left_over(monkeypatch):
     monkeypatch.setattr(local_mcp, "_own", None)
     monkeypatch.setattr(local_mcp, "_calls", {})
     monkeypatch.setattr(local_mcp, "_listings", {})
+    monkeypatch.setattr(local_mcp, "reload_hook", None)
+    monkeypatch.setattr(local_mcp, "_stamp", None)
 
 
 @pytest.fixture

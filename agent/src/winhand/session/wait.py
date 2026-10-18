@@ -18,7 +18,7 @@ from .session import Session
 from .text import clean
 
 DEFAULT_STATES = ["awaiting_input", "needs_user", "exited"]
-MAX_WAIT_S = 45.0  # clients abandon a tool call after ~60s; leave headroom for the relay and the reply
+MAX_WAIT_S = 40.0  # clients abandon a tool call after ~60s, some proxies sooner: leave headroom
 
 
 def _compile(patterns: list[str], ignore_case: bool) -> list[re.Pattern[str]]:

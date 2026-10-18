@@ -24,7 +24,7 @@ _QUIET_DEFAULTS = {
     "PAGER": "cat",
     "MANPAGER": "cat",
     "LESS": "-FRX",
-    # output arrives as it is printed, so a command still running at the 45 s answer shows progress
+    # output arrives as it is printed, so a command still running at the 40 s answer shows progress
     "PYTHONUNBUFFERED": "1",
 }
 # Only when no terminal renders the output: colour codes are noise in text handed to a model.
@@ -206,10 +206,15 @@ def shell_command(command: str) -> list[str]:
     return [os.environ.get("SHELL") or "/bin/sh", "-c", command]
 
 
+# UTF-8 *without* a BOM: [Text.Encoding]::UTF8 carries one, and PowerShell then starts whatever it
+# pipes into a program with EF BB BF (Windows PowerShell 5.1 even twice, through the console input
+# encoding): `... | python -c json.load` fails, `$script | ssh host bash -s` runs a garbled first line.
 _PWSH_UTF8 = (
-    "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
-    "[Console]::InputEncoding=[Text.Encoding]::UTF8;"
-    "$OutputEncoding=[Text.Encoding]::UTF8;"
+    "$__wh=New-Object System.Text.UTF8Encoding $false;"
+    "[Console]::OutputEncoding=$__wh;"
+    "[Console]::InputEncoding=$__wh;"
+    "$OutputEncoding=$__wh;"
+    "Remove-Variable __wh;"
     "$ProgressPreference='SilentlyContinue'"
 )
 

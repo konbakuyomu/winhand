@@ -32,15 +32,27 @@ MAX_JOB_WAIT_S = 40.0  # the reply must reach the client within its ~60 s limit
 JOB_POLL_S = 0.5
 
 
+def _new_text(status: dict, stderr_before: int | None) -> str:
+    """What a pattern is matched against: the new output, and stderr written during this wait."""
+    text = status.get("output") or ""
+    size, tail = status.get("stderr_size"), status.get("stderr") or ""
+    if stderr_before is not None and size is not None and size > stderr_before:
+        text += "\n" + tail[-(size - stderr_before) :]
+    return text
+
+
 async def wait_job(fetch, wait_s: float, regexes: list[re.Pattern[str]]) -> dict:
     """Poll a job's status until it is no longer running, its new output matches, or time is up."""
     began = time.monotonic()
     deadline = began + min(wait_s, MAX_JOB_WAIT_S)
+    stderr_before = None
     while True:
         status = await asyncio.to_thread(fetch)
         if status.get("error") or status.get("state") != "running":
             return status
-        output = status.get("output") or ""
+        if stderr_before is None:
+            stderr_before = status.get("stderr_size", 0)
+        output = _new_text(status, stderr_before)
         hit = next((r.pattern for r in regexes if r.search(output)), None)
         if hit is not None:
             return {**status, "matched": hit}
@@ -75,6 +87,7 @@ async def wait_jobs(
     or time is up. Every job's state and new output come back, keyed by id."""
     began = time.monotonic()
     deadline = began + min(wait_s, MAX_JOB_WAIT_S)
+    stderr_before: dict[str, int] = {}
     while True:
         statuses = {i: await asyncio.to_thread(_job_fetch, i, cursors[i], limit) for i in ids}
         hit = None
@@ -82,7 +95,9 @@ async def wait_jobs(
             if status.get("error") or status.get("state") != "running":
                 hit = {"id": i, "condition": "error" if status.get("error") else status.get("state")}
                 break
-            pattern = next((r.pattern for r in regexes if r.search(status.get("output") or "")), None)
+            stderr_before.setdefault(i, status.get("stderr_size", 0))
+            text = _new_text(status, stderr_before[i])
+            pattern = next((r.pattern for r in regexes if r.search(text)), None)
             if pattern is not None:
                 hit = {"id": i, "condition": "pattern", "pattern": pattern}
                 break
@@ -905,17 +920,38 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool
     async def job_start(
-        command: Annotated[str, Field(description="PowerShell command(s) to run")],
+        command: Annotated[
+            str, Field(description="PowerShell command(s) to run; with `args`, the program to run directly")
+        ],
+        args: Annotated[
+            list[str] | None,
+            Field(
+                description="Run `command` as a program with these arguments (no PowerShell parsing; [] for none). "
+                "Its stdout and stderr are kept as written: job_status shows both while it runs"
+            ),
+        ] = None,
+        stdin: Annotated[
+            str | None,
+            Field(description="With args: text given to the program on stdin, as UTF-8 (a Codex brief ...)"),
+        ] = None,
         cwd: str | None = None,
         name: str | None = None,
         elevated: Annotated[
             bool, Field(description="Run as administrator; the person must approve a UAC prompt")
         ] = False,
+        shell: Annotated[
+            str | None,
+            Field(
+                description="For a command: powershell (Windows PowerShell 5.1, default) | pwsh (PowerShell 7)"
+            ),
+        ] = None,
     ) -> dict:
         """Run a command in the background, independent of winhand: it keeps running even if
         winhand restarts or is reinstalled, and its output and exit code stay available via
-        job_status. Use for long work, for anything that replaces winhand, and for admin tasks."""
-        return await asyncio.to_thread(_errors, jobs.start, command, cwd, name, elevated)
+        job_status. Use for long work, for anything that replaces winhand, and for admin tasks.
+        A program fed text on stdin (Codex: command='codex', args=['exec', '-'], stdin=brief) is
+        best run with args + stdin: the text and its output never pass through a PowerShell pipe."""
+        return await asyncio.to_thread(_errors, jobs.start, command, cwd, name, elevated, args, stdin, shell)
 
     @mcp.tool
     async def job_status(

@@ -12,7 +12,9 @@ _ANSI = re.compile(
     | \x1b\][^\x07\x1b]*(?:\x07|\x1b\\) # OSC ... BEL | ST
     | \x1b[PX^_][^\x1b]*\x1b\\         # DCS / SOS / PM / APC ... ST
     | \x1b[()*+][0-9A-Za-z]            # charset designation
+    | \x1b[#%][0-9@A-Z]                # line size (ESC # 8), character set (ESC % G)
     | \x1b[@-Z\\-_]                    # other 2-byte escapes
+    | \x1b[0-?`-~]                     # ESC 7 / ESC 8 (save, restore cursor), ESC = / ESC >, ESC c
     | \x9b[0-?]*[ -/]*[@-~]            # 8-bit CSI
     """,
     re.VERBOSE,

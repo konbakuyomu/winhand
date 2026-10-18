@@ -22,7 +22,7 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
-from . import __version__, approvals, config, desktop, transfer
+from . import __version__, approvals, config, desktop, local_mcp, transfer
 from .activity import ActivityHub, ToolActivity
 from .mcp_bridge import Services, probe
 from .relay_client import AlreadyRunning, Replaced, run_tunnel, single_instance
@@ -72,6 +72,8 @@ class Backend:
         self.hub.listeners.append(lambda entry: self.emit("activity", entry))
         self.sessions = SessionManager()
         self.cfg = config.load()
+        self._cfg_stamp = local_mcp._config_stamp()
+        local_mcp.reload_hook = self._reload_from_disk
         self.mcp = build_server(self.cfg, self.sessions)
         # outermost, so the timeline and audit log see results after redaction
         self.mcp.middleware.insert(0, ToolActivity(self.hub))
@@ -277,6 +279,7 @@ class Backend:
             raise RpcError("missing_token", "需要设备令牌")
         self.cfg.relay_url, self.cfg.device_token = url, token
         config.save(self.cfg)
+        self._cfg_stamp = local_mcp._config_stamp()
         await self.start_tunnel()
         return self.snapshot()
 
@@ -341,8 +344,31 @@ class Backend:
                 return entry
         raise RpcError("not_found", f"没有名为 {name} 的 MCP 服务")
 
+    def _fresh(self) -> None:
+        """Re-read config.toml when someone else changed it since (by hand, or an AI with the file
+        tools): every change made here rewrites the whole file from self.cfg, which would otherwise
+        put back what the file said when the app started."""
+        stamp = local_mcp._config_stamp()
+        if stamp != self._cfg_stamp:
+            try:
+                self.cfg = config.load()
+            except Exception as exc:  # half-edited: keep the copy we have, say why
+                log.warning("config.toml could not be read again: %s", exc)
+                return
+            self._cfg_stamp = stamp
+
+    async def _reload_from_disk(self) -> None:
+        before = self.cfg
+        self._fresh()
+        if self.cfg is before:
+            return
+        stale = self.services.configure(self.cfg.servers)
+        await asyncio.gather(*(s.close() for s in stale), return_exceptions=True)
+        self.emit("mcp", self.mcp_state())
+
     async def _apply_servers(self) -> None:
         config.save(self.cfg)
+        self._cfg_stamp = local_mcp._config_stamp()
         stale = self.services.configure(self.cfg.servers)
         await asyncio.gather(*(s.close() for s in stale), return_exceptions=True)
         self.emit("mcp", self.mcp_state())
@@ -530,6 +556,7 @@ class Backend:
         try:
             if handler is None:
                 raise RpcError("unknown_method", f"unknown method {method!r}")
+            await self._reload_from_disk()  # the app's change is made to what the file says now
             result = await handler(message.get("params") or {})
             self.write_line({"id": rid, "result": result})
         except RpcError as exc:
@@ -539,6 +566,8 @@ class Backend:
             self.write_line({"id": rid, "error": {"code": "internal", "message": str(exc)}})
 
     async def close(self) -> None:
+        if local_mcp.reload_hook == self._reload_from_disk:
+            local_mcp.reload_hook = None
         approvals.unsubscribe(self._apps_changed)
         self.done.set()
         await self.stop_tunnel(quiet=True)

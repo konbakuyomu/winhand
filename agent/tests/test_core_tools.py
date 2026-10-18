@@ -107,7 +107,7 @@ def test_adjust_argv_fixes_python_isolation_and_powershell_encoding():
     assert proc.adjust_argv(["python", "-Ic", "print(1)"])[0][1:3] == ["-X", "utf8"]
     assert proc.adjust_argv(["python", "t.py", "-I"])[0] == ["python", "t.py", "-I"]
     argv, _ = proc.adjust_argv([r"C:\x\powershell.exe", "-NoProfile", "-Command", "Get-Date"])
-    assert argv[3].startswith("[Console]::OutputEncoding") and argv[3].endswith("; Get-Date")
+    assert argv[3] == f"{winenv._PWSH_UTF8}; Get-Date" and "UTF8Encoding $false" in argv[3]  # no BOM
     with pytest.raises(ValueError, match="line breaks"):
         proc.adjust_argv([r"C:\mise\shims\comet.cmd", "next", "line one\nline two"])
 
@@ -338,10 +338,11 @@ def test_fs_search_retries_with_pcre2_and_keeps_partial_results(tmp_path, monkey
         tmp_path / "bin",
         "rg",
         "import sys, time\n"
+        "assert '--null' in sys.argv\n"  # paths come NUL-terminated, apart from the line text
         "if '--pcre2' in sys.argv:\n"
-        "    print(sys.argv[-1] + '/x.txt:1:found'); raise SystemExit(0)\n"
+        "    print(sys.argv[-1] + '/x.txt\\x001:found'); raise SystemExit(0)\n"
         "if 'slow' in sys.argv:\n"
-        "    print(sys.argv[-1] + '/y.txt:1:early', flush=True); time.sleep(30)\n"
+        "    print(sys.argv[-1] + '/y.txt\\x001:early', flush=True); time.sleep(30)\n"
         "sys.stderr.write('regex parse error: look-around, including look-ahead and look-behind, is not supported')\n"
         "raise SystemExit(2)\n",
     )

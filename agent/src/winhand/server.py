@@ -61,7 +61,7 @@ Quick rules
     run(command='...')                             one command line for PowerShell
   Never put `powershell -Command "..."` inside a command line: the outer PowerShell expands its
   $variables first. Use script= or args= instead. Output comes back as clean UTF-8 text.
-  `run` answers within ~45 s; a command still going then comes back with `still_running` and an id:
+  `run` answers within ~40 s; a command still going then comes back with `still_running` and an id:
   it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code.
   Never sleep or poll in a loop to wait: job_status(wait_s=40, patterns=[...]) does it.
 - Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
@@ -161,7 +161,7 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
                                               | wsl) written to a file: $vars, quotes, Chinese arrive as is
     run(command='...')                        one command line for PowerShell
   Never nest `powershell -Command "..."` in a command line; use script= or args=. `run` answers within
-  ~45 s; if still going you get `still_running` + an id, and job_status(id, since=cursor, wait_s=40)
+  ~40 s; if still going you get `still_running` + an id, and job_status(id, since=cursor, wait_s=40)
   waits for the rest. Never sleep or poll in a loop.
 - Interactive, long-running or stateful programs (shells, REPLs, gdb, gdbserver, installers, serial or
   telnet consoles, full-screen TUIs) -> a session: session_start -> session_send / session_wait ->
@@ -371,6 +371,7 @@ def build_server(
         each enabled server, its state and its tools as last listed (nothing is started). With server:
         starts it if need be and lists every tool with its description and parameters (inputSchema).
         Call a tool with mcp_call."""
+        await local_mcp.refresh()  # a server just added to config.toml is there at once
         if not server:
             return {
                 "servers": await asyncio.to_thread(local_mcp.overview),
@@ -418,6 +419,7 @@ def build_server(
         if call_id:
             result, pending = await local_mcp.wait_call(call_id)
         else:
+            await local_mcp.refresh()
             if not server or not tool:
                 raise ValueError("give server and tool (mcp_tools lists them), or call_id to keep waiting")
             if timeout_s <= 0:
@@ -471,7 +473,7 @@ def build_server(
         ] = None,
     ) -> dict:
         """Run a command or script to completion and return exit code, stdout and stderr. Answers
-        within about 45 s: if it is still going then, the answer has `still_running` and an id, it
+        within about 40 s: if it is still going then, the answer has `still_running` and an id, it
         keeps running, and job_status(id, wait_s=40) waits for the rest.
         Use a session instead for anything interactive or that must keep running."""
         return await asyncio.to_thread(
@@ -728,7 +730,7 @@ def build_server(
         ] = None,
         min_chars: Annotated[int | None, Field(description="Stop once this much new output arrived")] = None,
         timeout_s: Annotated[
-            float, Field(description="Max wait for this call (capped at 45s; call again to keep waiting)")
+            float, Field(description="Max wait for this call (capped at 40s; call again to keep waiting)")
         ] = 30,
         include_screen: bool = False,
     ) -> dict:

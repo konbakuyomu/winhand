@@ -436,7 +436,37 @@ def adjust_argv(argv: list[str]) -> tuple[list[str], list[str]]:
     return [exe, *args], notes
 
 
-def _failure_hint(command: str | None, nested_direct: bool, stderr: str) -> str | None:
+_PARSE_ERROR = re.compile(
+    r"ParserError|missing the terminator|Missing closing|Unexpected token|missing (the )?closing|"
+    r"Array index expression is missing",
+    re.IGNORECASE,
+)
+
+
+def _failure_hint(
+    command: str | None, nested_direct: bool, stderr: str, script: str | None = None
+) -> str | None:
+    if re.search(
+        r"\$'[^']*\\r'|\r'?: command not found|syntax error near unexpected token `\$'\\r''", stderr
+    ):
+        return (
+            "a carriage return (CRLF) reached bash: PowerShell ends every line it pipes into a program "
+            "with CRLF. Send a script to another machine with remote_run(host, script), or with "
+            "run(command='ssh', args=[...], stdin=script)"
+        )
+    if script and _PARSE_ERROR.search(stderr):
+        if re.search("[\u201c\u201d\u2018\u2019]", script):
+            return (
+                "PowerShell takes the curly quotes \u201c \u201d \u2018 \u2019 for quotation marks, so text "
+                "containing them breaks its strings: put such text in a single-quoted here-string "
+                "(@'...'@ on lines of their own) or in a file (fs_write) and read it from there"
+            )
+        if '\\"' in script:
+            return (
+                'PowerShell does not escape a double quote with \\" (that is bash/JSON): write it twice ("") '
+                'or with a backtick (`"), or use single quotes; for another language write the code to a '
+                "file, or run it with run(script=..., shell='python')"
+            )
     if "batch file arguments are invalid" in stderr:
         return (
             "a .cmd/.bat shim (mise, scoop, npm ...) refused an argument with line breaks or special "
@@ -460,8 +490,9 @@ def _failure_hint(command: str | None, nested_direct: bool, stderr: str) -> str 
 
 # MCP clients give up on a tool call after about a minute (Claude Code: 60 s). `run` answers
 # before that; a command still going by then keeps running and is picked up with job_status.
-REPLY_WITHIN_S = 45.0
+REPLY_WITHIN_S = 40.0
 _KEEP_FINISHED = 20
+STDERR_TAIL_CHARS = 6_000  # of a command still running, in job_status
 
 
 class _Running:
@@ -485,6 +516,7 @@ class _Running:
         self.temp_file: Path | None = None
         self.notes: list[str] = []
         self.command: str | None = None
+        self.script: str | None = None  # a PowerShell script, for hints on its parse errors
         self.nested_direct = False
 
     def _pump(self, stream, sink: bytearray) -> None:
@@ -611,6 +643,8 @@ def run(
     job = _Running(f"run-{next(_run_ids)}", proc, argv, time.monotonic() + timeout_s)
     job.raw, job.temp_file, job.notes = raw, temp_file, notes
     job.command, job.nested_direct = command, nested_direct
+    if argv and re.search(r"(?i)(pwsh|powershell)(\.exe)?$", argv[0]):
+        job.script = script if script is not None else (command if args is None else None)
     if stdin is not None:
         threading.Thread(target=_feed, args=(proc, stdin), daemon=True).start()
     if job.wait(min(timeout_s, reply_within_s)):
@@ -667,7 +701,7 @@ def _exit_fields(job: _Running, stderr: str) -> dict:
     if note:
         fields["exit_note"] = note
     if code:
-        hint = _failure_hint(job.command, job.nested_direct, stderr)
+        hint = _failure_hint(job.command, job.nested_direct, stderr, job.script)
         if hint:
             fields["hint"] = hint
     return fields
@@ -721,6 +755,7 @@ def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:
     }
     if omitted:
         result["omitted_chars"] = omitted
+    result["stderr_size"] = len(err)  # job_status matches patterns against what is new here too
     if done:
         result.update(_exit_fields(job, err))
         result["stderr"] = clip(err, max_chars // 2, keep="both")[0]
@@ -728,6 +763,8 @@ def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:
             result["timed_out"] = True
         if job.stopped:
             result["stopped"] = True
+    elif err:  # progress many programs print to stderr while they work (Codex, compilers, git)
+        result["stderr"] = err[-STDERR_TAIL_CHARS:]
     return result
 
 

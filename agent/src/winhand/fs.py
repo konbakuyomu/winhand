@@ -565,25 +565,86 @@ def _decode_match(line: bytes) -> str:
             return line.decode("utf-8", errors="replace")
 
 
-def _run_rg(argv: list[str], max_results: int, budget_s: float) -> tuple[list[str], int | None, str, bool]:
-    """Run ripgrep, keeping what it found when it runs out of time or finds enough.
+_LINE_NO = re.compile(rb"(\d+)([:-])")
+_MATCH_LINE = re.compile(r"^(?:.*?:)?\d+:")  # `path:12:text`, or `12:text` when one file is searched
+
+
+def _decode_path(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:  # not what ripgrep writes on Windows, but never fail over a name
+        return raw.decode("mbcs" if winenv.IS_WINDOWS else "utf-8", errors="replace")
+
+
+def _rel(path: str) -> str:
+    return path[2:] if path.startswith(("./", ".\\")) else path
+
+
+class _RgOutput:
+    """ripgrep's --null output turned into `path:line:text` (`path-line-text` for context lines):
+    the path and the text are decoded on their own, so a GBK line no longer garbles the UTF-8
+    path in front of it. Counts matches, not context lines."""
+
+    def __init__(self, files_only: bool, single: bool) -> None:
+        self.files_only, self.single = files_only, single
+        self.lines: list[str] = []
+        self.matches = 0
+
+    def add(self, raw: bytes) -> None:
+        raw = raw.rstrip(b"\r\n")
+        if not raw:
+            return
+        if self.files_only:
+            self.lines.append(_rel(_decode_path(raw.rstrip(b"\0"))))
+            self.matches += 1
+            return
+        if raw == b"--":
+            self.lines.append("--")
+            return
+        path, nul, rest = raw.partition(b"\0")
+        m = _LINE_NO.match(rest) if nul else None
+        if m is None:
+            self.lines.append(_decode_match(raw))
+            return
+        number, mark = m.group(1).decode(), m.group(2).decode()
+        text = _decode_match(rest[m.end() :])
+        where = "" if self.single else _rel(_decode_path(path)) + mark
+        self.lines.append(f"{where}{number}{mark}{text}")
+        if mark == ":":
+            self.matches += 1
+
+
+def _run_rg(
+    argv: list[str], max_results: int, budget_s: float, cwd: str | None = None, out: _RgOutput | None = None
+) -> tuple[list[str], int | None, str, bool]:
+    """Run ripgrep (with --null), keeping what it found when it runs out of time or finds enough.
     Returns (lines, returncode or None when stopped early, stderr, timed_out)."""
+    out = out or _RgOutput(False, False)
     kwargs: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if winenv.IS_WINDOWS else {}
     proc = subprocess.Popen(
         argv,
+        cwd=cwd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=winenv.build_env(),
         **kwargs,
     )
-    lines: list[str] = []
     errors: list[bytes] = []
+    lock = threading.Lock()
+    split = b"\0" if out.files_only else b"\n"  # a list of files is NUL-terminated with --null
 
     def read_out() -> None:
         assert proc.stdout is not None
-        for raw in proc.stdout:
-            lines.append(_decode_match(raw.rstrip(b"\r\n")))
+        rest = b""
+        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+            rest += chunk
+            *items, rest = rest.split(split)
+            with lock:
+                for item in items:
+                    out.add(item)
+        with lock:
+            out.add(rest)
 
     def read_err() -> None:
         assert proc.stderr is not None
@@ -595,7 +656,7 @@ def _run_rg(argv: list[str], max_results: int, budget_s: float) -> tuple[list[st
     deadline = time.monotonic() + budget_s
     timed_out = stopped = False
     while proc.poll() is None:
-        if len(lines) > max_results:
+        if out.matches > max_results:
             stopped = True
             break
         if time.monotonic() > deadline:
@@ -608,7 +669,22 @@ def _run_rg(argv: list[str], max_results: int, budget_s: float) -> tuple[list[st
     for t in readers:
         t.join(timeout=2)
     stderr = b"".join(errors).decode("utf-8", errors="replace").strip()
-    return list(lines), None if stopped else proc.returncode, stderr, timed_out
+    with lock:
+        return list(out.lines), None if stopped else proc.returncode, stderr, timed_out
+
+
+def _first_matches(lines: list[str], limit: int, files_only: bool) -> tuple[list[str], bool]:
+    """The lines of the first `limit` matches (with their context lines); whether more were found."""
+    if files_only:
+        return lines[:limit], len(lines) > limit
+    kept, seen = [], 0
+    for line in lines:
+        if _MATCH_LINE.match(line):
+            seen += 1
+            if seen > limit:
+                return kept, True
+        kept.append(line)
+    return kept, False
 
 
 def fs_search(
@@ -628,11 +704,17 @@ def fs_search(
     timed_out = False
     warnings = ""
     engine = "ripgrep"
+    single = os.path.isfile(root)
+    prefix = winenv.display_path(root).rstrip("\\/")
     if rg:
+        # searched from inside the root: paths come back relative to it, and a glob with folders
+        # in it (src/**/*.c, {user,lib}/**/*.h) means what it says
+        cwd, target = (os.path.dirname(root), os.path.basename(root)) if single else (root, ".")
         argv = [
             rg,
             "--line-number",
             "--no-heading",
+            "--null",
             "--color",
             "never",
             "--max-columns",
@@ -651,24 +733,40 @@ def fs_search(
             argv.append(f"--context={int(context)}")
         if encoding:
             argv += ["--encoding", encoding]
-        target = ["-e", pattern, root]
-        lines, code, stderr, timed_out = _run_rg(argv + target, max_results, budget_s)
+        began = time.monotonic()
+
+        def search(extra: list[str], budget: float):
+            out = _RgOutput(files_only, single)
+            return _run_rg(argv + extra + ["-e", pattern, target], max_results, budget, cwd, out)
+
+        lines, code, stderr, timed_out = search([], budget_s)
         if code == 2 and not lines and re.search(r"look-?around|backreference", stderr, re.IGNORECASE):
             engine = "ripgrep (pcre2)"
-            lines, code, stderr, timed_out = _run_rg(argv + ["--pcre2"] + target, max_results, budget_s)
+            argv.append("--pcre2")
+            lines, code, stderr, timed_out = search([], budget_s)
         if code not in (None, 0, 1):
             if not lines:
                 raise FsError(stderr or "ripgrep failed")
             warnings = stderr[-600:]  # e.g. some files could not be read; the matches still count
+        # Chinese in GBK/GB18030 files (common in embedded C sources): ripgrep reads UTF-8, so a
+        # non-ASCII pattern finds nothing there. Those files are searched once more, read as GB18030.
+        left = budget_s - (time.monotonic() - began)
+        if not encoding and not pattern.isascii() and not timed_out and left > 1:
+            more, _, _, more_timed_out = search(["--encoding", "gb18030"], left)
+            known = set(lines)
+            extra = [line for line in more if line not in known]
+            if files_only or any(_MATCH_LINE.match(line) for line in extra):
+                if extra:
+                    lines = lines + (["--"] if context and lines and not files_only else []) + extra
+                    engine += " + gb18030"
+            timed_out = timed_out or more_timed_out
     else:
-        lines = list(
-            _py_search(pattern, root, glob, ignore_case, literal, max_results + 1, context, files_only)
-        )
+        found = _py_search(pattern, root, glob, ignore_case, literal, max_results + 1, context, files_only)
+        lines = [ln[len(prefix) + 1 :] if ln.startswith(prefix) else ln for ln in found]
         engine = "python"
-    prefix = winenv.display_path(root).rstrip("\\/")
-    results = [ln[len(prefix) + 1 :] if ln.startswith(prefix) else ln for ln in lines[:max_results]]
+    results, more = _first_matches(lines, max_results, files_only)
     out = {"root": prefix, "engine": engine, "matches": results, "count": len(results)}
-    if len(lines) > max_results:
+    if more:
         out["truncated"] = f"more than {max_results} matches; narrow the pattern, path or glob"
     if timed_out:
         out["timed_out"] = (
