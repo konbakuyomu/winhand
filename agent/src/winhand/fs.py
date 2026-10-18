@@ -783,8 +783,9 @@ def fs_search(
                     engine += " + gb18030"
             timed_out = timed_out or more_timed_out
     else:
-        found = _py_search(pattern, root, glob, ignore_case, literal, max_results + 1, context, files_only)
-        lines = [ln[len(prefix) + 1 :] if ln.startswith(prefix) else ln for ln in found]
+        lines = list(
+            _py_search(pattern, root, glob, ignore_case, literal, max_results + 1, context, files_only)
+        )
         engine = "python"
     results, more = _first_matches(lines, max_results, files_only)
     kept = within_budget(results, lambda line: width(line) + 4)
@@ -806,45 +807,102 @@ def fs_search(
     return out
 
 
-def _py_search(pattern, root, glob, ignore_case, literal, cap, context=0, files_only=False):
-    flags = re.IGNORECASE if ignore_case else 0
-    regex = re.compile(re.escape(pattern) if literal else pattern, flags)
-    found = 0
+def _brace(glob: str) -> list[str]:
+    """{a,b} alternatives spelled out, as ripgrep reads a glob: src/*.{c,h} -> src/*.c, src/*.h."""
+    m = re.search(r"\{([^{}]*)\}", glob)
+    if not m:
+        return [glob]
+    return [g for part in m.group(1).split(",") for g in _brace(glob[: m.start()] + part + glob[m.end() :])]
+
+
+def _glob_regex(glob: str) -> re.Pattern:
+    """A glob as a regex on a /-separated path: ** spans folders, * and ? stay within one."""
+    out, i = "", 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif glob.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif glob[i] == "[" and "]" in glob[i + 2 :]:
+            end = glob.index("]", i + 2)
+            body = glob[i + 1 : end]
+            out, i = out + "[" + ("^" + body[1:] if body.startswith("!") else body) + "]", end + 1
+        else:
+            out += {"*": "[^/]*", "?": "[^/]"}.get(glob[i]) or re.escape(glob[i])
+            i += 1
+    return re.compile(out + r"\Z")
+
+
+def _globber(glob: str | None):
+    """keep(rel, folder=False) as ripgrep's --glob decides: a glob with a / is matched against the
+    path from the searched folder, one without against the name; !glob leaves out what it
+    matches (folders too)."""
+    if not glob:
+        return lambda rel, folder=False: True
+    exclude = glob.startswith("!")
+    patterns = [("/" in g, _glob_regex(g.lstrip("/"))) for g in _brace(glob[1:] if exclude else glob)]
+
+    def keep(rel: str, folder: bool = False) -> bool:
+        name = rel.rsplit("/", 1)[-1]
+        hit = any(rx.match(rel if whole else name) for whole, rx in patterns)
+        if folder:
+            return not (exclude and hit)
+        return hit != exclude
+
+    return keep
+
+
+def _py_files(root: str, keep):
+    """(full path, path from root) of the files to search under root."""
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
-            d for d in dirnames if not d.startswith(".") and d not in ("node_modules", "__pycache__")
+            d
+            for d in dirnames
+            if not d.startswith(".")
+            and d not in ("node_modules", "__pycache__")
+            and keep(os.path.relpath(os.path.join(dirpath, d), root).replace(os.sep, "/"), folder=True)
         ]
         for name in filenames:
-            if glob and not fnmatch.fnmatch(name, glob):
-                continue
             full = os.path.join(dirpath, name)
-            try:
-                with open(full, "rb") as fh:
-                    data = fh.read(2_000_000)
-            except OSError:
+            rel = os.path.relpath(full, root)
+            if keep(rel.replace(os.sep, "/")):
+                yield full, rel
+
+
+def _py_search(pattern, root, glob, ignore_case, literal, cap, context=0, files_only=False):
+    """ripgrep's search where it is not installed, answered the way fs_search answers with it:
+    paths from root (none when root is one file), the same globs, GBK files decoded."""
+    flags = re.IGNORECASE if ignore_case else 0
+    regex = re.compile(re.escape(pattern) if literal else pattern, flags)
+    files = [(root, None)] if os.path.isfile(root) else _py_files(root, _globber(glob))
+    found = 0
+    for full, rel in files:
+        try:
+            with open(full, "rb") as fh:
+                data = fh.read(2_000_000)
+        except OSError:
+            continue
+        if _is_binary(data):
+            continue
+        text, _ = _decode(data)
+        lines = text.splitlines()
+        for no, line in enumerate(lines, 1):
+            if not regex.search(line):
                 continue
-            if _is_binary(data):
-                continue
-            text, _ = _decode(data)
-            lines = text.splitlines()
-            shown = winenv.display_path(full)
-            for no, line in enumerate(lines, 1):
-                if not regex.search(line):
-                    continue
-                if files_only:
-                    yield shown
-                    found += 1
-                    break
-                for before in range(max(1, no - context), no):
-                    yield f"{shown}-{before}-{lines[before - 1][:400]}"
-                yield f"{shown}:{no}:{line[:400]}"
-                for after in range(no + 1, min(len(lines), no + context) + 1):
-                    yield f"{shown}-{after}-{lines[after - 1][:400]}"
+            if files_only:
+                yield rel or os.path.basename(full)  # as ripgrep names one file it searched
                 found += 1
-                if found >= cap:
-                    return
+                break
+            for before in range(max(1, no - context), no):
+                yield f"{rel + '-' if rel else ''}{before}-{lines[before - 1][:400]}"
+            yield f"{rel + ':' if rel else ''}{no}:{line[:400]}"
+            for after in range(no + 1, min(len(lines), no + context) + 1):
+                yield f"{rel + '-' if rel else ''}{after}-{lines[after - 1][:400]}"
+            found += 1
             if found >= cap:
                 return
+        if found >= cap:
+            return
 
 
 # ------------------------------------------------------------------ managing files

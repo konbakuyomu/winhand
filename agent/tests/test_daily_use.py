@@ -282,6 +282,9 @@ def test_repo_found_near_a_known_project(tmp_path, monkeypatch):
         f"[projects.{_json.dumps(str(known))}]\ntrust_level = 'trusted'\n", encoding="utf-8"
     )
     monkeypatch.setenv("CODEX_HOME", str(codex))
+    # the home folder elsewhere: on Windows tmp_path is inside AppData, which is never scanned
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(tmp_path / "home"))
     monkeypatch.setattr(workspace, "claude_state_file", lambda: str(tmp_path / "none.json"))
     workspace._scans.clear()
     found = workspace.find_repo(Config(context={"skills": []}), "me/winhand")
@@ -413,8 +416,21 @@ def test_a_program_job_gets_utf8_stdin_and_shows_stderr_while_running(tmp_path):
 # ------------------------------------------------------------------ fs_search in GBK sources
 
 
-@pytest.fixture
-def gbk_tree(tmp_path):
+@pytest.fixture(params=["ripgrep", "python"])
+def gbk_tree(tmp_path, monkeypatch, request):
+    """A firmware tree with GBK and UTF-8 sources, searched with ripgrep and with the Python
+    fallback that answers the same way where ripgrep is not installed (CI's Ubuntu)."""
+    import shutil
+
+    from winhand import fs
+
+    if request.param == "ripgrep" and not shutil.which("rg"):
+        pytest.skip("ripgrep is not installed")
+    if request.param == "python":
+        real = shutil.which
+        monkeypatch.setattr(
+            fs.shutil, "which", lambda name, *a, **k: None if name == "rg" else real(name, *a, **k)
+        )
     root = tmp_path / "10_客户项目" / "固件"
     (root / "user" / "sub").mkdir(parents=True)
     (root / "projects" / "source").mkdir(parents=True)
@@ -430,8 +446,8 @@ def test_search_keeps_paths_readable_beside_gbk_lines(gbk_tree):
 
     found = fs.fs_search("TestOut_Pulse|PIN", str(gbk_tree))
     assert sorted(found["matches"]) == [
-        "user/process.c:1:TestOut_Pulse(); //切换至工作模式完成".replace("/", os.sep),
-        "user/sub/gpio.h:1:#define PIN 1".replace("/", os.sep),
+        os.path.join("user", "process.c") + ":1:TestOut_Pulse(); //切换至工作模式完成",
+        os.path.join("user", "sub", "gpio.h") + ":1:#define PIN 1",
     ]
 
 
@@ -440,7 +456,8 @@ def test_a_chinese_pattern_finds_gbk_and_utf8_files(gbk_tree):
 
     found = fs.fs_search("切换至|中文", str(gbk_tree))
     texts = " ".join(found["matches"])
-    assert "切换至工作模式" in texts and "中文 UTF-8" in texts and "gb18030" in found["engine"]
+    assert "切换至工作模式" in texts and "中文 UTF-8" in texts
+    assert found["engine"] in ("ripgrep + gb18030", "python")  # python reads GBK files as it goes
 
 
 def test_globs_with_folders_and_counts_without_context_lines(gbk_tree):
@@ -457,6 +474,26 @@ def test_a_single_file_search_keeps_its_format(gbk_tree):
 
     found = fs.fs_search("int", str(gbk_tree / "user" / "process.c"))
     assert found["matches"] == ["2:int x;"]
+    named = fs.fs_search("int", str(gbk_tree / "user" / "process.c"), files_only=True)
+    assert named["matches"] == ["process.c"]
+
+
+def test_globs_read_like_ripgreps(gbk_tree):
+    from winhand import fs
+
+    def files(glob):
+        return sorted(fs.fs_search("x|PIN", str(gbk_tree), glob=glob, files_only=True)["matches"])
+
+    sep = os.sep
+    assert files("*.{c,h}") == [
+        f"projects{sep}source{sep}main.c",
+        f"user{sep}process.c",
+        f"user{sep}sub{sep}gpio.h",
+    ]
+    assert files("user/*.c") == [f"user{sep}process.c"]  # with a folder: from the searched folder
+    assert files("!*.md") == files("*.{c,h}")
+    # a folder left out, and everything else kept
+    assert files("!sub") == ["notes.md", f"projects{sep}source{sep}main.c", f"user{sep}process.c"]
 
 
 # ------------------------------------------------------------------ local MCP servers added by hand
