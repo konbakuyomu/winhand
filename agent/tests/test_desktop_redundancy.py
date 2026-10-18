@@ -91,6 +91,7 @@ def _fake_window(monkeypatch, **extra):
     # not WinHand's own window, and allowed (approvals are tested in test_approvals.py)
     monkeypatch.setattr(td.desktop, "refuse_own", lambda hwnd: {})
     monkeypatch.setattr(td.desktop, "require_operable", lambda hwnd, what: None)
+    monkeypatch.setattr(td.desktop, "pid_at", lambda x, y: window["pid"])  # nothing covers it
     return window
 
 
@@ -297,6 +298,22 @@ async def test_scrolls_a_row_into_view_before_clicking_it(monkeypatch):
             )
         ).structured_content
     assert clicks == [("click", 125, 210)] and done["done"] == "clicked at (125, 210)"
+
+
+async def test_a_mouse_click_on_a_control_needs_the_control_on_screen(monkeypatch):
+    _fake_window(monkeypatch)
+    monkeypatch.setattr(td.desktop, "pid_at", lambda x, y: 4321)  # another program's window is there
+    monkeypatch.setattr(uia, "snapshot", lambda hwnd, timeout=0: {"window": "app", "count": 1, "elements": [
+        {"index": 0, "type": "ListItem", "name": "row 90", "automation_id": "", "hwnd": 0, "enabled": True,
+         "rect": [100, 2000, 50, 20], "offscreen": True, "patterns": [], "_runtime_id": [5], "_element": object()},
+    ]})  # fmt: skip
+    monkeypatch.setattr(td.desktop, "window_action", lambda *a, **k: {})
+    monkeypatch.setattr(td.desktop, "input_action", lambda *a, **k: pytest.fail("clicked another window"))
+    async with Client(build_server(Config())) as client:
+        refused = (
+            await client.call_tool("ui", {"window": "app", "action": "click", "name": "row 90"})
+        ).structured_content
+    assert "nothing was clicked" in refused["error"] and "out of sight" in refused["error"]
 
 
 # --------------------------------------------------------------------- OCR

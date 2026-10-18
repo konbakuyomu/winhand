@@ -791,6 +791,14 @@ def register(mcp: FastMCP) -> None:
                     raise
                 except desktop.DesktopError:
                     pass  # the control may be visible anyway (topmost, or already in front)
+                if w.get("pid") and desktop.pid_at(cx, cy) != w["pid"]:
+                    # a real click lands on whatever is there: another program, or what the
+                    # control scrolled away from
+                    hidden = " (UI Automation reports it out of sight)" if target.get("offscreen") else ""
+                    raise desktop.DesktopError(
+                        f"another window is at ({cx}, {cy}), where the control is{hidden}; nothing was "
+                        "clicked. Bring the window to the front or scroll to the control, then try again"
+                    )
                 desktop.input_action("click", cx, cy, coordinates="screen")
                 done = f"clicked at ({cx}, {cy})"
             if not done:

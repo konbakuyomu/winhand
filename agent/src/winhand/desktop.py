@@ -338,6 +338,17 @@ def root_window_at(x: int, y: int) -> int:
     return int(user32.GetAncestor(hwnd, 2) or 0) if hwnd else 0  # GA_ROOT
 
 
+def pid_at(x: int, y: int) -> int:
+    """The process whose window is at a screen point (0 when none): its main window, or a menu
+    or popup of it."""
+    hwnd = root_window_at(x, y)
+    if not hwnd:
+        return 0
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
 # ------------------------------------------------------- who may be operated
 
 _OWN_PROGRAMS = {"winhand.exe", "winhanddesktop.exe"}
