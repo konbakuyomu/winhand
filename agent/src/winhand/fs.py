@@ -68,12 +68,17 @@ def _read_bytes(path: str) -> bytes:
         return fh.read()
 
 
-def _read_text_bytes(path: str) -> tuple[str, str, bytes]:
+def _read_text_bytes(path: str, encoding: str | None = None) -> tuple[str, str, bytes]:
     data = _read_bytes(path)
+    if encoding:
+        try:
+            return data.decode(encoding, errors="replace"), encoding, data
+        except LookupError:
+            raise FsError(f"unknown encoding {encoding!r} (e.g. utf-8, gbk, utf-16, latin-1)") from None
     if _is_binary(data):
         raise FsError(f"{path} looks binary ({len(data)} bytes); not shown as text")
-    text, encoding = _decode(data)
-    return text, encoding, data
+    text, found = _decode(data)
+    return text, found, data
 
 
 def read_text(path: str) -> tuple[str, str]:
@@ -189,8 +194,9 @@ def fs_read(
     limit: int = 2000,
     tail: int | None = None,
     max_chars: int = READ_MAX_CHARS,
+    encoding: str | None = None,
 ) -> dict:
-    text, encoding, data = _read_text_bytes(path)
+    text, encoding, data = _read_text_bytes(path, encoding)
     lines = text.splitlines()
     total = len(lines)
     if tail:
@@ -365,7 +371,14 @@ def fs_list(
         raise FsError("kind is all, file or dir")
     root = Path(_p(path))
     if not root.is_dir():
-        raise FsError(f"not a directory: {path}")
+        if not root.is_file():
+            raise FsError(f"no such folder: {path}")
+        st = root.stat()  # a file: describe it rather than fail
+        return {
+            "root": winenv.display_path(str(root.parent)),
+            "entries": [{"path": root.name, "type": "file", "size": st.st_size, "modified": _modified(st)}],
+            "note": f"{path} is a file, not a folder: fs_read reads it",
+        }
     since = parse_since(newer_than) if newer_than else None
     # sorting by time or size has to see everything before keeping `limit` entries
     cap = limit if sort == "name" else max(limit, 20_000)

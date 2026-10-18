@@ -197,6 +197,8 @@ def describe(
     if tool == "run":
         argv = [a.get("script") or a.get("command") or "", *(a.get("args") or [])]
         text = _join(argv).strip()
+        if a.get("script") and a.get("command"):  # the script runs under that program: judge both
+            text = f"{a['command']}\n{text}"
         if a.get("stdin"):  # what a shell or interpreter reads from stdin runs too
             text = f"{text}\n{a['stdin']}"
         return one("command", text=text, cwd=_abs(a.get("cwd")))

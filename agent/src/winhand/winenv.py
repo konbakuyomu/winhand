@@ -135,13 +135,21 @@ def redirection_guard_enforced() -> bool:
     return bool(ok) and bool(flags.value & 1)
 
 
-def resolve_executable(name: str, env: dict[str, str] | None = None) -> str:
+def resolve_executable(name: str, env: dict[str, str] | None = None, cwd: str | None = None) -> str:
     """Resolve a command name to a path, honouring PATHEXT (npm -> npm.cmd).
 
+    A relative path (`.venv\\Scripts\\python.exe`) is taken relative to `cwd`, where the program
+    will run: Windows itself would look for it in winhand's own folder.
     Returns the name unchanged when it cannot be resolved so the OS error
     surfaces with the original spelling.
     """
     if os.path.dirname(name):
+        expanded = os.path.expanduser(name)
+        if cwd and not os.path.isabs(expanded):
+            beside = os.path.join(os.path.expanduser(cwd), expanded)
+            found = shutil.which(os.path.basename(beside), path=os.path.dirname(beside))
+            if found or os.path.isfile(beside):
+                return os.path.abspath(found or beside)
         return name
     path = (env or os.environ).get("PATH")
     return shutil.which(name, path=path) or name

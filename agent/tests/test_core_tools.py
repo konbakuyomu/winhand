@@ -53,7 +53,8 @@ def test_run_python_script_with_args():
 
 
 def test_run_script_errors_are_explained():
-    assert "not both" in proc.run("echo hi", script="echo hi")["error"]
+    assert "is not one" in proc.run("echo hi", script="echo hi")["error"]  # not an interpreter
+    assert "not both" in proc.run(sys.executable, script="print(1)", shell="python")["error"]
     assert "shell must be" in proc.run(script="x", shell="fish")["error"]
     assert "give command" in proc.run()["error"]
 

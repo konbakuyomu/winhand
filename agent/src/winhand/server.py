@@ -33,6 +33,7 @@ from . import (
     winenv,
     workspace,
 )
+from .aliases import ArgumentAliases
 from .config import Config
 from .config import load as load_config
 from .guard import GuardActions
@@ -54,6 +55,9 @@ Quick rules
     run(script='...', shell='pwsh')                a multi-line script (pwsh | powershell | cmd |
                                                    python | bash | wsl), written to a file, so $vars,
                                                    quotes and Chinese text arrive exactly as written
+    run(command=r'.venv\\Scripts\\python.exe', script='...', cwd=...)
+                                                   the same script, run by that interpreter; a
+                                                   relative program path is relative to cwd
     run(command='...')                             one command line for PowerShell
   Never put `powershell -Command "..."` inside a command line: the outer PowerShell expands its
   $variables first. Use script= or args= instead. Output comes back as clean UTF-8 text.
@@ -250,6 +254,8 @@ def build_server(
     recent = RecentCalls()
     mcp.add_middleware(recent)
     mcp.add_middleware(RedactOutput())  # inside RecentCalls: history only ever sees masked results
+    # Claude Code-style names (file_path, old_string, -A ...) become winhand's before anything is judged
+    mcp.add_middleware(ArgumentAliases(mcp))
     # innermost: a refusal is masked and recorded like any result; call() runs through it again
     mcp.add_middleware(GuardActions(sessions))
 
@@ -448,8 +454,9 @@ def build_server(
         script: Annotated[
             str | None,
             Field(
-                description="A multi-line script to run instead of `command`: written to a file and run "
-                "by `shell`, so quotes, $variables and non-ASCII text need no escaping"
+                description="A multi-line script, written to a file and run by `shell`, or by `command` "
+                "when that is an interpreter (a project's .venv\\Scripts\\python.exe, node ...): quotes, "
+                "$variables and non-ASCII text need no escaping"
             ),
         ] = None,
         shell: Annotated[
@@ -910,6 +917,9 @@ def build_server(
         max_chars: Annotated[
             int, Field(ge=1000, description="Text: stop adding lines past this many characters")
         ] = fs.READ_MAX_CHARS,
+        encoding: Annotated[
+            str | None, Field(description="Text: force the encoding, e.g. gbk (default: detected)")
+        ] = None,
     ):
         """Read any file. Text: numbered lines (UTF-8/GBK/BOM detected) plus the file's sha256;
         also logs another program is still writing. Images: returned as a picture you can see.
@@ -940,7 +950,7 @@ def build_server(
                 "error": f"{Path(path).suffix} is the old binary Office format; open and save it as "
                 ".docx/.xlsx/.pptx (or convert with LibreOffice via run) to read it"
             }
-        return await asyncio.to_thread(_fs, fs.fs_read, path, offset, limit, tail, max_chars)
+        return await asyncio.to_thread(_fs, fs.fs_read, path, offset, limit, tail, max_chars, encoding)
 
     @mcp.tool
     async def fs_write(

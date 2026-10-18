@@ -53,6 +53,62 @@ async def wait_job(fetch, wait_s: float, regexes: list[re.Pattern[str]]) -> dict
         await asyncio.sleep(JOB_POLL_S)
 
 
+MULTI_JOB_CHARS = 6_000  # output per job when several are waited on together
+
+
+def _is_run(job_id: str) -> bool:
+    """run-<n> is a `run` command that was still going when run answered; a background job may be
+    named run-something too (run-all-sim-1016122643), and is a job."""
+    return re.fullmatch(r"run-\d+", job_id) is not None
+
+
+def _job_fetch(job_id: str, since: int, limit: int) -> dict:
+    if _is_run(job_id):
+        return _errors(proc.run_status, job_id, since, limit)
+    return _errors(jobs.status, job_id, since, limit)
+
+
+async def wait_jobs(
+    ids: list[str], cursors: dict[str, int], limit: int, wait_s: float, regexes: list[re.Pattern[str]]
+) -> dict:
+    """Wait on several jobs at once: until one is no longer running, the new output of one matches,
+    or time is up. Every job's state and new output come back, keyed by id."""
+    began = time.monotonic()
+    deadline = began + min(wait_s, MAX_JOB_WAIT_S)
+    while True:
+        statuses = {i: await asyncio.to_thread(_job_fetch, i, cursors[i], limit) for i in ids}
+        hit = None
+        for i, status in statuses.items():
+            if status.get("error") or status.get("state") != "running":
+                hit = {"id": i, "condition": "error" if status.get("error") else status.get("state")}
+                break
+            pattern = next((r.pattern for r in regexes if r.search(status.get("output") or "")), None)
+            if pattern is not None:
+                hit = {"id": i, "condition": "pattern", "pattern": pattern}
+                break
+        if hit or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(JOB_POLL_S)
+    running = [i for i, st in statuses.items() if st.get("state") == "running"]
+    out: dict[str, Any] = {
+        "jobs": statuses,
+        "cursors": {i: st.get("cursor", cursors[i]) for i, st in statuses.items()},
+        "running": running,
+    }
+    if hit:
+        out["hit"] = hit
+    else:
+        out["waited_s"] = round(time.monotonic() - began, 1)
+    done = [i for i in ids if i not in running]
+    out["next"] = (
+        f"call again with since=cursors{' and without the jobs that ended (' + ', '.join(done) + ')' if done else ''}"
+        " to keep waiting"
+        if running
+        else "every job has ended"
+    )
+    return out
+
+
 def _facts(data: dict) -> TextContent:
     return TextContent(type="text", text=json.dumps(data, ensure_ascii=False))
 
@@ -863,8 +919,14 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool
     async def job_status(
-        id: Annotated[str | None, Field(description="Job id; omit to list recent jobs")] = None,
-        since: Annotated[int, Field(description="Output cursor from the previous call")] = 0,
+        id: Annotated[
+            str | list[str] | None,
+            Field(description="Job id, or a list of ids to wait on together; omit to list recent jobs"),
+        ] = None,
+        since: Annotated[
+            int | dict[str, int],
+            Field(description="Output cursor from the previous call ({id: cursor} for a list of ids)"),
+        ] = 0,
         wait_s: Annotated[
             float,
             Field(
@@ -882,15 +944,21 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """State (running/finished/vanished), exit code and output of a background job or of a `run`
         that was still going (run-N). With wait_s it blocks until the job ends, new output matches
-        `patterns`, or the wait runs out (then call again with since=cursor)."""
+        `patterns`, or the wait runs out (then call again with since=cursor). Several ids wait for
+        whichever job finishes or matches first, and answer with every job's state and new output."""
         if id is None:
             return await asyncio.to_thread(_errors, lambda: {"jobs": jobs.list_jobs()})
+        if isinstance(id, list):
+            ids = list(dict.fromkeys(str(i) for i in id))
+            if len(ids) == 1:
+                id = ids[0]
+            else:
+                return await _job_statuses(ids, since, wait_s, patterns, tail)
+        start = since.get(id, 0) if isinstance(since, dict) else since
         limit = tail or 20_000
 
         def fetch() -> dict:
-            if id.startswith("run-"):  # a `run` command that was still going when run answered
-                return _errors(proc.run_status, id, since, limit)
-            return _errors(jobs.status, id, since, limit)
+            return _job_fetch(id, start, limit)
 
         if wait_s <= 0:
             return await asyncio.to_thread(fetch)
@@ -901,16 +969,33 @@ def register(mcp: FastMCP) -> None:
         key = (
             "job_status",
             id,
-            since,
+            start,
             round(min(wait_s, MAX_JOB_WAIT_S), 1),
             coalesce.freeze(patterns),
             limit,
         )
         return await coalesce.shared(key, lambda: wait_job(fetch, wait_s, regexes))
 
+    async def _job_statuses(ids, since, wait_s, patterns, tail) -> dict:
+        cursors = {i: (since.get(i, 0) if isinstance(since, dict) else since) for i in ids}
+        limit = tail or MULTI_JOB_CHARS
+        try:
+            regexes = [re.compile(p, re.MULTILINE) for p in patterns or []]
+        except re.error as exc:
+            return {"error": f"invalid regex: {exc}"}
+        key = (
+            "job_statuses",
+            tuple(ids),
+            coalesce.freeze(cursors),
+            round(min(wait_s, MAX_JOB_WAIT_S), 1),
+            coalesce.freeze(patterns),
+            limit,
+        )
+        return await coalesce.shared(key, lambda: wait_jobs(ids, cursors, limit, wait_s, regexes))
+
     @mcp.tool
     async def job_stop(id: str) -> dict:
         """Stop a running background job (and its child processes)."""
-        if id.startswith("run-"):
+        if _is_run(id):
             return await asyncio.to_thread(_errors, proc.run_stop, id)
         return await asyncio.to_thread(_errors, jobs.stop, id)
