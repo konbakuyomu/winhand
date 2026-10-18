@@ -207,9 +207,25 @@ def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
 
 
+_SEPARATORS = re.compile(r"([\\\\/]+)")
+
+
+def trim_components(path: str) -> str:
+    """The path Win32 really opens: without a \\\\?\\ prefix it drops trailing dots and spaces
+    from every component, so `desktop-apps.toml.` and `.env ` name `desktop-apps.toml` and `.env`."""
+    drive, rest = os.path.splitdrive(path)
+    parts = []
+    for part in _SEPARATORS.split(rest):
+        if part and not _SEPARATORS.fullmatch(part) and part not in (".", ".."):
+            part = part.rstrip(". ") or part
+        parts.append(part)
+    return drive + "".join(parts)
+
+
 def variants(path: str) -> list[str]:
     """Spellings of one path a rule must see: as given (without a \\\\?\\ prefix or an NTFS
-    stream suffix such as `::$DATA`) and with links, junctions and short names resolved."""
+    stream suffix such as `::$DATA`), as Windows opens it (trailing dots and spaces dropped) and
+    with links, junctions and short names resolved."""
     p = path
     if p.startswith(("\\\\?\\UNC\\", "\\\\.\\UNC\\")):
         p = "\\\\" + p[8:]
@@ -220,12 +236,17 @@ def variants(path: str) -> list[str]:
         if ":" in tail:
             p = os.path.join(head, tail.split(":", 1)[0])
     out = [p]
-    try:
-        real = os.path.realpath(p)
-    except (OSError, ValueError):
-        real = p
-    if _norm(real) != _norm(p):
-        out.append(real)
+    if os.name == "nt":
+        trimmed = trim_components(p)
+        if _norm(trimmed) != _norm(p):
+            out.append(trimmed)
+    for spelling in list(out):
+        try:
+            real = os.path.realpath(spelling)
+        except (OSError, ValueError):
+            real = spelling
+        if all(_norm(real) != _norm(o) for o in out):
+            out.append(real)
     return out
 
 

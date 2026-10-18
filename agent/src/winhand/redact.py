@@ -38,6 +38,25 @@ _IPV4 = re.compile(
 # public names nobody needs hidden, and that would make output unreadable if they were
 _HARMLESS = {"localhost", "127.0.0.1", "::1", "github.com", "ssh.github.com", "gitlab.com", "bitbucket.org"}
 _RELOAD_EVERY_S = 30.0
+# Credentials recognisable by their format are masked wherever they show up (a token printed by
+# `scoop config`, a key in a log): GitHub, OpenAI/Anthropic-style keys, AWS access key ids, Slack,
+# Google API keys, GitLab, npm, Hugging Face, private key blocks and JWTs. [redact] known_secrets =
+# false turns this off.
+KNOWN_SECRETS = (
+    r"\bgh[pousr]_[A-Za-z0-9]{36,}\b",
+    r"\bgithub_pat_[A-Za-z0-9_]{50,}\b",
+    r"\bsk-(?=[A-Za-z0-9_-]*\d)(?:ant-|proj-|svcacct-)?[A-Za-z0-9_-]{20,}",
+    r"\bAKIA[0-9A-Z]{16}\b",
+    r"\bxox[abprs]-[A-Za-z0-9-]{10,}",
+    r"\bAIza[0-9A-Za-z_-]{35}",
+    r"\bglpat-[A-Za-z0-9_-]{20,}",
+    r"\bnpm_[A-Za-z0-9]{36}\b",
+    r"\bhf_[A-Za-z0-9]{30,}\b",
+    r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----",
+    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+)
+_SECRET_NAME = re.compile(r"(?i)(token|secret|passw|pass_?phrase|api_?key|apikey|auth|credential|private)")
+_SECRET_FILE = re.compile(r"(?i)(passphrase|password|token|secret|credential)")
 
 
 class RedactedWrite(ValueError):
@@ -117,9 +136,15 @@ def file_values(patterns: Iterable[str], min_length: int = 6) -> list[str]:
 
 class Redactor:
     def __init__(
-        self, values: dict[str, Iterable[str]] | None = None, patterns: Iterable[str] = (), ipv4=False
+        self,
+        values: dict[str, Iterable[str]] | None = None,
+        patterns: Iterable[str] = (),
+        ipv4=False,
+        known: Iterable[str] = (),
     ):
         self.rules: list[tuple[str, re.Pattern[str]]] = []
+        if known:
+            self.rules.append(("token", re.compile("|".join(f"(?:{k})" for k in known))))
         for kind, items in (values or {}).items():
             unique = sorted({v for v in items if v and v not in _HARMLESS}, key=len, reverse=True)
             if unique:
@@ -142,6 +167,19 @@ class Redactor:
             value, n = regex.subn(f"{PLACEHOLDER}{kind}»", value)
             total += n
         return value, total
+
+    def count_in_blob(self, blob: str) -> int:
+        """How many masked values a base64 blob holds (as UTF-8, UTF-16 or single-byte text)."""
+        import base64
+
+        try:
+            raw = base64.b64decode(blob, validate=False)
+        except ValueError:
+            return 0
+        texts = {raw.decode("latin-1")}
+        for encoding in ("utf-8", "utf-16-le"):
+            texts.add(raw.decode(encoding, errors="ignore"))
+        return max((sum(len(regex.findall(t)) for _, regex in self.rules) for t in texts), default=0)
 
     def data(self, value: Any) -> tuple[Any, int]:
         """Mask every string inside JSON-like data."""
@@ -188,12 +226,40 @@ def _config_stamp() -> tuple:
         return (None,)
 
 
-def build(settings: dict) -> Redactor:
+def own_secrets(cfg) -> list[str]:
+    """winhand's own credentials, masked whatever [redact] says: the relay device token, the
+    headers and secret-looking environment values of local MCP servers, and one-line secret files
+    kept next to winhand's settings (owner-passphrase.txt ...). With the device token anyone can
+    stand in for this machine at the relay."""
+    from . import config
+
+    found = [cfg.device_token] if cfg.device_token else []
+    for server in cfg.servers:
+        for value in server.headers.values():
+            found.append(value)
+            scheme, _, credential = value.partition(" ")
+            if credential and scheme.lower() in ("bearer", "basic", "token"):
+                found.append(credential)
+        found += [v for k, v in server.env.items() if _SECRET_NAME.search(k) and len(v) >= 12]
+    try:
+        files = [f for f in config.home().iterdir() if f.is_file() and _SECRET_FILE.search(f.name)]
+    except OSError:
+        files = []
+    for f in files:
+        if f.suffix.lower() in (".toml", ".json", ".lock", ".log", ".jsonl") or f.stat().st_size > 4096:
+            continue
+        found += file_values([str(f)], 8)
+    return [v.strip() for v in found if v and len(v.strip()) >= 8]
+
+
+def build(settings: dict, cfg=None) -> Redactor:
     min_length = int(settings.get("min_length", 6) or 6)
     values: dict[str, list[str]] = {
         "value": [str(v) for v in settings.get("values", []) or []],
         "secret": sorted(_remembered),
     }
+    if cfg is not None:
+        values["winhand"] = own_secrets(cfg)
     if settings.get("ssh_hosts"):
         values["host"] = ssh_hosts()
     files = settings.get("files") or []
@@ -202,7 +268,9 @@ def build(settings: dict) -> Redactor:
     if files:
         values["file"] = file_values(files, min_length)
     patterns = settings.get("patterns") or []
-    return Redactor(values, [patterns] if isinstance(patterns, str) else patterns, bool(settings.get("ipv4")))
+    patterns = [patterns] if isinstance(patterns, str) else list(patterns)
+    known = KNOWN_SECRETS if settings.get("known_secrets", True) is not False else ()
+    return Redactor(values, patterns, bool(settings.get("ipv4")), known)
 
 
 def current() -> Redactor:
@@ -216,7 +284,8 @@ def current() -> Redactor:
             return _cache[2]
     from . import config
 
-    redactor = build(config.load().redact)
+    cfg = config.load()
+    redactor = build(cfg.redact, cfg)
     with _lock:
         _cache = (now, stamp, redactor)
     return redactor
@@ -244,7 +313,7 @@ class RedactOutput(Middleware):
         if redactor.empty:
             return result
         from fastmcp.tools.base import ToolResult
-        from mcp.types import EmbeddedResource, TextContent, TextResourceContents
+        from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 
         total = 0
         content = []
@@ -259,6 +328,15 @@ class RedactOutput(Middleware):
                 if n:
                     block = block.model_copy(
                         update={"resource": block.resource.model_copy(update={"text": text})}
+                    )
+            elif isinstance(block, EmbeddedResource) and isinstance(block.resource, BlobResourceContents):
+                n = redactor.count_in_blob(block.resource.blob)
+                if n:  # bytes cannot be masked in place without corrupting the file: hold it back
+                    total += n
+                    block = TextContent(
+                        type="text",
+                        text=f"{block.resource.uri}: not sent, it contains {n} value(s) this machine masks. "
+                        "Read it with fs_read (text, masked), or ask the person to share it.",
                     )
             content.append(block)
         structured = getattr(result, "structured_content", None)
