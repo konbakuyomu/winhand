@@ -261,6 +261,9 @@ def match_controls(
     return exact or found
 
 
+_CANDIDATE = ("name", "type", "automation_id", "value", "enabled", "rect")
+
+
 def _public(element: dict) -> dict:
     return {k: v for k, v in element.items() if not k.startswith("_")}
 
@@ -530,7 +533,13 @@ def register(mcp: FastMCP) -> None:
         region: Annotated[
             list[int] | None, Field(description="[left, top, width, height] in screen pixels")
         ] = None,
-        max_side: Annotated[int, Field(description="Longest edge of the returned image")] = media.MAX_SIDE,
+        max_side: Annotated[
+            int,
+            Field(
+                description="Longest edge of the returned image; it also stays under about 1.15 MP "
+                "(more for a larger max_side), the most a model takes without scaling it again"
+            ),
+        ] = media.MAX_SIDE,
         wait: Annotated[
             str | None,
             Field(
@@ -637,7 +646,13 @@ def register(mcp: FastMCP) -> None:
         name: Annotated[str | None, Field(description="Control name (exact, wildcard or part)")] = None,
         automation_id: str | None = None,
         control_type: Annotated[str | None, Field(description="Button, Edit, CheckBox, ListItem ...")] = None,
-        index: Annotated[int, Field(ge=0, description="Which match, when several controls match")] = 0,
+        index: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                description="Which match, when several controls match (they are listed, nothing is done)",
+            ),
+        ] = None,
         value: Annotated[str | None, Field(description="For set_value")] = None,
         filter: Annotated[
             str | None, Field(description="For inspect: only controls containing this text")
@@ -702,9 +717,21 @@ def register(mcp: FastMCP) -> None:
                     f"no control matches name={name!r} automation_id={automation_id!r} "
                     f"type={control_type!r}; use action='inspect' to see the controls"
                 )
-            if index >= len(found):
-                raise desktop.DesktopError(f"only {len(found)} controls match; index {index} is out of range")
-            target = found[index]
+            if index is None and len(found) > 1:
+                return {
+                    "error": f"{len(found)} controls match; nothing was done. Pass index (the place in "
+                    "this list, from 0), automation_id or control_type",
+                    "matches": [
+                        {"index": i, **{k: e.get(k) for k in _CANDIDATE if e.get(k) not in (None, "")}}
+                        for i, e in enumerate(found[:20])
+                    ],
+                }
+            chosen = index or 0
+            if chosen >= len(found):
+                raise desktop.DesktopError(
+                    f"only {len(found)} controls match; index {chosen} is out of range"
+                )
+            target = found[chosen]
             if target.get("enabled") is False:
                 raise desktop.DesktopError(f"the control is disabled right now: {_public(target)}")
             # operating the program: the person's approval first (approvals.py), once the control is known
@@ -867,7 +894,14 @@ def register(mcp: FastMCP) -> None:
             list[int] | None, Field(description="[left, top, width, height] in screen pixels")
         ] = None,
         state: Annotated[str, Field(description="For wait: exists (default) | gone")] = "exists",
-        index: Annotated[int, Field(ge=0, description="Which match: top to bottom, left to right")] = 0,
+        index: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                description="Which match, top to bottom, left to right; needed when the text is in "
+                "several places (they are listed, nothing is clicked)",
+            ),
+        ] = None,
         language: Annotated[
             str | None,
             Field(description="OCR language (en-US, zh-Hans-CN, ja ...); default: the user's plus English"),

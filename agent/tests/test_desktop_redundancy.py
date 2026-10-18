@@ -414,6 +414,55 @@ def test_ocr_click_moves_the_mouse_only_on_an_exact_match(monkeypatch):
     assert len(clicks) == 1
 
 
+def test_ocr_click_does_not_guess_between_places_showing_the_same_text(monkeypatch):
+    ok_left, ok_right = words(("OK", (10, 100, 20, 20))), words(("OK", (300, 100, 20, 20)))
+    sentence = words(("Press", (10, 10, 50, 20)), ("OK", (64, 10, 20, 20)), ("to", (88, 10, 20, 20)))
+    screens = [[sentence, ok_left], [ok_left, ok_right], [ok_left, ok_right]]
+    _fake_ocr(monkeypatch, screens)
+    monkeypatch.setattr(desktop, "find_window", lambda _: {"hwnd": 11, "title": "app", "process": "a.exe"})
+    monkeypatch.setattr(desktop, "window_action", lambda *a, **k: {})
+    monkeypatch.setattr(desktop, "require_operable", lambda hwnd, what: None)
+    monkeypatch.setattr(desktop, "root_window_at", lambda x, y: 11)
+    clicks = []
+    monkeypatch.setattr(desktop, "input_action", lambda *a, **k: clicks.append(a[1:3]) or {})
+    # the button (a line of its own) rather than the sentence that mentions it
+    done = ocr.act("click", "OK", window="app")
+    assert clicks == [(20, 110)] and done["index"] == 1
+    # two buttons: which one is the caller's to say; nothing is clicked meanwhile
+    ambiguous = ocr.act("click", "OK", window="app")
+    assert "2 times; nothing was clicked" in ambiguous["error"] and len(clicks) == 1
+    assert [(m["index"], m["center"]) for m in ambiguous["matches"]] == [(0, [20, 110]), (1, [310, 110])]
+    ocr.act("click", "OK", window="app", index=1)
+    assert clicks[-1] == (310, 110)
+
+
+async def test_ui_does_not_guess_between_controls_of_the_same_name(monkeypatch):
+    _fake_window(monkeypatch)
+    buttons = [
+        {"index": i, "type": "Button", "name": "删除", "automation_id": aid, "hwnd": 0, "enabled": True,
+         "rect": [10 + 100 * i, 2, 30, 20], "patterns": ["Invoke"], "_runtime_id": [i], "_element": object()}
+        for i, aid in enumerate(("delRow", "delAll"))
+    ]  # fmt: skip
+    monkeypatch.setattr(
+        uia, "snapshot", lambda hwnd, timeout=0: {"window": "app", "count": 2, "elements": buttons}
+    )
+    monkeypatch.setattr(uia, "refresh", lambda e: None)
+    acted = []
+    monkeypatch.setattr(uia, "act", lambda e, verb, value=None, timeout=0: acted.append(e) or "invoked")
+    async with Client(build_server(Config())) as client:
+        ambiguous = (
+            await client.call_tool("ui", {"window": "app", "action": "invoke", "name": "删除"})
+        ).structured_content
+        chosen = (
+            await client.call_tool(
+                "ui", {"window": "app", "action": "invoke", "name": "删除", "index": 1, "verify_wait_s": 0}
+            )
+        ).structured_content
+    assert "2 controls match; nothing was done" in ambiguous["error"]
+    assert [(m["index"], m["automation_id"]) for m in ambiguous["matches"]] == [(0, "delRow"), (1, "delAll")]
+    assert acted == [buttons[1]["_element"]] and "error" not in chosen
+
+
 def test_ocr_click_refuses_a_covered_spot_and_admin_windows(monkeypatch):
     _fake_ocr(monkeypatch, [[words(("OK", (10, 10, 20, 20)))]])
     monkeypatch.setattr(desktop, "find_window", lambda _: {"hwnd": 11, "title": "app", "process": "a.exe"})

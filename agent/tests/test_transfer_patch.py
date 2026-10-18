@@ -6,6 +6,7 @@ import base64
 import difflib
 import hashlib
 import time
+from datetime import datetime
 
 import httpx
 import pytest
@@ -201,6 +202,10 @@ async def test_links_expire_and_downloads_work_once(relay, tmp_path, monkeypatch
     assert got.status_code == 200 and got.content == source.read_bytes()
     assert (await relay.get(_local(ticket["url"]))).status_code == 404
     late = transfer.issue_upload(str(tmp_path / "late.txt"), ttl_s=60)
+    # an absolute time a sandbox in another time zone reads right, and the plain countdown
+    when = datetime.fromisoformat(late["expires_at"])
+    assert when.tzinfo is not None and abs(when.timestamp() - time.time() - 60) < 5
+    assert 55 <= late["expires_in_s"] <= 60
     real_time = time.time
     monkeypatch.setattr(transfer.time, "time", lambda: real_time() + 120)
     assert (await relay.put(_local(late["url"]), content=b"x")).status_code == 404

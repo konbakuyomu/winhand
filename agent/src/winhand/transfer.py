@@ -22,6 +22,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 from . import fs, winenv
@@ -133,11 +134,17 @@ def issue_upload(
         "curl": f"curl -fsS -T <local file> '{url}'",
         "path": target,
         "max_bytes": max_bytes,
-        "expires_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires)),
+        **_expiry(expires),
         "note": "Single use. Upload from your own shell/sandbox; the reply is JSON with bytes and sha256. "
         "The sandbox's network must allow the relay's domain: an HTTP 403 comes from the sandbox's own "
         "network policy, so ask the person to allow the domain there instead of working around it.",
     }
+
+
+def _expiry(expires: float) -> dict:
+    # with the UTC offset: a sandbox reading a bare local time as its own UTC is hours off
+    at = datetime.fromtimestamp(expires).astimezone().isoformat(timespec="seconds")
+    return {"expires_at": at, "expires_in_s": max(0, round(expires - time.time()))}
 
 
 def issue_download(path: str, ttl_s: float = DEFAULT_TTL_S) -> dict:
@@ -154,7 +161,7 @@ def issue_download(path: str, ttl_s: float = DEFAULT_TTL_S) -> dict:
         "path": target,
         "size": os.path.getsize(full),
         "sha256": fs.sha256_of(target),
-        "expires_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires)),
+        **_expiry(expires),
         "note": "Single use. Download from your own shell/sandbox; check the sha256 afterwards. "
         "An HTTP 403 comes from the sandbox's own network policy: ask the person to allow the relay's domain.",
     }
