@@ -52,7 +52,8 @@ export function statusPage(
 <title>winhand 中转</title><style>${STYLE}</style></head><body><main>
 <h1>winhand 中转</h1>
 <p><span class="dot" style="background:${online ? "#2e9d57" : "#b54708"}"></span>${online ? "电脑在线" : "电脑离线"}${
-    online && agent.hostname ? `：${escape(agent.hostname)}（${escape(agent.platform ?? "")}，winhand ${escape(agent.version ?? "")}）` : ""
+    // anyone who has the address sees this page: no computer name or Windows build, only the version
+    online && agent.version ? `（winhand ${escape(agent.version)}）` : ""
   }${!online && typeof status.offlineSince === "number" ? `（自 ${escape(new Date(status.offlineSince).toISOString())} 起）` : ""}</p>
 <p>在 claude.ai 添加自定义连接器，地址填：</p>
 <p><code>${escape(mcpUrl)}</code></p>
