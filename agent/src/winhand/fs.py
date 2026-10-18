@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -18,10 +19,15 @@ from datetime import datetime
 from pathlib import Path
 
 from . import winenv
+from .session.text import width
 
 _ENCODINGS = ("utf-8", "gb18030")
 MAX_LINE = 2000
-READ_MAX_CHARS = 60_000  # about 20k tokens: stays under what clients accept from one tool result
+# How much one tool result holds, counted as width() (UTF-8 size: a Chinese character counts 3).
+# Clients cap results in tokens (Claude Code at 25k by default); 60,000 characters of Chinese or
+# dense code went over it, and the whole result was lost.
+OUTPUT_BUDGET = 40_000
+READ_MAX_CHARS = OUTPUT_BUDGET
 SEARCH_BUDGET_S = 35.0  # answer before the client's ~60 s limit, with what was found so far
 FIND_BUDGET_S = 35.0
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "$Recycle.Bin", "System Volume Information"}
@@ -206,17 +212,18 @@ def fs_read(
         start = max(1, offset)
         count = max(1, limit)
     chosen = lines[start - 1 : start - 1 + count]
-    width = len(str(start + len(chosen)))
+    digits = len(str(start + len(chosen)))
     body: list[str] = []
     used = 0
     for i, line in enumerate(chosen, start):
         if len(line) > MAX_LINE:
             line = line[:MAX_LINE] + f"…[{len(line) - MAX_LINE} chars truncated]"
-        entry = f"{i:>{width}}\t{line}"
-        if body and max_chars and used + len(entry) + 1 > max_chars:
+        entry = f"{i:>{digits}}\t{line}"
+        size = width(entry) + 1
+        if body and max_chars and used + size > max_chars:
             break
         body.append(entry)
-        used += len(entry) + 1
+        used += size
     out = {
         "path": path,
         "encoding": encoding,
@@ -434,10 +441,25 @@ def fs_list(
     if len(entries) > limit:
         entries = entries[:limit]
         truncated = True
-    out = {"root": winenv.display_path(str(root)), "entries": entries}
-    if truncated:
+    kept = within_budget(entries, lambda e: width(json.dumps(e, ensure_ascii=False)) + 2)
+    out = {"root": winenv.display_path(str(root)), "entries": entries[:kept]}
+    if kept < len(entries):
+        out["truncated"] = (
+            f"stopped at {kept} entries, all one result holds; narrow with pattern/depth/newer_than"
+        )
+    elif truncated:
         out["truncated"] = f"stopped at {limit} entries; narrow with pattern/depth/newer_than"
     return out
+
+
+def within_budget(items: list, size, budget: int = OUTPUT_BUDGET) -> int:
+    """How many of the items fit in one tool result (at least one), each taking size(item)."""
+    used = 0
+    for i, item in enumerate(items):
+        used += size(item)
+        if used > budget and i:
+            return i
+    return len(items)
 
 
 def fs_find(
@@ -765,8 +787,14 @@ def fs_search(
         lines = [ln[len(prefix) + 1 :] if ln.startswith(prefix) else ln for ln in found]
         engine = "python"
     results, more = _first_matches(lines, max_results, files_only)
-    out = {"root": prefix, "engine": engine, "matches": results, "count": len(results)}
-    if more:
+    kept = within_budget(results, lambda line: width(line) + 4)
+    out = {"root": prefix, "engine": engine, "matches": results[:kept], "count": kept}
+    if kept < len(results):
+        out["truncated"] = (
+            f"the first {kept} lines are all one result holds; narrow the pattern, path or glob, "
+            "or files_only=true"
+        )
+    elif more:
         out["truncated"] = f"more than {max_results} matches; narrow the pattern, path or glob"
     if timed_out:
         out["timed_out"] = (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from winhand import proc
@@ -50,7 +51,6 @@ def test_git_bash_found_from_gits_exec_path(monkeypatch, tmp_path):
 
 # ------------------------------------------------------------------ arguments as models send them
 
-import json  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
 import textwrap  # noqa: E402
@@ -538,3 +538,89 @@ def test_a_device_code_sign_in_needs_the_person():
         alive=True, exit_code=None, last_line=code_only, since_input=code_only, idle_s=2.0, det=Detectors()
     )
     assert got["state"] == "needs_user", got
+
+
+# ------------------------------------------------- results that fit what a client takes
+
+
+def test_wide_text_is_clipped_by_what_it_costs():
+    from winhand.session.text import clip, fitting, width
+
+    assert width("ab中") == 5 and fitting("中文abc", 7) == 3 and fitting("中文abc", 7, from_end=True) == 4
+    chinese = "中" * 20_000  # 60,000 bytes: about 20,000 tokens, not 20,000 characters' worth
+    kept, omitted = clip(chinese, 30_000)
+    assert len(kept) == 10_000 and omitted == 10_000
+    both, omitted = clip("头" * 50 + "尾" * 50, 90, keep="both")
+    assert both.startswith("头" * 10) and both.endswith("尾" * 20) and omitted == 70
+    assert clip("short", 30_000) == ("short", 0)
+
+
+def test_a_chinese_file_is_read_in_parts_a_client_takes(tmp_path):
+    from winhand import fs
+    from winhand.session.text import width
+
+    path = tmp_path / "说明.md"
+    path.write_text("\n".join("这是一行中文说明文字，" * 4 for _ in range(1500)), encoding="utf-8")
+    first = fs.fs_read(str(path))
+    assert width(first["content"]) <= fs.READ_MAX_CHARS and "fs_read(path, offset=" in first["more"]
+    shown = len(first["content"].splitlines())
+    assert 200 < shown < 1500  # 60,000 characters of it used to come back at once
+    second = fs.fs_read(str(path), offset=shown + 1)
+    assert second["content"].splitlines()[0].lstrip().startswith(str(shown + 1))
+
+
+def test_a_listing_of_long_chinese_names_fits_one_result(tmp_path):
+    from winhand import fs
+
+    for i in range(500):
+        (tmp_path / f"{i:03d}_第三方合同附件扫描件与签字页_最终确认版本_客户回传.pdf").write_bytes(b"")
+    listed = fs.fs_list(str(tmp_path))
+    size = sum(len(json.dumps(e, ensure_ascii=False).encode()) for e in listed["entries"])
+    assert size <= fs.OUTPUT_BUDGET and len(listed["entries"]) < 500
+    assert "all one result holds" in listed["truncated"]
+
+
+def test_search_results_fit_one_result(tmp_path):
+    from winhand import fs
+
+    (tmp_path / "日志.txt").write_text(
+        "\n".join("错误：" + "数据校验失败" * 30 for _ in range(300)), encoding="utf-8"
+    )
+    found = fs.fs_search("错误", str(tmp_path), max_results=300)
+    assert sum(len(m.encode()) for m in found["matches"]) <= fs.OUTPUT_BUDGET
+    assert found["count"] == len(found["matches"]) < 300 and "one result holds" in found["truncated"]
+
+
+def test_session_output_pages_by_what_it_costs():
+    from winhand.session.buffer import OutputBuffer
+
+    buffer = OutputBuffer()
+    buffer.append("编译输出" * 5000)
+    first = buffer.read(0, 3000)
+    assert len(first.text) == 1000 and first.end == 1000
+    rest = buffer.read(first.end, 100_000)
+    assert rest.start == 1000 and len(rest.text) == 19_000
+
+
+def test_a_running_commands_chinese_output_is_tailed_by_what_it_costs(monkeypatch):
+    class Job:
+        argv = ["build.exe"]
+        started = 0.0
+        timed_out = stopped = False
+        notes: list = []
+        command = "build.exe"
+        nested_direct = False
+        script = None
+
+        class proc:
+            @staticmethod
+            def poll():
+                return None
+
+        def text(self):
+            return "正在编译模块\n" * 5000, ""
+
+    monkeypatch.setitem(proc._running, "run-77", Job())
+    status = proc.run_status("run-77", max_chars=3000)
+    assert len(status["output"].encode()) <= 3000 and status["cursor"] == len("正在编译模块\n" * 5000)
+    assert status["omitted_chars"] == len("正在编译模块\n" * 5000) - len(status["output"])

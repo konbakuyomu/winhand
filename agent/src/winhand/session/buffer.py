@@ -12,6 +12,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from .text import fitting
+
 
 @dataclass
 class Slice:
@@ -66,8 +68,8 @@ class OutputBuffer:
             dropped = max(0, self._base - since)
             start = max(since, self._base)
             text = self._data[start - self._base :]
-            if limit is not None and len(text) > limit:
-                text = text[:limit]
+            if limit is not None:  # counted as width(): wide (CJK) output pages in smaller steps
+                text = text[: max(1, fitting(text, limit))]
             return Slice(text=text, start=start, end=start + len(text), dropped=dropped)
 
     def tail(self, chars: int) -> str:

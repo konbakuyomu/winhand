@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from . import config, winenv
+from .session.text import fitting
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -296,10 +297,9 @@ def status(job_id: str, since: int = 0, max_chars: int = 20_000) -> dict:
         from .proc import _decode  # UTF-8, or the code page for programs that print GBK
 
         text = _decode(data)
-    omitted = 0
-    if len(text) > max_chars:
-        omitted = len(text) - max_chars
-        text = text[-max_chars:]
+    kept = fitting(text, max_chars, from_end=True)  # counted as width(): Chinese output counts 3
+    omitted = len(text) - kept
+    text = text[len(text) - kept :]
     if finished is not None:
         state = "finished"
     elif _alive(meta):

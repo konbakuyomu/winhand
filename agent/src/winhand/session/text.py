@@ -143,17 +143,42 @@ def extract_urls(text: str) -> list[str]:
     return list(seen)
 
 
+def width(text: str) -> int:
+    """How much room text takes in a tool result, roughly as clients count tokens: its UTF-8
+    size, so a Chinese character (about a token) counts 3 and ASCII (3-4 to a token) 1."""
+    return len(text.encode("utf-8", "replace"))
+
+
+def fitting(text: str, budget: int, *, from_end: bool = False) -> int:
+    """How many characters from the start (or the end) of text fit in `budget` (see width)."""
+    if budget <= 0:
+        return 0
+    part = text[-budget:] if from_end else text[:budget]
+    if width(part) <= budget:
+        return len(part)
+    low, high = 0, len(part)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if width(part[-mid:] if from_end else part[:mid]) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
+
 def clip(text: str, limit: int, *, keep: str = "tail") -> tuple[str, int]:
-    """Clip text to `limit` characters. Returns (text, omitted_count).
+    """Clip text to `limit`, counted as width() (a Chinese character counts 3). Returns (text,
+    omitted characters).
 
     keep="tail" keeps the most recent output, "both" keeps head and tail.
     """
-    if limit <= 0 or len(text) <= limit:
+    if limit <= 0 or len(text) * 4 <= limit or width(text) <= limit:
         return text, 0
-    omitted = len(text) - limit
     if keep == "both":
-        head = limit // 3
-        tail = limit - head
+        head = fitting(text, limit // 3)
+        tail = fitting(text[head:], limit - limit // 3, from_end=True)
+        omitted = len(text) - head - tail
         marker = f"\n…[{omitted} chars omitted]…\n"
-        return text[:head] + marker + text[-tail:], omitted
-    return text[-limit:], omitted
+        return text[:head] + marker + text[len(text) - tail :], omitted
+    tail = fitting(text, limit, from_end=True)
+    return text[len(text) - tail :], len(text) - tail

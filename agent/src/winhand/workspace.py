@@ -38,6 +38,7 @@ from pathlib import Path
 from . import config, fs, guard, redact
 from .actions import Action
 from .config import Config
+from .session.text import fitting, width
 
 DEFAULT_SKILLS = ["~/.agents/skills", "~/.claude/skills", "~/.codex/skills"]
 PROJECT_SKILLS = [".agents/skills", ".claude/skills"]
@@ -53,7 +54,7 @@ GUARD_ERRORS_CHARS = 3_000
 ERROR_CHARS = 500
 OMITTED_CHARS = 2_500
 MAX_FILE_BYTES = 2_000_000
-BUDGET_CHARS = fs.READ_MAX_CHARS
+BUDGET_CHARS = 60_000  # the rules are the owner's and are kept whole up to this
 SKILLS_BUDGET_CHARS = 20_000
 SKILLS_FULL_CHARS = 16_000  # full entries; names of the rest fill up to SKILLS_BUDGET_CHARS
 DESCRIPTION_CHARS = 300
@@ -1020,21 +1021,23 @@ def skill(cfg: Config, name: str, path: str | None = None, repo: str | None = No
             text, _ = fs.read_text(found["path"])
         except (OSError, ValueError, fs.FsError) as exc:
             raise ValueError(f"cannot read {found['path']}: {exc}") from None
-        if len(text) > BUDGET_CHARS:
+        budget = fs.READ_MAX_CHARS  # what one result holds, as fs_read counts it (width)
+        if width(text) > budget:
             lines = text.splitlines(keepends=True)
             kept, used = 0, 0
-            while kept < len(lines) and used + len(lines[kept]) <= BUDGET_CHARS:
-                used += len(lines[kept])
+            while kept < len(lines) and used + width(lines[kept]) <= budget:
+                used += width(lines[kept])
                 kept += 1
             if kept:
                 out["truncated"] = _truncated(found["path"], kept, len(lines))
                 text = "".join(lines[:kept])
             else:
+                shown = fitting(text, budget)
                 out["truncated"] = (
-                    f"showing the first {BUDGET_CHARS} characters of its first line, which is longer "
+                    f"showing the first {shown} characters of its first line, which is longer "
                     f"(the whole file: {found['path']})"
                 )
-                text = text[:BUDGET_CHARS]
+                text = text[:shown]
         out["content"] = text
     out["files"], more = _skill_files(folder)
     if more:

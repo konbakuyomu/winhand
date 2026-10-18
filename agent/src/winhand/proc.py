@@ -23,7 +23,7 @@ from pathlib import Path
 import psutil
 
 from . import config, winenv
-from .session.text import clip, strip_ansi
+from .session.text import clip, fitting, strip_ansi
 
 _TOOLS = (
     "git",
@@ -567,7 +567,7 @@ def run(
     timeout_s: float = 120,
     env: dict[str, str] | None = None,
     stdin: str | None = None,
-    output_limit: int = 30000,
+    output_limit: int = 24_000,  # with stderr at half of it, under one result's budget (fs.OUTPUT_BUDGET)
     reply_within_s: float = REPLY_WITHIN_S,
     *,
     script: str | None = None,
@@ -744,12 +744,13 @@ def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:
         job.wait(5)
     out, err = job.text()
     text = out[since:]
-    omitted = max(len(text) - max_chars, 0)
+    kept = fitting(text, max_chars, from_end=True)  # counted as width(): Chinese output counts 3
+    omitted = len(text) - kept
     result = {
         "id": rid,
         "state": "finished" if done else "running",
         "command": subprocess.list2cmdline(job.argv),
-        "output": text[-max_chars:] if max_chars else "",
+        "output": text[len(text) - kept :],
         "cursor": len(out),
         "duration_ms": int((time.monotonic() - job.started) * 1000),
     }
@@ -764,7 +765,7 @@ def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:
         if job.stopped:
             result["stopped"] = True
     elif err:  # progress many programs print to stderr while they work (Codex, compilers, git)
-        result["stderr"] = err[-STDERR_TAIL_CHARS:]
+        result["stderr"] = clip(err, STDERR_TAIL_CHARS)[0]
     return result
 
 

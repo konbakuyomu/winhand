@@ -81,7 +81,9 @@ Quick rules
   never write such text back to a file.
 - session_wait ORs its conditions across several sessions at once (e.g. gdb prompt OR serial "PANIC").
   A timeout is not a failure: call it again to keep waiting; already-returned output is not repeated.
-  One wait at a time is enough: identical parallel waits share one answer.
+  One wait at a time is enough: identical parallel waits share one answer, and calls sent in
+  parallel may reach this machine one after another. To wait on several sessions or jobs, pass
+  their ids to one session_wait / job_status call.
 - After a connection error, call history() before resending anything: it shows whether your call
   ran, its run id and exit code. For sessions also session_read(since=the last cursor you received).
 - Full-screen programs (menuconfig, htop, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
@@ -134,7 +136,10 @@ Quick rules
   never asked about.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
-  follow it with job_status(id, wait_s=40).
+  follow it with job_status(id, wait_s=40). With args it starts the program directly and stdin= gives
+  it text as UTF-8, never through a PowerShell pipe (Codex: command='codex', args=['exec', '-'],
+  stdin=brief); job_status shows its stdout and stderr while it runs. job_status(id=[a, b])
+  waits on several jobs, or `run` ids, at once: it answers when the first finishes or matches.
 - Something odd about this machine (garbled text, a shim that fails, missing tools)?
   sys_info(checks=true) lists the usual suspects with fixes.
 - A tool named here but missing from your tool list (winhand was updated after the conversation
@@ -188,7 +193,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   click, key or ui action on a program waits for the person's OK in a dialog there (window list:
   `approval`); terminals are not typed into: use run or a session.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
-  restarts winhand, elevated=true for admin tasks); follow it with job_status(id, wait_s=40).
+  restarts winhand, elevated=true for admin tasks); with args it runs a program directly and stdin=
+  feeds it text (Codex: command='codex', args=['exec', '-'], stdin=brief). Follow it with
+  job_status(id, wait_s=40); a list of ids waits on several jobs or runs in one call.
 - Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the
   usual suspects with fixes. A tool missing from your list: call(tool, arguments) reaches it.
 - Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
@@ -919,7 +926,12 @@ def build_server(
         ] = None,
         tail: Annotated[int | None, Field(ge=1, description="Text: only the last N lines (logs)")] = None,
         max_chars: Annotated[
-            int, Field(ge=1000, description="Text: stop adding lines past this many characters")
+            int,
+            Field(
+                ge=1000,
+                description="Text: stop adding lines past this size (a Chinese character counts 3, "
+                "about its token cost); the answer says where to go on",
+            ),
         ] = fs.READ_MAX_CHARS,
         encoding: Annotated[
             str | None, Field(description="Text: force the encoding, e.g. gbk (default: detected)")

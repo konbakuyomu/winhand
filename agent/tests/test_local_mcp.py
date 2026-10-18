@@ -468,6 +468,18 @@ async def test_a_skill_with_enormous_lines_is_shown_in_part(home):
     assert one["content"] == "z" * fs.READ_MAX_CHARS and "first line" in one["truncated"]
 
 
+async def test_a_chinese_skill_is_cut_at_what_one_result_holds(home):
+    from winhand import fs
+    from winhand.session.text import width
+
+    skills = home / ".agents" / "skills"
+    write(skills / "zh" / "SKILL.md", "---\nname: zh\n---\n" + "按这个步骤操作，先确认再执行。\n" * 2000)
+    async with Client(build_server(Config())) as c:
+        zh = (await c.call_tool("skill", {"name": "zh"})).structured_content
+    # 32,000 characters of Chinese is about as many tokens: more than a client takes in one result
+    assert width(zh["content"]) <= fs.READ_MAX_CHARS and "offset=" in zh["truncated"]
+
+
 async def test_history_knows_the_id_of_a_call_still_running(client, services, monkeypatch):
     monkeypatch.setattr(local_mcp, "ANSWER_WITHIN_S", 0.05)
     first = (
