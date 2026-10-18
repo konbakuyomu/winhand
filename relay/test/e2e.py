@@ -51,31 +51,38 @@ async def oauth_token(http: httpx.AsyncClient, auth_method: str = "none") -> str
         "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
     })
     check(reg.status_code in (200, 201), f"dynamic client registration, {auth_method} ({reg.status_code})")
-    client_id = reg.json()["client_id"]
-    client_secret = reg.json().get("client_secret")
+    return await sign_in(http, reg.json()["client_id"], reg.json().get("client_secret"), auth_method)
 
+
+async def sign_in(
+    http: httpx.AsyncClient, client_id: str, client_secret: str | None, auth_method: str = "none", quiet: bool = False,
+    whole: bool = False,
+):
+    """The owner signs a client in on the consent page; the access token it gets."""
+    say = (lambda cond, what: cond or check(cond, what)) if quiet else check
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     params = {"response_type": "code", "client_id": client_id, "redirect_uri": REDIRECT, "state": "s123",
               "code_challenge": challenge, "code_challenge_method": "S256", "scope": "winhand",
               "resource": f"{BASE}/mcp"}
     page = await http.get(f"{BASE}/authorize", params=params)
-    check(page.status_code == 200 and "主人口令" in page.text, "consent page rendered")
+    say(page.status_code == 200 and "主人口令" in page.text, "consent page rendered")
     handle = re.search(r'name="handle" value="([^"]+)"', page.text).group(1)
     form = {"handle": handle, "client": "e2e connector", "redirect": REDIRECT}
     # The consent binding cookie is `Secure` (as it must be in production); plain-HTTP
     # wrangler dev means we hand it back ourselves, like a browser would over HTTPS.
     binding = {"Cookie": page.headers["set-cookie"].split(";")[0]}
 
-    wrong = await http.post(f"{BASE}/authorize", data={**form, "passphrase": "nope", "action": "approve"},
-                            headers=binding)
-    check(wrong.status_code == 401 and "口令不对" in wrong.text, "wrong passphrase rejected")
+    if not quiet:  # wrong passphrases count towards the lockout (5 per 15 minutes)
+        wrong = await http.post(f"{BASE}/authorize", data={**form, "passphrase": "nope", "action": "approve"},
+                                headers=binding)
+        check(wrong.status_code == 401 and "口令不对" in wrong.text, "wrong passphrase rejected")
 
     ok = await http.post(f"{BASE}/authorize", data={**form, "passphrase": PASSPHRASE, "action": "approve"},
                          headers=binding)
-    check(ok.status_code == 302, f"correct passphrase redirects ({ok.status_code})")
+    say(ok.status_code == 302, f"correct passphrase redirects ({ok.status_code})")
     query = parse_qs(urlparse(ok.headers["location"]).query)
-    check(query.get("state") == ["s123"] and "code" in query, "redirect carries code and state")
+    say(query.get("state") == ["s123"] and "code" in query, "redirect carries code and state")
 
     data = {
         "grant_type": "authorization_code", "code": query["code"][0], "redirect_uri": REDIRECT,
@@ -88,8 +95,51 @@ async def oauth_token(http: httpx.AsyncClient, auth_method: str = "none") -> str
         basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         headers["Authorization"] = f"Basic {basic}"
     token = await http.post(f"{BASE}/oauth/token", data=data, headers=headers)
-    check(token.status_code == 200, f"token exchange, {auth_method} ({token.status_code} {token.text[:120]})")
-    return token.json()["access_token"]
+    say(token.status_code == 200, f"token exchange, {auth_method} ({token.status_code} {token.text[:120]})")
+    return token.json() if whole else token.json()["access_token"]
+
+
+async def signed_in(http: httpx.AsyncClient, token: str) -> bool:
+    """Whether the relay still accepts the token (anything but 401 got past OAuth)."""
+    probe = await http.post(f"{BASE}/mcp", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                                                    "Accept": "application/json, text/event-stream"},
+                            json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    return probe.status_code != 401
+
+
+async def many_sign_ins(http: httpx.AsyncClient) -> None:
+    """claude.ai signs every account in as the same client (one client_id, one redirect URI). A new
+    sign-in must not sign the others out; the newest 20 are kept; the owner can sign all out."""
+    reg = await http.post(f"{BASE}/oauth/register", json={
+        "redirect_uris": [REDIRECT], "client_name": "shared connector", "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+    })
+    client_id = reg.json()["client_id"]
+    first = await sign_in(http, client_id, None, quiet=True)
+    second = await sign_in(http, client_id, None, quiet=True)
+    check(await signed_in(http, first) and await signed_in(http, second),
+          "two sign-ins of the same client both stay valid")
+    issued = await sign_in(http, client_id, None, quiet=True, whole=True)
+    renewed = await http.post(f"{BASE}/oauth/token", data={
+        "grant_type": "refresh_token", "refresh_token": issued["refresh_token"], "client_id": client_id,
+        "resource": f"{BASE}/mcp"})
+    check(renewed.status_code == 200 and await signed_in(http, renewed.json()["access_token"]),
+          f"a sign-in renews its token (the 30-day idle expiry moves on) ({renewed.status_code})")
+    await asyncio.sleep(1.1)  # grants are ordered by their creation second
+    newest = [await sign_in(http, client_id, None, quiet=True) for _ in range(20)]
+    check(not await signed_in(http, first) and not await signed_in(http, second)
+          and not await signed_in(http, renewed.json()["access_token"]),
+          "past 20 sign-ins, the oldest are signed out")
+    check(await signed_in(http, newest[0]) and await signed_in(http, newest[-1]), "the newest 20 stay signed in")
+    check("现在有 20 个登录" in (await http.get(f"{BASE}/")).text, "the status page counts the sign-ins")
+
+    wrong = await http.post(f"{BASE}/signout", data={"passphrase": "nope"})
+    check(wrong.status_code == 401 and "口令不对" in wrong.text and await signed_in(http, newest[-1]),
+          "signing everyone out needs the passphrase")
+    done = await http.post(f"{BASE}/signout", data={"passphrase": PASSPHRASE})
+    check(done.status_code == 200 and "已退出 20 个登录" in done.text and "现在有 0 个登录" in done.text,
+          f"the owner signs every client out ({done.status_code})")
+    check(not await signed_in(http, newest[-1]), "a signed-out token is refused")
 
 
 async def dropped_mid_stream(http: httpx.AsyncClient, rpc_headers: dict, ws_url: str) -> None:
@@ -102,7 +152,7 @@ async def dropped_mid_stream(http: httpx.AsyncClient, rpc_headers: dict, ws_url:
 
         async def answer_then_drop() -> None:
             while (frame := json.loads(await agent.recv()))["type"] != "req_end":
-                rid = frame["id"]
+                rid = frame.get("id", "")  # `welcome` (this relay can resume) has none
             await agent.send(json.dumps({"type": "head", "id": rid, "status": 200,
                                          "headers": [["content-type", "text/event-stream"]]}))
             await agent.send(json.dumps({"type": "body", "id": rid,
@@ -122,6 +172,79 @@ async def dropped_mid_stream(http: httpx.AsyncClient, rpc_headers: dict, ws_url:
     check(last.get("id") == 5 and "disconnected" in last.get("error", {}).get("message", ""),
           f"a drop mid-stream ends the call with a JSON-RPC error event ({events[-1][:160] if events else text!r})")
     check(took < 10, f"the client learns of the drop at once ({took:.1f}s)")
+
+
+class CutProxy:
+    """A TCP proxy in front of the relay whose connections can be cut, like a flaky network."""
+
+    def __init__(self, base: str) -> None:
+        target = urlparse(base)
+        self.host, self.target_port = target.hostname, target.port or 80
+        self.links: list[tuple[asyncio.StreamWriter, asyncio.StreamWriter]] = []
+
+    async def start(self) -> str:
+        self.server = await asyncio.start_server(self._link, "127.0.0.1", 0)
+        return f"ws://127.0.0.1:{self.server.sockets[0].getsockname()[1]}/agent"
+
+    async def _link(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        up_reader, up_writer = await asyncio.open_connection(self.host, self.target_port)
+        self.links.append((writer, up_writer))
+
+        async def pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+            try:
+                while data := await src.read(65536):
+                    dst.write(data)
+                    await dst.drain()
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                dst.close()
+
+        await asyncio.gather(pump(reader, up_writer), pump(up_reader, writer))
+
+    def cut(self) -> None:
+        for down, up in self.links:
+            down.transport.abort()
+            up.transport.abort()
+        self.links.clear()
+
+    async def close(self) -> None:
+        self.cut()
+        self.server.close()
+        await self.server.wait_closed()
+
+
+async def resumed_across_a_drop(http: httpx.AsyncClient, token: str) -> None:
+    """The real agent behind a flaky link: the link is cut while a call runs, the agent reconnects
+    within the grace period, and the client gets the whole answer as if nothing happened."""
+    proxy = CutProxy(BASE)
+    url = await proxy.start()
+    stop = asyncio.Event()
+    agent = asyncio.create_task(run_forever(url, AGENT_TOKEN, mcp=build_server(Config()), stop=stop))
+    try:
+        for _ in range(100):
+            if "电脑在线" in (await http.get(f"{BASE}/")).text:
+                break
+            await asyncio.sleep(0.1)
+        transport = StreamableHttpTransport(f"{BASE}/mcp", headers={"Authorization": f"Bearer {token}"})
+        async with Client(transport) as mcp:
+            script = "import time; print('前半', flush=True); time.sleep(3); print('后半')"
+            began = time.monotonic()
+            call = asyncio.create_task(mcp.call_tool("run", {"command": sys.executable, "args": ["-c", script]}))
+            await asyncio.sleep(1.0)
+            check(bool(proxy.links), "the agent is connected through the cuttable link")
+            proxy.cut()  # the network drops while `run` is still going
+            done = (await call).structured_content
+            took = time.monotonic() - began
+            check("前半" in done["stdout"] and "后半" in done["stdout"] and done["exit_code"] == 0,
+                  f"a call in flight survives the connection dropping ({done['stdout']!r})")
+            check(took < GRACE_S + 6, f"and is answered once the agent is back ({took:.1f}s)")
+            again = (await mcp.call_tool("run", {"command": sys.executable, "args": ["-c", "print('ok')"]})).structured_content
+            check(again["stdout"].strip() == "ok", "the next call goes through the new connection")
+    finally:
+        stop.set()
+        await asyncio.wait_for(agent, 15)
+        await proxy.close()
 
 
 async def main() -> None:
@@ -166,6 +289,7 @@ async def main() -> None:
         check("offline, did not answer in time, or failed" in said, f"PC offline: the session is told so ({away.status_code} {away.text[:120]})")
 
         await dropped_mid_stream(http, rpc_headers, ws_url)
+        await resumed_across_a_drop(http, token)
 
         # a call made while the agent is (re)connecting waits for it instead of failing
         initialize = {"jsonrpc": "2.0", "id": 7, "method": "initialize", "params": {
@@ -253,6 +377,7 @@ async def main() -> None:
 
         refused = await http.post(f"{BASE}/mcp", headers={"Authorization": "Bearer forged"}, json={})
         check(refused.status_code == 401, "forged OAuth token refused")
+        await many_sign_ins(http)  # last: it signs every client out
         await services.close()
         stop.set()
         await agent

@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import random
+import secrets
 import socket
 import time
 from collections.abc import Callable
@@ -37,6 +38,13 @@ PING_EVERY_S = 20
 DEAD_AFTER_S = 70
 STABLE_AFTER_S = 60  # a successful handshake alone doesn't mean a flapping connection recovered
 _DROP_RESPONSE = {"connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding"}
+# Resuming calls across a dropped connection (relay frames `welcome`, `resume`, `ack`): the
+# connection to the relay drops every so often and is back within seconds. A call in flight then
+# keeps running here, its answer is kept, and the relay asks for the frames it missed.
+RESUME_HOLD_S = 60.0  # a call whose connection dropped waits this long for the relay to ask for it
+RESUME_MAX_BYTES = 8 * 1024 * 1024  # answers bigger than this are not kept: they end with the connection
+RESUME_TOTAL_BYTES = 48 * 1024 * 1024
+ACK_WAIT_S = 60.0  # a finished answer is kept this long when the relay does not confirm it
 
 
 def _free_port() -> int:
@@ -45,20 +53,192 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+class Calls:
+    """The calls this agent serves, across connections to the relay.
+
+    Over a connection whose relay can resume (it said `welcome`), every answer frame is kept until
+    the relay confirms the answer (`ack`): when the connection drops, the call keeps running, its
+    frames pile up here, and on the next connection the relay asks for the ones it missed
+    (`resume` from frame n). Over any other connection, and for answers too big to keep, a drop
+    ends the call as before."""
+
+    def __init__(self) -> None:
+        self.tasks: dict[str, asyncio.Task] = {}
+        self.frames: dict[str, list[str]] = {}  # kept answer frames, in order
+        self.sizes: dict[str, int] = {}
+        self.unkept: set[str] = set()
+        self.ended: dict[str, float] = {}  # answer complete (end/error sent) at
+        self.parked: dict[str, float] = {}  # connection dropped at; waiting for `resume`
+        self.route: dict[str, Tunnel] = {}  # the connection a call's frames go out on now
+
+    def total(self) -> int:
+        return sum(self.sizes.values())
+
+    def start(self, rid: str, tunnel: Tunnel, coro) -> None:
+        self.route[rid] = tunnel
+        if tunnel.resumable:
+            self.frames[rid], self.sizes[rid] = [], 0
+        else:
+            self.unkept.add(rid)
+        task = asyncio.create_task(coro)
+        self.tasks[rid] = task
+
+        def finished(done, r=rid):
+            if self.tasks.get(r) is done:
+                self.tasks.pop(r, None)
+                if r not in self.frames:  # nothing kept: nothing to resume
+                    self._forget(r)
+
+        task.add_done_callback(finished)
+
+    def attached(self, tunnel: Tunnel) -> dict[str, asyncio.Task]:
+        return {r: t for r, t in self.tasks.items() if self.route.get(r) is tunnel}
+
+    async def emit(self, rid: str, frame: dict, via: Tunnel | None = None) -> None:
+        """Send one answer frame of a call (keeping it, when it may have to go again). `via` is
+        the connection the call came on, for a call served without start() (its route)."""
+        text = json.dumps(frame)
+        if rid in self.frames:
+            self.frames[rid].append(text)
+            self.sizes[rid] += len(text)
+            if self.sizes[rid] > RESUME_MAX_BYTES or self.total() > RESUME_TOTAL_BYTES:
+                self._unkeep(rid)
+        if frame["type"] in ("end", "error"):
+            self.ended[rid] = time.monotonic()
+        tunnel = self.route.get(rid)
+        if tunnel is None and via is not None and rid not in self.parked and rid not in self.frames:
+            tunnel = via  # never registered: answer on the connection it came on
+        if tunnel is None:
+            if rid in self.unkept:  # parked but not kept: nobody will ever ask for it
+                raise asyncio.CancelledError
+            return
+        try:
+            await tunnel.send_text(text)
+        except ConnectionClosed:
+            if rid in self.unkept:
+                raise
+            # kept: the frame goes out again when the relay resumes this call
+
+    def _unkeep(self, rid: str) -> None:
+        self.frames.pop(rid, None)
+        self.sizes.pop(rid, None)
+        self.unkept.add(rid)
+
+    def _forget(self, rid: str) -> None:
+        for table in (self.frames, self.sizes, self.ended, self.parked, self.route):
+            table.pop(rid, None)
+        self.unkept.discard(rid)
+
+    def cancel(self, rid: str) -> None:
+        task = self.tasks.get(rid)
+        if task is not None:
+            task.cancel()
+        self._forget(rid)
+
+    def disconnected(self, tunnel: Tunnel) -> list[asyncio.Task]:
+        """The connection is gone: kept calls wait for the relay, the others end. Returns the
+        tasks ended here, for the caller to await."""
+        ended = []
+        now = time.monotonic()
+        for rid in [r for r, t in self.route.items() if t is tunnel]:
+            del self.route[rid]
+            if rid in self.frames:
+                self.parked[rid] = now
+            else:
+                task = self.tasks.get(rid)
+                if task is not None:
+                    task.cancel()
+                    ended.append(task)
+                self._forget(rid)
+        return ended
+
+    def pending(self) -> list[str]:
+        """Calls a relay may still be waiting for: parked, or kept and not yet confirmed."""
+        return [r for r in self.frames if r not in self.route]
+
+    async def resume(self, rid: str, tunnel: Tunnel, start: int) -> None:
+        frames = self.frames.get(rid)
+        if frames is None or (rid not in self.tasks and rid not in self.ended):
+            await tunnel.send(
+                {
+                    "type": "error",
+                    "id": rid,
+                    "message": "winhand lost this call while the connection was down; check history() before resending",
+                }
+            )
+            self._forget(rid)
+            return
+        self.parked.pop(rid, None)
+        index = max(0, int(start))
+        while index < len(frames):  # frames added meanwhile are sent too, in order
+            await tunnel.send_text(frames[index])
+            index += 1
+            frames = self.frames.get(rid) or []
+        if rid in self.frames:
+            self.route[rid] = tunnel
+
+    def ack(self, rid: str) -> None:
+        if rid not in self.tasks:
+            self._forget(rid)
+        else:  # confirmed while still running cannot happen; keep it consistent anyway
+            self.frames.pop(rid, None)
+            self.sizes.pop(rid, None)
+
+    def sweep(self) -> list[asyncio.Task]:
+        """End parked calls nobody resumed in time and drop confirmations that never came."""
+        now = time.monotonic()
+        ended = []
+        for rid, since in list(self.parked.items()):
+            if now - since >= RESUME_HOLD_S:
+                task = self.tasks.get(rid)
+                if task is not None:
+                    task.cancel()
+                    ended.append(task)
+                self._forget(rid)
+        for rid, at in list(self.ended.items()):
+            if now - at >= ACK_WAIT_S and rid not in self.parked and rid not in self.tasks:
+                self._forget(rid)
+        return ended
+
+    async def close(self) -> None:
+        tasks = list(self.tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for rid in list(self.frames) + list(self.route):
+            self._forget(rid)
+
+
 class Tunnel:
     """Serves relay frames arriving on one WebSocket connection."""
 
-    def __init__(self, ws: ClientConnection, http: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        ws: ClientConnection,
+        http: httpx.AsyncClient,
+        calls: Calls | None = None,
+        secret: str | None = None,
+    ) -> None:
         self.ws = ws
         self.http = http
+        self.secret = secret  # proves to the local port that a request comes through the tunnel
+        self.calls = calls if calls is not None else Calls()
         self.requests: dict[str, dict] = {}
-        self.tasks: dict[str, asyncio.Task] = {}
         self.send_lock = asyncio.Lock()
         self.last_seen = time.monotonic()
+        self.resumable = False  # the relay said `welcome`: calls survive a drop of this connection
+        self._jobs: set[asyncio.Task] = set()
+
+    @property
+    def tasks(self) -> dict[str, asyncio.Task]:
+        return self.calls.attached(self)
 
     async def send(self, frame: dict) -> None:
+        await self.send_text(json.dumps(frame))
+
+    async def send_text(self, text: str) -> None:
         async with self.send_lock:
-            await self.ws.send(json.dumps(frame))
+            await self.ws.send(text)
 
     async def run(self) -> None:
         receiver = asyncio.create_task(self._receive())
@@ -68,12 +248,17 @@ class Tunnel:
             for task in done:
                 task.result()
         finally:
-            tasks = [receiver, keepalive, *self.tasks.values()]
+            tasks = [receiver, keepalive, *self._jobs]
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            self.tasks.clear()
+            ended = self.calls.disconnected(self)
+            await asyncio.gather(*tasks, *ended, return_exceptions=True)
             self.requests.clear()
+
+    def _spawn(self, coro) -> None:
+        job = asyncio.create_task(coro)
+        self._jobs.add(job)
+        job.add_done_callback(self._jobs.discard)
 
     async def _receive(self) -> None:
         async for message in self.ws:
@@ -94,39 +279,44 @@ class Tunnel:
             self.requests[rid]["body"] += base64.b64decode(frame["data"])
         elif kind == "req_end" and rid in self.requests:
             request = self.requests.pop(rid)
-            task = asyncio.create_task(self._serve(rid, request))
-            self.tasks[rid] = task
-
-            def finished(done, r=rid):
-                if self.tasks.get(r) is done:
-                    self.tasks.pop(r, None)
-
-            task.add_done_callback(finished)
+            self.calls.start(rid, self, self._serve(rid, request))
         elif kind == "cancel":
             self.requests.pop(rid, None)
-            task = self.tasks.get(rid)
-            if task:
-                task.cancel()
+            self.calls.cancel(rid)
+        elif kind == "welcome":
+            self.resumable = bool(frame.get("resume"))
+        elif kind == "resume" and rid:
+            self._spawn(self.calls.resume(rid, self, frame.get("from") or 0))
+        elif kind == "ack" and rid:
+            self.calls.ack(rid)
 
     async def _serve(self, rid: str, request: dict) -> None:
-        headers = [(k, v) for k, v in request["headers"] if k.lower() != "host"]
+        from .mcp_bridge import LocalSecretOnly
+
+        drop = ("host", LocalSecretOnly.HEADER)
+        headers = [(k, v) for k, v in request["headers"] if k.lower() not in drop]
+        if self.secret:
+            headers.append((LocalSecretOnly.HEADER, self.secret))
         try:
             async with self.http.stream(
                 request["method"], request["path"], headers=headers, content=bytes(request["body"])
             ) as response:
                 head = [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _DROP_RESPONSE]
-                await self.send({"type": "head", "id": rid, "status": response.status_code, "headers": head})
+                frame = {"type": "head", "id": rid, "status": response.status_code, "headers": head}
+                await self.calls.emit(rid, frame, self)
                 async for chunk in response.aiter_raw():
                     for i in range(0, len(chunk), CHUNK_BYTES):
                         part = chunk[i : i + CHUNK_BYTES]
-                        await self.send({"type": "body", "id": rid, "data": base64.b64encode(part).decode()})
-                await self.send({"type": "end", "id": rid})
+                        frame = {"type": "body", "id": rid, "data": base64.b64encode(part).decode()}
+                        await self.calls.emit(rid, frame, self)
+                await self.calls.emit(rid, {"type": "end", "id": rid}, self)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # report instead of leaving the caller hanging
             log.warning("request %s failed: %s", rid, exc)
             with contextlib.suppress(Exception):
-                await self.send({"type": "error", "id": rid, "message": f"winhand agent error: {exc}"})
+                frame = {"type": "error", "id": rid, "message": f"winhand agent error: {exc}"}
+                await self.calls.emit(rid, frame, self)
 
     async def _keepalive(self) -> None:
         recovering = False
@@ -226,12 +416,14 @@ async def serve_local(app, port: int) -> tuple[uvicorn.Server, asyncio.Task]:
         raise
 
 
-def hello_frame() -> dict:
+def hello_frame(pending: list[str] | None = None) -> dict:
     return {
         "type": "hello",
         "version": __version__,
         "hostname": socket.gethostname(),
         "platform": f"{platform.system()} {platform.release()}",
+        "resume": 1,  # this agent keeps calls across a dropped connection (see Calls)
+        "pending": list(pending or []),
     }
 
 
@@ -316,10 +508,24 @@ async def run_tunnel(
     port = _free_port()
     from .mcp_bridge import compose_app
 
-    server, server_task = await serve_local(compose_app(mcp.http_app(), services), port)
+    # the port answers only this tunnel (a secret made for this run) and checks Host/Origin, so
+    # neither another program on the machine nor a web page (DNS rebinding) can call the tools
+    secret = secrets.token_urlsafe(32)
+    app = compose_app(mcp.http_app(host_origin_protection="auto"), services, secret)
+    server, server_task = await serve_local(app, port)
     backoff = 1.0
     attempt = 0
     stop = stop or asyncio.Event()
+    calls = Calls()
+
+    async def sweeping() -> None:
+        while True:
+            await asyncio.sleep(5)
+            ended = calls.sweep()
+            if ended:
+                await asyncio.gather(*ended, return_exceptions=True)
+
+    sweeper = asyncio.create_task(sweeping())
 
     def check_replaced(code: int | None) -> None:
         if code == REPLACED_CODE:
@@ -349,9 +555,9 @@ async def run_tunnel(
                     ) as ws:
                         log.info("connected to relay %s", url)
                         connected_at = time.monotonic()
-                        await ws.send(json.dumps(hello_frame()))
+                        await ws.send(json.dumps(hello_frame(calls.pending())))
                         status("online", connected_at=time.time())
-                        tunnel = asyncio.create_task(Tunnel(ws, http).run())
+                        tunnel = asyncio.create_task(Tunnel(ws, http, calls, secret).run())
                         stopper = asyncio.create_task(stop.wait())
                         try:
                             done, _ = await asyncio.wait(
@@ -404,6 +610,9 @@ async def run_tunnel(
                     await asyncio.wait_for(stop.wait(), timeout=retry_in_s)
                 backoff = min(backoff * 2, 30.0)
     finally:
+        sweeper.cancel()
+        await asyncio.gather(sweeper, return_exceptions=True)
+        await calls.close()
         status("stopped")
         server.should_exit = True
         try:

@@ -172,7 +172,7 @@ test('old request abort cannot send cancel to the replacement', async () => {
   await h.object.fetch(new Request('https://offline.invalid/connect', {headers: {Upgrade: 'websocket'}}));
   assert.equal((await response).status, 502);
   abort.abort();
-  assert.equal(h.ctx.sockets[1].sent.length, 0);
+  assert.deepEqual(h.ctx.sockets[1].sent.filter(f => f.type !== 'welcome'), []);
 });
 
 test('SSE abort cancels its captured socket even if another socket is selected', async () => {
@@ -205,7 +205,7 @@ test('head timeout remains per request, with no socket close', async () => {
   assert.equal(socket.closes.length, 0);
 });
 
-const rpc = (id) => request({body: JSON.stringify({jsonrpc: '2.0', id, method: 'tools/call', params: {}})});
+const rpc = (id, signal) => request({body: JSON.stringify({jsonrpc: '2.0', id, method: 'tools/call', params: {}}), signal});
 
 test('a call made while the PC is away waits for it to reconnect', async () => {
   const h = harness();
@@ -311,4 +311,117 @@ test('a stream cut inside an event closes that event before the error', async ()
 test('a plain streamed response is still cut off', async () => {
   const {body} = await streaming('application/octet-stream', 'abc');
   await assert.rejects(body);
+});
+
+// ---------------------------------------------------------------- resuming calls across a drop
+
+async function resumable(contentType = 'text/event-stream') {
+  const h = harness(), first = new h.Socket(); h.ctx.sockets = [first];
+  await message(h.object, first, {type: 'hello', hostname: 'pc', resume: 1, pending: []});
+  const pending = h.object.fetch(rpc(9));
+  await settle();
+  const id = first.sent.findLast(f => f.type === 'req').id;
+  await message(h.object, first, {type: 'head', id, status: 200, headers: [['content-type', contentType]]});
+  const response = await pending;
+  const body = response.text();
+  await message(h.object, first, {type: 'body', id, data: btoa('event: message\ndata: one\n\n')});
+  await h.object.webSocketClose(first, 1006, 'gone');
+  return {h, id, body, first};
+}
+
+async function reconnect(h) {
+  await h.object.fetch(new Request('https://offline.invalid/connect', {headers: {Upgrade: 'websocket'}}));
+  return h.ctx.sockets.at(-1);
+}
+
+test('welcome is the first frame on every agent connection', async () => {
+  const h = harness();
+  const socket = await reconnect(h);
+  assert.deepEqual(socket.sent[0], {type: 'welcome', resume: 1});
+});
+
+test('a call cut off by a drop waits, then resumes where the relay stopped', async () => {
+  const {h, id, body} = await resumable();
+  assert.equal(h.object.pending.size, 1, 'kept, not failed');
+  assert.equal(h.object.pending.get(id).socket, null);
+  const second = await reconnect(h);
+  await message(h.object, second, {type: 'hello', hostname: 'pc', resume: 1, pending: [id]});
+  assert.deepEqual(second.sent.filter(f => f.type === 'resume'), [{type: 'resume', id, from: 2}]);
+  await message(h.object, second, {type: 'body', id, data: btoa('event: message\ndata: two\n\n')});
+  await message(h.object, second, {type: 'end', id});
+  assert.equal(await body, 'event: message\ndata: one\n\nevent: message\ndata: two\n\n');
+  assert.deepEqual(second.sent.filter(f => f.type === 'ack'), [{type: 'ack', id}]);
+  assert.equal(h.object.pending.size, 0);
+  assert.equal(h.timers.size, 0, 'the orphan timer was cleared');
+});
+
+test('an orphaned call fails when the agent does not come back in the grace period', async () => {
+  const {h, body} = await resumable();
+  const [timer] = [...h.timers.values()];
+  assert.equal(timer.ms, 20_000);
+  timer.fn();
+  const text = await body;
+  assert.match(text, /disconnected while this call was in flight/);
+  assert.equal(h.object.pending.size, 0);
+});
+
+test('a returning agent that no longer has the call fails it, and cancels calls nobody waits for', async () => {
+  const {h, body} = await resumable();
+  const second = await reconnect(h);
+  await message(h.object, second, {type: 'hello', hostname: 'pc', resume: 1, pending: ['ghost']});
+  assert.match(await body, /lost this call while it was disconnected/);
+  assert.deepEqual(second.sent.filter(f => f.type === 'cancel'), [{type: 'cancel', id: 'ghost'}]);
+  assert.equal(h.object.pending.size, 0);
+  assert.equal(h.timers.size, 0);
+});
+
+test('an agent without resume support still fails its calls at once', async () => {
+  const h = harness(), socket = new h.Socket(); h.ctx.sockets = [socket];
+  await message(h.object, socket, {type: 'hello', hostname: 'old agent'});
+  const response = h.object.fetch(rpc(3));
+  await settle();
+  await h.object.webSocketClose(socket, 1006, 'gone');
+  const answer = await (await response).json();
+  assert.match(answer.error.message, /disconnected while this call was in flight/);
+  assert.equal(h.object.pending.size, 0);
+  assert.equal(h.timers.size, 0);
+});
+
+test('a replacement connection keeps the calls of a resuming agent for it to resume', async () => {
+  const h = harness(), first = new h.Socket(); h.ctx.sockets = [first];
+  await message(h.object, first, {type: 'hello', hostname: 'pc', resume: 1, pending: []});
+  const pending = h.object.fetch(rpc(4));
+  await settle();
+  const id = first.sent.findLast(f => f.type === 'req').id;
+  const second = await reconnect(h);  // the old socket is replaced before it closed
+  assert.equal(h.object.pending.get(id).socket, null);
+  await message(h.object, first, {type: 'head', id, status: 200, headers: []});  // late frame from the old one
+  assert.equal(h.object.pending.get(id).frames, 0, 'frames from a replaced connection do not count');
+  await message(h.object, second, {type: 'hello', hostname: 'pc', resume: 1, pending: [id]});
+  assert.deepEqual(second.sent.filter(f => f.type === 'resume'), [{type: 'resume', id, from: 0}]);
+  await message(h.object, second, {type: 'head', id, status: 200, headers: []});
+  const response = await pending;
+  const body = response.text();
+  await message(h.object, second, {type: 'body', id, data: btoa('done')});
+  await message(h.object, second, {type: 'end', id});
+  assert.equal(await body, 'done');
+  assert.equal(h.object.pending.size, 0);
+  assert.equal(h.timers.size, 0);
+});
+
+test('a caller giving up on an orphaned call gets it cancelled when the agent is back', async () => {
+  const h = harness(), first = new h.Socket(); h.ctx.sockets = [first];
+  await message(h.object, first, {type: 'hello', hostname: 'pc', resume: 1, pending: []});
+  const abort = new AbortController();
+  const pending = h.object.fetch(rpc(5, abort.signal));
+  await settle();
+  const id = first.sent.findLast(f => f.type === 'req').id;
+  await h.object.webSocketClose(first, 1006, 'gone');
+  abort.abort();
+  assert.equal(h.object.pending.size, 0);
+  assert.equal(h.timers.size, 1, 'only the head timeout of the abandoned call is left');
+  const second = await reconnect(h);
+  await message(h.object, second, {type: 'hello', hostname: 'pc', resume: 1, pending: [id]});
+  assert.deepEqual(second.sent.filter(f => f.type === 'cancel'), [{type: 'cancel', id}]);
+  void pending;
 });

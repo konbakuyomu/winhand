@@ -1,7 +1,7 @@
 """Share one in-flight wait between identical concurrent calls.
 
 Models sometimes fire the same wait several times in parallel (the same session_wait six to
-fourteen times over). Each copy would hold a thread and a relay request for up to 45 s and
+fourteen times over). Each copy would hold a thread and a relay request for up to 40 s and
 then return the same output; instead they all await one task and get the same answer.
 """
 

@@ -11,6 +11,11 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 MAX_SIDE = 1568  # longest edge vision models work with; larger images are only scaled down
+# Claude also scales down any image over about 1600 tokens (width * height / 750), silently: a
+# 1568x882 screenshot reaches the model smaller than winhand thinks, and every click drifts by
+# the difference. Images are kept under this many pixels; a larger max_side raises it in step
+# (2576 px, for models that see that much, allows about 3.1 MP).
+MAX_PIXELS = 1_150_000
 # Encoded size budget for one image in a tool result. Claude Desktop rejects tool results over
 # 1 MB, and the image travels base64-encoded (x4/3) inside JSON, so stay well below: 600 KB
 # of image is about 800 KB on the wire. PNG keeps screen text sharp; when a busy screen does
@@ -67,15 +72,16 @@ def _fit_budget(image, budget: int):
 
 
 def encode_image(image, max_side: int = MAX_SIDE, budget: int = IMAGE_BUDGET) -> tuple[bytes, str, dict]:
-    """(bytes, format, facts) for a PIL image: at most `max_side` on the longest edge and at
-    most `budget` bytes encoded (see IMAGE_BUDGET)."""
+    """(bytes, format, facts) for a PIL image: at most `max_side` on the longest edge, at most
+    MAX_PIXELS (more for a larger max_side) and at most `budget` bytes encoded (see IMAGE_BUDGET)."""
     from PIL import Image, ImageOps
 
     if getattr(image, "n_frames", 1) > 1:
         image.seek(0)
     image = ImageOps.exif_transpose(image)
     original = image.size
-    scale = min(1.0, max_side / max(original))
+    max_pixels = MAX_PIXELS * max(1.0, max_side / MAX_SIDE) ** 2
+    scale = min(1.0, max_side / max(original), (max_pixels / (original[0] * original[1])) ** 0.5)
     if scale < 1.0:
         image = image.resize(
             (max(1, round(original[0] * scale)), max(1, round(original[1] * scale))), Image.Resampling.LANCZOS

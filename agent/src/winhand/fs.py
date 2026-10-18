@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -18,10 +19,15 @@ from datetime import datetime
 from pathlib import Path
 
 from . import winenv
+from .session.text import width
 
 _ENCODINGS = ("utf-8", "gb18030")
 MAX_LINE = 2000
-READ_MAX_CHARS = 60_000  # about 20k tokens: stays under what clients accept from one tool result
+# How much one tool result holds, counted as width() (UTF-8 size: a Chinese character counts 3).
+# Clients cap results in tokens (Claude Code at 25k by default); 60,000 characters of Chinese or
+# dense code went over it, and the whole result was lost.
+OUTPUT_BUDGET = 40_000
+READ_MAX_CHARS = OUTPUT_BUDGET
 SEARCH_BUDGET_S = 35.0  # answer before the client's ~60 s limit, with what was found so far
 FIND_BUDGET_S = 35.0
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "$Recycle.Bin", "System Volume Information"}
@@ -68,12 +74,17 @@ def _read_bytes(path: str) -> bytes:
         return fh.read()
 
 
-def _read_text_bytes(path: str) -> tuple[str, str, bytes]:
+def _read_text_bytes(path: str, encoding: str | None = None) -> tuple[str, str, bytes]:
     data = _read_bytes(path)
+    if encoding:
+        try:
+            return data.decode(encoding, errors="replace"), encoding, data
+        except LookupError:
+            raise FsError(f"unknown encoding {encoding!r} (e.g. utf-8, gbk, utf-16, latin-1)") from None
     if _is_binary(data):
         raise FsError(f"{path} looks binary ({len(data)} bytes); not shown as text")
-    text, encoding = _decode(data)
-    return text, encoding, data
+    text, found = _decode(data)
+    return text, found, data
 
 
 def read_text(path: str) -> tuple[str, str]:
@@ -189,8 +200,9 @@ def fs_read(
     limit: int = 2000,
     tail: int | None = None,
     max_chars: int = READ_MAX_CHARS,
+    encoding: str | None = None,
 ) -> dict:
-    text, encoding, data = _read_text_bytes(path)
+    text, encoding, data = _read_text_bytes(path, encoding)
     lines = text.splitlines()
     total = len(lines)
     if tail:
@@ -200,17 +212,18 @@ def fs_read(
         start = max(1, offset)
         count = max(1, limit)
     chosen = lines[start - 1 : start - 1 + count]
-    width = len(str(start + len(chosen)))
+    digits = len(str(start + len(chosen)))
     body: list[str] = []
     used = 0
     for i, line in enumerate(chosen, start):
         if len(line) > MAX_LINE:
             line = line[:MAX_LINE] + f"…[{len(line) - MAX_LINE} chars truncated]"
-        entry = f"{i:>{width}}\t{line}"
-        if body and max_chars and used + len(entry) + 1 > max_chars:
+        entry = f"{i:>{digits}}\t{line}"
+        size = width(entry) + 1
+        if body and max_chars and used + size > max_chars:
             break
         body.append(entry)
-        used += len(entry) + 1
+        used += size
     out = {
         "path": path,
         "encoding": encoding,
@@ -365,7 +378,14 @@ def fs_list(
         raise FsError("kind is all, file or dir")
     root = Path(_p(path))
     if not root.is_dir():
-        raise FsError(f"not a directory: {path}")
+        if not root.is_file():
+            raise FsError(f"no such folder: {path}")
+        st = root.stat()  # a file: describe it rather than fail
+        return {
+            "root": winenv.display_path(str(root.parent)),
+            "entries": [{"path": root.name, "type": "file", "size": st.st_size, "modified": _modified(st)}],
+            "note": f"{path} is a file, not a folder: fs_read reads it",
+        }
     since = parse_since(newer_than) if newer_than else None
     # sorting by time or size has to see everything before keeping `limit` entries
     cap = limit if sort == "name" else max(limit, 20_000)
@@ -421,10 +441,25 @@ def fs_list(
     if len(entries) > limit:
         entries = entries[:limit]
         truncated = True
-    out = {"root": winenv.display_path(str(root)), "entries": entries}
-    if truncated:
+    kept = within_budget(entries, lambda e: width(json.dumps(e, ensure_ascii=False)) + 2)
+    out = {"root": winenv.display_path(str(root)), "entries": entries[:kept]}
+    if kept < len(entries):
+        out["truncated"] = (
+            f"stopped at {kept} entries, all one result holds; narrow with pattern/depth/newer_than"
+        )
+    elif truncated:
         out["truncated"] = f"stopped at {limit} entries; narrow with pattern/depth/newer_than"
     return out
+
+
+def within_budget(items: list, size, budget: int = OUTPUT_BUDGET) -> int:
+    """How many of the items fit in one tool result (at least one), each taking size(item)."""
+    used = 0
+    for i, item in enumerate(items):
+        used += size(item)
+        if used > budget and i:
+            return i
+    return len(items)
 
 
 def fs_find(
@@ -552,25 +587,86 @@ def _decode_match(line: bytes) -> str:
             return line.decode("utf-8", errors="replace")
 
 
-def _run_rg(argv: list[str], max_results: int, budget_s: float) -> tuple[list[str], int | None, str, bool]:
-    """Run ripgrep, keeping what it found when it runs out of time or finds enough.
+_LINE_NO = re.compile(rb"(\d+)([:-])")
+_MATCH_LINE = re.compile(r"^(?:.*?:)?\d+:")  # `path:12:text`, or `12:text` when one file is searched
+
+
+def _decode_path(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:  # not what ripgrep writes on Windows, but never fail over a name
+        return raw.decode("mbcs" if winenv.IS_WINDOWS else "utf-8", errors="replace")
+
+
+def _rel(path: str) -> str:
+    return path[2:] if path.startswith(("./", ".\\")) else path
+
+
+class _RgOutput:
+    """ripgrep's --null output turned into `path:line:text` (`path-line-text` for context lines):
+    the path and the text are decoded on their own, so a GBK line no longer garbles the UTF-8
+    path in front of it. Counts matches, not context lines."""
+
+    def __init__(self, files_only: bool, single: bool) -> None:
+        self.files_only, self.single = files_only, single
+        self.lines: list[str] = []
+        self.matches = 0
+
+    def add(self, raw: bytes) -> None:
+        raw = raw.rstrip(b"\r\n")
+        if not raw:
+            return
+        if self.files_only:
+            self.lines.append(_rel(_decode_path(raw.rstrip(b"\0"))))
+            self.matches += 1
+            return
+        if raw == b"--":
+            self.lines.append("--")
+            return
+        path, nul, rest = raw.partition(b"\0")
+        m = _LINE_NO.match(rest) if nul else None
+        if m is None:
+            self.lines.append(_decode_match(raw))
+            return
+        number, mark = m.group(1).decode(), m.group(2).decode()
+        text = _decode_match(rest[m.end() :])
+        where = "" if self.single else _rel(_decode_path(path)) + mark
+        self.lines.append(f"{where}{number}{mark}{text}")
+        if mark == ":":
+            self.matches += 1
+
+
+def _run_rg(
+    argv: list[str], max_results: int, budget_s: float, cwd: str | None = None, out: _RgOutput | None = None
+) -> tuple[list[str], int | None, str, bool]:
+    """Run ripgrep (with --null), keeping what it found when it runs out of time or finds enough.
     Returns (lines, returncode or None when stopped early, stderr, timed_out)."""
+    out = out or _RgOutput(False, False)
     kwargs: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if winenv.IS_WINDOWS else {}
     proc = subprocess.Popen(
         argv,
+        cwd=cwd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=winenv.build_env(),
         **kwargs,
     )
-    lines: list[str] = []
     errors: list[bytes] = []
+    lock = threading.Lock()
+    split = b"\0" if out.files_only else b"\n"  # a list of files is NUL-terminated with --null
 
     def read_out() -> None:
         assert proc.stdout is not None
-        for raw in proc.stdout:
-            lines.append(_decode_match(raw.rstrip(b"\r\n")))
+        rest = b""
+        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+            rest += chunk
+            *items, rest = rest.split(split)
+            with lock:
+                for item in items:
+                    out.add(item)
+        with lock:
+            out.add(rest)
 
     def read_err() -> None:
         assert proc.stderr is not None
@@ -582,7 +678,7 @@ def _run_rg(argv: list[str], max_results: int, budget_s: float) -> tuple[list[st
     deadline = time.monotonic() + budget_s
     timed_out = stopped = False
     while proc.poll() is None:
-        if len(lines) > max_results:
+        if out.matches > max_results:
             stopped = True
             break
         if time.monotonic() > deadline:
@@ -595,7 +691,22 @@ def _run_rg(argv: list[str], max_results: int, budget_s: float) -> tuple[list[st
     for t in readers:
         t.join(timeout=2)
     stderr = b"".join(errors).decode("utf-8", errors="replace").strip()
-    return list(lines), None if stopped else proc.returncode, stderr, timed_out
+    with lock:
+        return list(out.lines), None if stopped else proc.returncode, stderr, timed_out
+
+
+def _first_matches(lines: list[str], limit: int, files_only: bool) -> tuple[list[str], bool]:
+    """The lines of the first `limit` matches (with their context lines); whether more were found."""
+    if files_only:
+        return lines[:limit], len(lines) > limit
+    kept, seen = [], 0
+    for line in lines:
+        if _MATCH_LINE.match(line):
+            seen += 1
+            if seen > limit:
+                return kept, True
+        kept.append(line)
+    return kept, False
 
 
 def fs_search(
@@ -615,11 +726,17 @@ def fs_search(
     timed_out = False
     warnings = ""
     engine = "ripgrep"
+    single = os.path.isfile(root)
+    prefix = winenv.display_path(root).rstrip("\\/")
     if rg:
+        # searched from inside the root: paths come back relative to it, and a glob with folders
+        # in it (src/**/*.c, {user,lib}/**/*.h) means what it says
+        cwd, target = (os.path.dirname(root), os.path.basename(root)) if single else (root, ".")
         argv = [
             rg,
             "--line-number",
             "--no-heading",
+            "--null",
             "--color",
             "never",
             "--max-columns",
@@ -638,24 +755,47 @@ def fs_search(
             argv.append(f"--context={int(context)}")
         if encoding:
             argv += ["--encoding", encoding]
-        target = ["-e", pattern, root]
-        lines, code, stderr, timed_out = _run_rg(argv + target, max_results, budget_s)
+        began = time.monotonic()
+
+        def search(extra: list[str], budget: float):
+            out = _RgOutput(files_only, single)
+            return _run_rg(argv + extra + ["-e", pattern, target], max_results, budget, cwd, out)
+
+        lines, code, stderr, timed_out = search([], budget_s)
         if code == 2 and not lines and re.search(r"look-?around|backreference", stderr, re.IGNORECASE):
             engine = "ripgrep (pcre2)"
-            lines, code, stderr, timed_out = _run_rg(argv + ["--pcre2"] + target, max_results, budget_s)
+            argv.append("--pcre2")
+            lines, code, stderr, timed_out = search([], budget_s)
         if code not in (None, 0, 1):
             if not lines:
                 raise FsError(stderr or "ripgrep failed")
             warnings = stderr[-600:]  # e.g. some files could not be read; the matches still count
+        # Chinese in GBK/GB18030 files (common in embedded C sources): ripgrep reads UTF-8, so a
+        # non-ASCII pattern finds nothing there. Those files are searched once more, read as GB18030.
+        left = budget_s - (time.monotonic() - began)
+        if not encoding and not pattern.isascii() and not timed_out and left > 1:
+            more, _, _, more_timed_out = search(["--encoding", "gb18030"], left)
+            known = set(lines)
+            extra = [line for line in more if line not in known]
+            if files_only or any(_MATCH_LINE.match(line) for line in extra):
+                if extra:
+                    lines = lines + (["--"] if context and lines and not files_only else []) + extra
+                    engine += " + gb18030"
+            timed_out = timed_out or more_timed_out
     else:
         lines = list(
             _py_search(pattern, root, glob, ignore_case, literal, max_results + 1, context, files_only)
         )
         engine = "python"
-    prefix = winenv.display_path(root).rstrip("\\/")
-    results = [ln[len(prefix) + 1 :] if ln.startswith(prefix) else ln for ln in lines[:max_results]]
-    out = {"root": prefix, "engine": engine, "matches": results, "count": len(results)}
-    if len(lines) > max_results:
+    results, more = _first_matches(lines, max_results, files_only)
+    kept = within_budget(results, lambda line: width(line) + 4)
+    out = {"root": prefix, "engine": engine, "matches": results[:kept], "count": kept}
+    if kept < len(results):
+        out["truncated"] = (
+            f"the first {kept} lines are all one result holds; narrow the pattern, path or glob, "
+            "or files_only=true"
+        )
+    elif more:
         out["truncated"] = f"more than {max_results} matches; narrow the pattern, path or glob"
     if timed_out:
         out["timed_out"] = (
@@ -667,45 +807,102 @@ def fs_search(
     return out
 
 
-def _py_search(pattern, root, glob, ignore_case, literal, cap, context=0, files_only=False):
-    flags = re.IGNORECASE if ignore_case else 0
-    regex = re.compile(re.escape(pattern) if literal else pattern, flags)
-    found = 0
+def _brace(glob: str) -> list[str]:
+    """{a,b} alternatives spelled out, as ripgrep reads a glob: src/*.{c,h} -> src/*.c, src/*.h."""
+    m = re.search(r"\{([^{}]*)\}", glob)
+    if not m:
+        return [glob]
+    return [g for part in m.group(1).split(",") for g in _brace(glob[: m.start()] + part + glob[m.end() :])]
+
+
+def _glob_regex(glob: str) -> re.Pattern:
+    """A glob as a regex on a /-separated path: ** spans folders, * and ? stay within one."""
+    out, i = "", 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif glob.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif glob[i] == "[" and "]" in glob[i + 2 :]:
+            end = glob.index("]", i + 2)
+            body = glob[i + 1 : end]
+            out, i = out + "[" + ("^" + body[1:] if body.startswith("!") else body) + "]", end + 1
+        else:
+            out += {"*": "[^/]*", "?": "[^/]"}.get(glob[i]) or re.escape(glob[i])
+            i += 1
+    return re.compile(out + r"\Z")
+
+
+def _globber(glob: str | None):
+    """keep(rel, folder=False) as ripgrep's --glob decides: a glob with a / is matched against the
+    path from the searched folder, one without against the name; !glob leaves out what it
+    matches (folders too)."""
+    if not glob:
+        return lambda rel, folder=False: True
+    exclude = glob.startswith("!")
+    patterns = [("/" in g, _glob_regex(g.lstrip("/"))) for g in _brace(glob[1:] if exclude else glob)]
+
+    def keep(rel: str, folder: bool = False) -> bool:
+        name = rel.rsplit("/", 1)[-1]
+        hit = any(rx.match(rel if whole else name) for whole, rx in patterns)
+        if folder:
+            return not (exclude and hit)
+        return hit != exclude
+
+    return keep
+
+
+def _py_files(root: str, keep):
+    """(full path, path from root) of the files to search under root."""
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
-            d for d in dirnames if not d.startswith(".") and d not in ("node_modules", "__pycache__")
+            d
+            for d in dirnames
+            if not d.startswith(".")
+            and d not in ("node_modules", "__pycache__")
+            and keep(os.path.relpath(os.path.join(dirpath, d), root).replace(os.sep, "/"), folder=True)
         ]
         for name in filenames:
-            if glob and not fnmatch.fnmatch(name, glob):
-                continue
             full = os.path.join(dirpath, name)
-            try:
-                with open(full, "rb") as fh:
-                    data = fh.read(2_000_000)
-            except OSError:
+            rel = os.path.relpath(full, root)
+            if keep(rel.replace(os.sep, "/")):
+                yield full, rel
+
+
+def _py_search(pattern, root, glob, ignore_case, literal, cap, context=0, files_only=False):
+    """ripgrep's search where it is not installed, answered the way fs_search answers with it:
+    paths from root (none when root is one file), the same globs, GBK files decoded."""
+    flags = re.IGNORECASE if ignore_case else 0
+    regex = re.compile(re.escape(pattern) if literal else pattern, flags)
+    files = [(root, None)] if os.path.isfile(root) else _py_files(root, _globber(glob))
+    found = 0
+    for full, rel in files:
+        try:
+            with open(full, "rb") as fh:
+                data = fh.read(2_000_000)
+        except OSError:
+            continue
+        if _is_binary(data):
+            continue
+        text, _ = _decode(data)
+        lines = text.splitlines()
+        for no, line in enumerate(lines, 1):
+            if not regex.search(line):
                 continue
-            if _is_binary(data):
-                continue
-            text, _ = _decode(data)
-            lines = text.splitlines()
-            shown = winenv.display_path(full)
-            for no, line in enumerate(lines, 1):
-                if not regex.search(line):
-                    continue
-                if files_only:
-                    yield shown
-                    found += 1
-                    break
-                for before in range(max(1, no - context), no):
-                    yield f"{shown}-{before}-{lines[before - 1][:400]}"
-                yield f"{shown}:{no}:{line[:400]}"
-                for after in range(no + 1, min(len(lines), no + context) + 1):
-                    yield f"{shown}-{after}-{lines[after - 1][:400]}"
+            if files_only:
+                yield rel or os.path.basename(full)  # as ripgrep names one file it searched
                 found += 1
-                if found >= cap:
-                    return
+                break
+            for before in range(max(1, no - context), no):
+                yield f"{rel + '-' if rel else ''}{before}-{lines[before - 1][:400]}"
+            yield f"{rel + ':' if rel else ''}{no}:{line[:400]}"
+            for after in range(no + 1, min(len(lines), no + context) + 1):
+                yield f"{rel + '-' if rel else ''}{after}-{lines[after - 1][:400]}"
+            found += 1
             if found >= cap:
                 return
+        if found >= cap:
+            return
 
 
 # ------------------------------------------------------------------ managing files

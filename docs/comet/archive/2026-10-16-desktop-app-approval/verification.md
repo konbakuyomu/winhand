@@ -189,3 +189,36 @@
 - 桌面端设置页“程序授权”：开关、两个列表、撤销、添加；
 - 带 Win 键的组合键（算 explorer.exe）和 UWP 应用（例如计算器）的识别：目前只有代码阅读和模拟测试；
 - 观察项：手动试一次 msinfo32 菜单展开和 OCR 点击。
+
+## 发布和真机验收（0.6.0–0.6.2，2026-10-16）
+
+**发布**
+- 0.6.0：PR #13 squash 合并为 9815270，`v0.6.0` 标签从用户电脑推送，release run 38373861487。
+- 装上 0.6.0 后发现：在桌面端里授权框弹不出来，云端却以为没人点。
+  - 0.6.1 修好了弹不出来的问题（dialog-launch-fix，PR #14，cc96e9a，release run 38381086258）；
+  - 0.6.2 让弹不出来时如实报告（crash-fixes，PR #15，723e1cd，release run 38836941288）。
+- 用户电脑从 0.6.0 直接更新到 0.6.2：后台 winhand.exe 和桌面端都报 0.6.2。
+
+**安装版 0.6.2 实测**（用户在电脑前点击）
+- **授权框能弹出**：第一次操作画图（展开「文件」菜单）时，授权框出现在屏幕上，写明 mspaint.exe、窗口标题和这次要做的操作（截图核对）。画图只显示 exe 名，没有中文名，不影响判断。
+- **等人回答**：
+  - 40 秒内没人点：调用返回“a dialog is open there”，什么都没发送；
+  - 2 分钟仍没人点：返回“nobody answered the dialog within 120s”，状态仍是 ask，没有记作拒绝。
+- **三种回答**：
+  - 画图选「拒绝」：调用返回 refused；马上再调用，不再弹窗，直接返回“refused for another 10 min without asking again”。
+  - 系统信息选「允许到 WinHand 重启」：菜单展开，`verified=true`。之后的 collapse、`ocr` 点击「硬件资源」都不再弹窗，「硬件资源」被选中。
+  - 计算器选「一直允许」：`winhand apps list` 的「一直允许」里出现 calculatorapp.exe，窗口列表里计算器为 always，计算器显示 7。
+- **UWP**：计算器的窗口属于 ApplicationFrameHost.exe。授权记的是里面的 CalculatorApp.exe，没有把整个 ApplicationFrameHost 放行。
+- **Win 键组合**：`input` 按 Win+R，被算作「Windows 资源管理器（explorer.exe）」。选「拒绝」后返回 refused，没有按出任何键。
+- **终端**：
+  - `cmd` 在默认终端 Windows Terminal 里打开，窗口列表标为 terminal；
+  - 用 `input` 打字时不弹窗，直接拒绝，提示改用 run 或会话，或用 `winhand apps allow windowsterminal.exe` 放行；
+  - Termius 也标为 terminal。
+- **设置页「程序授权」**（用户操作，截图核对）：
+  - 开关为开；
+  - 「一直允许」和「允许到 WinHand 重启」两个列表都在，后者列出 msinfo32.exe，带撤销按钮；
+  - 用户撤销了计算器，又添加 notepad.exe 再撤销；
+  - 最后 `winhand apps list` 的「一直允许」为（无），授权文件在 11:08:46 改写过。
+- **观察项**：msinfo32 的「文件(F)」菜单展开后，读得到 6 个菜单项；`ocr` 点击「硬件资源」成功。
+
+结论：上面「要在发布后的真机验收里看的」各项都在真机上成立。经 conhost 打开的命令提示符没有单独试，因为这台电脑的默认终端是 Windows Terminal；控制台窗口走同一条判断，有测试覆盖。

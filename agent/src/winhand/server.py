@@ -33,7 +33,10 @@ from . import (
     winenv,
     workspace,
 )
+from . import history as history_mod
+from .aliases import ArgumentAliases
 from .config import Config
+from .config import home as config_home
 from .config import load as load_config
 from .guard import GuardActions
 from .history import RecentCalls
@@ -54,10 +57,13 @@ Quick rules
     run(script='...', shell='pwsh')                a multi-line script (pwsh | powershell | cmd |
                                                    python | bash | wsl), written to a file, so $vars,
                                                    quotes and Chinese text arrive exactly as written
+    run(command=r'.venv\\Scripts\\python.exe', script='...', cwd=...)
+                                                   the same script, run by that interpreter; a
+                                                   relative program path is relative to cwd
     run(command='...')                             one command line for PowerShell
   Never put `powershell -Command "..."` inside a command line: the outer PowerShell expands its
   $variables first. Use script= or args= instead. Output comes back as clean UTF-8 text.
-  `run` answers within ~45 s; a command still going then comes back with `still_running` and an id:
+  `run` answers within ~40 s; a command still going then comes back with `still_running` and an id:
   it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code.
   Never sleep or poll in a loop to wait: job_status(wait_s=40, patterns=[...]) does it.
 - Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
@@ -70,12 +76,22 @@ Quick rules
     running | awaiting_input | needs_user | idle | blocked | exited
   `needs_user` means a password/one-time code/browser sign-in: never invent it. Give URLs to the user,
   or call session_prompt_user so they type a secret into a masked dialog on the machine.
-- A token or password that must be stored on the machine: secret_prompt(message, save_to=...) lets the
-  person type it into a masked dialog; you never see it. «redacted:…» in results marks masked values:
+- A token or password that must be stored on the machine: secret_prompt(message, key='NAME') lets the
+  person type it into a masked dialog and keeps it in this machine's secret store; you never see it.
+  run(..., secrets=['NAME']) and job_start(..., secrets=['NAME']) give it to the program as an
+  environment variable, in this conversation and later ones (context() lists the names stored).
+  Never ask the person to paste a token into the chat. «redacted:…» in results marks masked values:
   never write such text back to a file.
+- Keys the owner keeps in Harmonia (context() then has a `harmonia` part with its environments): run
+  the program that needs them as run(command='harmonia', args=['exec', '--env', '<environment>', '--',
+  'npx', 'wrangler', 'deploy']); the program gets them, you do not, and their values are masked as
+  «redacted:harmonia:NAME». A new key goes there with secret_prompt(message, harmonia='<environment>/NAME').
+  Printing them (harmonia export, var list --show) needs the person's OK; Harmonia's files are off limits.
 - session_wait ORs its conditions across several sessions at once (e.g. gdb prompt OR serial "PANIC").
   A timeout is not a failure: call it again to keep waiting; already-returned output is not repeated.
-  One wait at a time is enough: identical parallel waits share one answer.
+  One wait at a time is enough: identical parallel waits share one answer, and calls sent in
+  parallel may reach this machine one after another. To wait on several sessions or jobs, pass
+  their ids to one session_wait / job_status call.
 - After a connection error, call history() before resending anything: it shows whether your call
   ran, its run id and exit code. For sessions also session_read(since=the last cursor you received).
 - Full-screen programs (menuconfig, htop, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
@@ -128,7 +144,10 @@ Quick rules
   never asked about.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
-  follow it with job_status(id, wait_s=40).
+  follow it with job_status(id, wait_s=40). With args it starts the program directly and stdin= gives
+  it text as UTF-8, never through a PowerShell pipe (Codex: command='codex', args=['exec', '-'],
+  stdin=brief); job_status shows its stdout and stderr while it runs. job_status(id=[a, b])
+  waits on several jobs, or `run` ids, at once: it answers when the first finishes or matches.
 - Something odd about this machine (garbled text, a shim that fails, missing tools)?
   sys_info(checks=true) lists the usual suspects with fixes.
 - A tool named here but missing from your tool list (winhand was updated after the conversation
@@ -157,7 +176,7 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
                                               | wsl) written to a file: $vars, quotes, Chinese arrive as is
     run(command='...')                        one command line for PowerShell
   Never nest `powershell -Command "..."` in a command line; use script= or args=. `run` answers within
-  ~45 s; if still going you get `still_running` + an id, and job_status(id, since=cursor, wait_s=40)
+  ~40 s; if still going you get `still_running` + an id, and job_status(id, since=cursor, wait_s=40)
   waits for the rest. Never sleep or poll in a loop.
 - Interactive, long-running or stateful programs (shells, REPLs, gdb, gdbserver, installers, serial or
   telnet consoles, full-screen TUIs) -> a session: session_start -> session_send / session_wait ->
@@ -167,8 +186,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   blocked | exited. `needs_user` is a password, code or browser sign-in: never invent it; give URLs to
   the person or call session_prompt_user. session_wait waits on several sessions at once; a timeout is
   not a failure, call it again (already returned output is not repeated).
-- A token or password that must be stored here: secret_prompt(message, save_to=...) asks the person in
-  a masked dialog; you never see it. «redacted:…» marks masked values: never write them back to a file.
+- A token a program needs (Cloudflare, GitHub ...): secret_prompt(message, key='NAME') once (the person
+  types it in a masked dialog), then run(..., secrets=['NAME']); you never see it. «redacted:…» marks
+  masked values: never write them back to a file.
 - Files: fs_read / fs_edit / fs_write / fs_search / fs_find / fs_list / fs_stat / fs_op / fs_apply_patch;
   prefer them to shell commands. Moving more than a few KB between your sandbox and this machine:
   fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
@@ -182,7 +202,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   click, key or ui action on a program waits for the person's OK in a dialog there (window list:
   `approval`); terminals are not typed into: use run or a session.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
-  restarts winhand, elevated=true for admin tasks); follow it with job_status(id, wait_s=40).
+  restarts winhand, elevated=true for admin tasks); with args it runs a program directly and stdin=
+  feeds it text (Codex: command='codex', args=['exec', '-'], stdin=brief). Follow it with
+  job_status(id, wait_s=40); a list of ids waits on several jobs or runs in one call.
 - Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the
   usual suspects with fixes. A tool missing from your list: call(tool, arguments) reaches it.
 - Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
@@ -250,6 +272,8 @@ def build_server(
     recent = RecentCalls()
     mcp.add_middleware(recent)
     mcp.add_middleware(RedactOutput())  # inside RecentCalls: history only ever sees masked results
+    # Claude Code-style names (file_path, old_string, -A ...) become winhand's before anything is judged
+    mcp.add_middleware(ArgumentAliases(mcp))
     # innermost: a refusal is masked and recorded like any result; call() runs through it again
     mcp.add_middleware(GuardActions(sessions))
 
@@ -365,6 +389,7 @@ def build_server(
         each enabled server, its state and its tools as last listed (nothing is started). With server:
         starts it if need be and lists every tool with its description and parameters (inputSchema).
         Call a tool with mcp_call."""
+        await local_mcp.refresh()  # a server just added to config.toml is there at once
         if not server:
             return {
                 "servers": await asyncio.to_thread(local_mcp.overview),
@@ -412,6 +437,7 @@ def build_server(
         if call_id:
             result, pending = await local_mcp.wait_call(call_id)
         else:
+            await local_mcp.refresh()
             if not server or not tool:
                 raise ValueError("give server and tool (mcp_tools lists them), or call_id to keep waiting")
             if timeout_s <= 0:
@@ -448,8 +474,9 @@ def build_server(
         script: Annotated[
             str | None,
             Field(
-                description="A multi-line script to run instead of `command`: written to a file and run "
-                "by `shell`, so quotes, $variables and non-ASCII text need no escaping"
+                description="A multi-line script, written to a file and run by `shell`, or by `command` "
+                "when that is an interpreter (a project's .venv\\Scripts\\python.exe, node ...): quotes, "
+                "$variables and non-ASCII text need no escaping"
             ),
         ] = None,
         shell: Annotated[
@@ -462,15 +489,33 @@ def build_server(
         lang: Annotated[
             str | None, Field(description="'en': ask dotnet/MSBuild/Visual Studio for English messages")
         ] = None,
+        secrets: Annotated[
+            list[str] | None,
+            Field(
+                description="Names in this machine's secret store (context() lists them; "
+                "secret_prompt(key=...) adds one): the program gets them as environment variables, you "
+                "never see the values"
+            ),
+        ] = None,
     ) -> dict:
         """Run a command or script to completion and return exit code, stdout and stderr. Answers
-        within about 45 s: if it is still going then, the answer has `still_running` and an id, it
+        within about 40 s: if it is still going then, the answer has `still_running` and an id, it
         keeps running, and job_status(id, wait_s=40) waits for the rest.
         Use a session instead for anything interactive or that must keep running."""
         return await asyncio.to_thread(
             lambda: proc.run(
-                command, args, cwd, timeout_s, env, stdin, script=script, shell=shell, raw=raw, lang=lang
-            )
+                command,
+                args,
+                cwd,
+                timeout_s,
+                env,
+                stdin,
+                script=script,
+                shell=shell,
+                raw=raw,
+                lang=lang,
+                secrets=secrets,
+            )  # fmt: skip
         )
 
     @mcp.tool
@@ -721,7 +766,7 @@ def build_server(
         ] = None,
         min_chars: Annotated[int | None, Field(description="Stop once this much new output arrived")] = None,
         timeout_s: Annotated[
-            float, Field(description="Max wait for this call (capped at 45s; call again to keep waiting)")
+            float, Field(description="Max wait for this call (capped at 40s; call again to keep waiting)")
         ] = 30,
         include_screen: bool = False,
     ) -> dict:
@@ -866,7 +911,12 @@ def build_server(
             str | None, Field(description="File to store it in (only this user can read it)")
         ] = None,
         key: Annotated[
-            str | None, Field(description="With save_to: store as KEY=value in that .env file (others kept)")
+            str | None,
+            Field(
+                description="A name such as CLOUDFLARE_API_TOKEN. Alone: kept in this machine's secret "
+                "store, which run/job_start(secrets=[name]) hand to programs. With save_to: a KEY=value "
+                "line in that .env file (others kept)"
+            ),
         ] = None,
         credential: Annotated[
             str | None, Field(description="Or: a Windows Credential Manager entry name to store it under")
@@ -874,14 +924,26 @@ def build_server(
         validate: Annotated[
             str | None, Field(description="Regex the value must match (format check; asks again if not)")
         ] = None,
+        harmonia: Annotated[
+            str | None,
+            Field(
+                description="Or: <environment>/<NAME> to store it in Harmonia, which syncs it to the "
+                "owner's other machines (context() lists the environments); then run programs with "
+                "harmonia exec --env <environment> -- ..."
+            ),
+        ] = None,
     ) -> dict:
         """Ask the person at the machine to type a secret (masked dialog) and store it there without it
         ever reaching you: you get back only where it was saved. It is also masked in later results.
-        Use this whenever a token or password must exist on the machine."""
+        Use this whenever a token or password must exist on the machine. A token a program needs
+        (Cloudflare, GitHub ...): secret_prompt(message, key='NAME') once, then
+        run(..., secrets=['NAME']) every time, in this and later conversations."""
 
         def work():
             try:
-                return secret_store.prompt_and_save(message, save_to, key, credential, validate)
+                return secret_store.prompt_and_save(
+                    message, save_to, key, credential, validate, harmonia_target=harmonia
+                )
             except (secret_store.SecretError, PromptUnavailable, fs.FsError, OSError) as exc:
                 return {"error": str(exc)}
 
@@ -908,8 +970,16 @@ def build_server(
         ] = None,
         tail: Annotated[int | None, Field(ge=1, description="Text: only the last N lines (logs)")] = None,
         max_chars: Annotated[
-            int, Field(ge=1000, description="Text: stop adding lines past this many characters")
+            int,
+            Field(
+                ge=1000,
+                description="Text: stop adding lines past this size (a Chinese character counts 3, "
+                "about its token cost); the answer says where to go on",
+            ),
         ] = fs.READ_MAX_CHARS,
+        encoding: Annotated[
+            str | None, Field(description="Text: force the encoding, e.g. gbk (default: detected)")
+        ] = None,
     ):
         """Read any file. Text: numbered lines (UTF-8/GBK/BOM detected) plus the file's sha256;
         also logs another program is still writing. Images: returned as a picture you can see.
@@ -940,7 +1010,7 @@ def build_server(
                 "error": f"{Path(path).suffix} is the old binary Office format; open and save it as "
                 ".docx/.xlsx/.pptx (or convert with LibreOffice via run) to read it"
             }
-        return await asyncio.to_thread(_fs, fs.fs_read, path, offset, limit, tail, max_chars)
+        return await asyncio.to_thread(_fs, fs.fs_read, path, offset, limit, tail, max_chars, encoding)
 
     @mcp.tool
     async def fs_write(
@@ -1100,13 +1170,27 @@ def build_server(
 
     @mcp.tool
     def history(
+        ctx: Context,
         limit: Annotated[int, Field(ge=1, le=100)] = 20,
         tool: Annotated[str | None, Field(description="Only calls of this tool, e.g. run")] = None,
     ) -> dict:
         """The most recent tool calls this machine handled (newest first): status, summary, exit code
         and run id. After a connection error, check here whether your call ran before resending it.
-        A tool reached through call() is listed under its own name, with via="call"."""
-        out = {"calls": recent.list(limit, tool), "winhand": __version__}
+        Other clients may use this machine too: `client` names each call's client and, where the
+        client keeps an MCP session, this_session=true marks your own (a reconnect may start a new
+        one). A tool reached through call() is listed under its own name, with via="call"."""
+        session, _ = history_mod.caller(ctx)
+        calls = recent.list(limit, tool, session)
+        out = {"calls": calls, "winhand": __version__}
+        if len(calls) < limit:
+            before = history_mod.earlier(config_home() / "activity", recent.started, limit - len(calls), tool)
+            if before:
+                calls += before
+                out["restarted"] = (
+                    f"winhand started at {history_mod.stamp(recent.started)}; the calls marked "
+                    "before_restart ran before that and their run ids are gone: check what they did "
+                    "before sending one again"
+                )
         if transfer.recent:
             out["transfers"] = list(transfer.recent)[::-1][:10]
         return out

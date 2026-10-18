@@ -2,8 +2,14 @@
 
 The model needs a token to exist (a Cloudflare API token, a panel password) but should never
 see it. secret_prompt opens a masked dialog; the answer goes straight into a file (whole file,
-or one KEY=VALUE line of an .env file) readable only by this user, or into the Windows
-Credential Manager. The value is also masked in every later tool result (redact.remember).
+or one KEY=VALUE line of an .env file) readable only by this user, into the Windows Credential
+Manager, or into a Harmonia environment, which syncs it to the owner's other machines
+(harmonia.py). The value is also masked in every later tool result (redact.remember).
+
+With only a key it goes into this machine's own store, ~/.winhand/secrets.env: run and job_start
+hand the keys a program needs to it as environment variables (`secrets=[...]`), so a token is
+stored once and used from then on without anyone pasting it. The store is masked in every result,
+also after a restart, and the AI's tools never read or change it (guard.py).
 """
 
 from __future__ import annotations
@@ -13,16 +19,65 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
-from . import fs, proc, redact, winenv
+from . import fs, harmonia, proc, redact, winenv
 from .secret_prompt import ask_secret
 
 IS_WINDOWS = sys.platform == "win32"
 _KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
 
+STORE_NAME = "secrets.env"
+
+
 class SecretError(RuntimeError):
     pass
+
+
+def store_path() -> Path:
+    from .config import home
+
+    return home() / STORE_NAME
+
+
+def _store_items() -> dict[str, str]:
+    path = store_path()
+    if not path.is_file():
+        return {}
+    text, _ = fs.read_text(str(path))
+    items: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and _KEY.match(key.strip()):
+            items[key.strip()] = value
+    return items
+
+
+def stored_names() -> list[str]:
+    """The names in the store (values never leave this module except into a program's env)."""
+    try:
+        return sorted(_store_items())
+    except (OSError, ValueError, fs.FsError):
+        return []
+
+
+def load(names: list[str]) -> dict[str, str]:
+    """The stored values of these names, for a program's environment."""
+    if not names:
+        return {}
+    try:
+        items = _store_items()
+    except (OSError, ValueError, fs.FsError) as exc:
+        raise SecretError(f"cannot read the secret store {store_path()}: {exc}") from exc
+    missing = [n for n in names if n not in items]
+    if missing:
+        have = ", ".join(sorted(items)) or "nothing yet"
+        raise SecretError(
+            f"not in this machine's secret store: {', '.join(missing)} (it holds: {have}). "
+            f"secret_prompt(message, key='{missing[0]}') asks the person to type it in"
+        )
+    return {n: items[n] for n in names}
 
 
 def _restrict(path: str) -> None:
@@ -111,6 +166,15 @@ def save_to_credential_manager(target: str, value: str, user: str | None = None)
     return {"saved": True, "credential": target, "chars": len(value)}
 
 
+def _harmonia_target(spec: str) -> tuple[str, str]:
+    env, sep, name = spec.rpartition("/")
+    if not sep or not env.strip() or not _KEY.match(name):
+        raise SecretError(
+            f"harmonia is <environment>/<VARIABLE_NAME>, e.g. Cloudflare/CLOUDFLARE_API_TOKEN, not {spec!r}"
+        )
+    return env.strip(), name
+
+
 def prompt_and_save(
     message: str,
     save_to: str | None = None,
@@ -119,9 +183,16 @@ def prompt_and_save(
     validate: str | None = None,
     title: str = "winhand",
     attempts: int = 3,
+    harmonia_target: str | None = None,
 ) -> dict:
-    if (save_to is None) == (credential is None):
-        raise SecretError("give save_to (a file) or credential (a Credential Manager name)")
+    if save_to is None and credential is None and harmonia_target is None and key is not None:
+        save_to = str(store_path())  # the machine's own store, for run(secrets=[key])
+    if sum(x is not None for x in (save_to, credential, harmonia_target)) != 1:
+        raise SecretError(
+            "give key (a name: stored on this machine for run(secrets=[...])), save_to (a file), "
+            "credential (a Credential Manager name) or harmonia (<environment>/<NAME> in Harmonia)"
+        )
+    target = _harmonia_target(harmonia_target) if harmonia_target is not None else None
     pattern = None
     if validate:
         try:
@@ -141,6 +212,11 @@ def prompt_and_save(
             question = "格式不对，请检查是否复制完整后重新输入。\n\n" + message
             continue
         redact.remember(value)
+        if target is not None:
+            try:
+                return harmonia.store(*target, value)
+            except harmonia.HarmoniaError as exc:
+                raise SecretError(str(exc)) from exc
         if credential is not None:
             return save_to_credential_manager(credential, value, key)
         return save_to_file(save_to, value, key)

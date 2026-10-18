@@ -33,6 +33,9 @@ _lock = threading.Lock()
 # the Services of the running agent (set by mcp_bridge.compose_app); None in stdio / http mode
 active = None
 _own = None
+# the desktop app's: it re-reads its own copy of the settings, then reconfigures (see refresh)
+reload_hook = None
+_stamp: tuple | None = None
 
 
 def fingerprint(entry: ServerEntry) -> str:
@@ -148,6 +151,33 @@ def services():
         atexit.unregister(_stop_own)
         atexit.register(_stop_own)
     return _own
+
+
+def _config_stamp() -> tuple | None:
+    try:
+        st = config.config_path().stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+async def refresh() -> None:
+    """Pick up local MCP servers added or changed in config.toml by hand (or with the file tools)
+    without restarting winhand. Cheap when nothing changed: one stat of the file."""
+    global _stamp
+    stamp = _config_stamp()
+    if stamp == _stamp:
+        return
+    _stamp = stamp
+    if reload_hook is not None:
+        await reload_hook()
+        return
+    try:
+        entries = config.load().servers
+    except Exception:  # a file being edited may not parse yet: keep what runs
+        return
+    stale = services().configure(entries)
+    await asyncio.gather(*(service.close() for service in stale), return_exceptions=True)
 
 
 def _stop_own() -> None:

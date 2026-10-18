@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import getpass
 import itertools
 import locale
@@ -22,7 +23,7 @@ from pathlib import Path
 import psutil
 
 from . import config, winenv
-from .session.text import clip, strip_ansi
+from .session.text import clip, fitting, strip_ansi
 
 _TOOLS = (
     "git",
@@ -165,8 +166,31 @@ def _git_bash(path: str | None) -> str | None:
     candidates.append(Path(scoop) / "apps" / "git" / "current" / "bin" / "bash.exe")
     git = shutil.which("git", path=path)
     if git:
+        if Path(git).parent.name.lower() == "shims":  # a scoop shim: <scoop>\shims\git.exe
+            candidates.append(Path(git).parent.parent / "apps" / "git" / "current" / "bin" / "bash.exe")
         candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
-    return next((str(c) for c in candidates if c.is_file()), None)
+    found = next((str(c) for c in candidates if c.is_file()), None)
+    return found or (_bash_beside_git(git) if git else None)
+
+
+@functools.cache
+def _bash_beside_git(git: str) -> str | None:
+    """bash.exe of the Git that `git` runs, found from its exec path (<root>\\mingw64\\libexec\\git-core):
+    shims and launchers (mise, chocolatey, a copied git.exe) hide where Git is installed."""
+    try:
+        done = subprocess.run(
+            [git, "--exec-path"],
+            capture_output=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    exec_path = Path(done.stdout.decode("utf-8", "replace").strip())
+    for root in exec_path.parents:
+        if (root / "bin" / "bash.exe").is_file() and (root / "cmd").is_dir():
+            return str(root / "bin" / "bash.exe")
+    return None
 
 
 def _python(path: str | None) -> str:
@@ -198,13 +222,55 @@ def _script_dir() -> Path:
     return directory
 
 
+# interpreters `run(command=<program>, script=...)` knows: the program's name -> how its script is run
+_INTERPRETER = re.compile(
+    r"^(?:(?P<python>python[\d.]*w?|py|pyw)|(?P<pwsh>pwsh|powershell)|(?P<cmd>cmd)|(?P<bash>bash|sh|zsh)"
+    r"|(?P<node>node|nodejs)|(?P<other>ruby|perl|php|lua|rscript|tclsh|wish))(?:\.exe)?$",
+    re.IGNORECASE,
+)
+_OTHER_SUFFIX = {"ruby": ".rb", "perl": ".pl", "php": ".php", "lua": ".lua", "rscript": ".R", "tclsh": ".tcl"}
+
+
+def interpreter_kind(program: str) -> str | None:
+    """'python', 'pwsh', 'cmd', 'bash', 'node' or another interpreter's name for a program path."""
+    m = _INTERPRETER.match(re.split(r"[\\/]", program.strip().strip('"'))[-1])
+    if not m:
+        return None
+    kind = m.lastgroup
+    return m.group(kind).lower().removesuffix(".exe") if kind == "other" else kind
+
+
 def prepare_script(
-    script: str, shell: str | None, env: dict[str, str], args: list[str] | None = None
+    script: str,
+    shell: str | None,
+    env: dict[str, str],
+    args: list[str] | None = None,
+    program: str | None = None,
 ) -> tuple[list[str], Path | None, str | None]:
     """Write `script` to a temporary file for `shell` and return (argv, file, stdin).
+    `program` names the interpreter to use instead (a venv's python.exe, node, pwsh ...).
 
     The script never passes through a command line, so quotes, `$variables`, backslashes and
     non-ASCII text arrive exactly as written."""
+    exe: str | None = None
+    if program:
+        kind = interpreter_kind(program)
+        if kind is None:
+            raise ValueError(
+                f"command + script runs the script with an interpreter (python, pwsh, powershell, cmd, "
+                f"bash, node, ruby, perl ...); {program!r} is not one. Give the script alone (shell=...), "
+                "or command with args"
+            )
+        exe = program
+        if kind == "python" and re.search(r"(?i)[\\/]windowsapps[\\/]", program):
+            exe = _python(env.get("PATH"))  # the Microsoft Store stub, not a Python
+        if kind not in SCRIPT_SHELLS:
+            directory = _script_dir()
+            suffix = ".js" if kind == "node" else _OTHER_SUFFIX.get(kind, ".txt")
+            path = directory / f"run-{uuid.uuid4().hex[:12]}{suffix}"
+            path.write_text(script.replace("\r\n", "\n"), encoding="utf-8")
+            return [exe, str(path), *(args or [])], path, None
+        shell = "powershell" if kind == "pwsh" and "powershell" in program.lower() else kind
     shell = (shell or default_script_shell()).lower()
     if shell not in SCRIPT_SHELLS:
         raise ValueError(f"shell must be one of {', '.join(SCRIPT_SHELLS)}")
@@ -219,7 +285,7 @@ def prepare_script(
     name = f"run-{uuid.uuid4().hex[:12]}"
     directory = _script_dir()
     if shell in ("pwsh", "powershell"):
-        exe = shutil.which(shell, path=path_var)
+        exe = exe or shutil.which(shell, path=path_var)
         if not exe:
             raise ValueError(f"{shell} is not installed")
         path = directory / f"{name}.ps1"
@@ -240,15 +306,15 @@ def prepare_script(
             raise ValueError("cmd scripts run on Windows")
         path = directory / f"{name}.cmd"
         path.write_bytes(("@chcp 65001>nul\n" + body).replace("\n", "\r\n").encode("utf-8"))
-        comspec = env.get("ComSpec") or env.get("COMSPEC") or r"C:\Windows\System32\cmd.exe"
+        comspec = exe or env.get("ComSpec") or env.get("COMSPEC") or r"C:\Windows\System32\cmd.exe"
         argv = [comspec, "/d", "/c", str(path)]
     elif shell == "python":
-        exe = _python(path_var)
+        exe = exe or _python(path_var)
         path = directory / f"{name}.py"
         path.write_text(body, encoding="utf-8")
         argv = [exe, "-X", "utf8", str(path)]
     else:  # bash
-        exe = _git_bash(path_var) if winenv.IS_WINDOWS else shutil.which("bash", path=path_var)
+        exe = exe or (_git_bash(path_var) if winenv.IS_WINDOWS else shutil.which("bash", path=path_var))
         if not exe:
             raise ValueError(
                 "bash not found (on Windows this needs Git for Windows; use shell='wsl' for WSL)"
@@ -370,7 +436,37 @@ def adjust_argv(argv: list[str]) -> tuple[list[str], list[str]]:
     return [exe, *args], notes
 
 
-def _failure_hint(command: str | None, nested_direct: bool, stderr: str) -> str | None:
+_PARSE_ERROR = re.compile(
+    r"ParserError|missing the terminator|Missing closing|Unexpected token|missing (the )?closing|"
+    r"Array index expression is missing",
+    re.IGNORECASE,
+)
+
+
+def _failure_hint(
+    command: str | None, nested_direct: bool, stderr: str, script: str | None = None
+) -> str | None:
+    if re.search(
+        r"\$'[^']*\\r'|\r'?: command not found|syntax error near unexpected token `\$'\\r''", stderr
+    ):
+        return (
+            "a carriage return (CRLF) reached bash: PowerShell ends every line it pipes into a program "
+            "with CRLF. Send a script to another machine with remote_run(host, script), or with "
+            "run(command='ssh', args=[...], stdin=script)"
+        )
+    if script and _PARSE_ERROR.search(stderr):
+        if re.search("[\u201c\u201d\u2018\u2019]", script):
+            return (
+                "PowerShell takes the curly quotes \u201c \u201d \u2018 \u2019 for quotation marks, so text "
+                "containing them breaks its strings: put such text in a single-quoted here-string "
+                "(@'...'@ on lines of their own) or in a file (fs_write) and read it from there"
+            )
+        if '\\"' in script:
+            return (
+                'PowerShell does not escape a double quote with \\" (that is bash/JSON): write it twice ("") '
+                'or with a backtick (`"), or use single quotes; for another language write the code to a '
+                "file, or run it with run(script=..., shell='python')"
+            )
     if "batch file arguments are invalid" in stderr:
         return (
             "a .cmd/.bat shim (mise, scoop, npm ...) refused an argument with line breaks or special "
@@ -394,8 +490,9 @@ def _failure_hint(command: str | None, nested_direct: bool, stderr: str) -> str 
 
 # MCP clients give up on a tool call after about a minute (Claude Code: 60 s). `run` answers
 # before that; a command still going by then keeps running and is picked up with job_status.
-REPLY_WITHIN_S = 45.0
+REPLY_WITHIN_S = 40.0
 _KEEP_FINISHED = 20
+STDERR_TAIL_CHARS = 6_000  # of a command still running, in job_status
 
 
 class _Running:
@@ -419,6 +516,7 @@ class _Running:
         self.temp_file: Path | None = None
         self.notes: list[str] = []
         self.command: str | None = None
+        self.script: str | None = None  # a PowerShell script, for hints on its parse errors
         self.nested_direct = False
 
     def _pump(self, stream, sink: bytearray) -> None:
@@ -469,13 +567,14 @@ def run(
     timeout_s: float = 120,
     env: dict[str, str] | None = None,
     stdin: str | None = None,
-    output_limit: int = 30000,
+    output_limit: int = 24_000,  # with stderr at half of it, under one result's budget (fs.OUTPUT_BUDGET)
     reply_within_s: float = REPLY_WITHIN_S,
     *,
     script: str | None = None,
     shell: str | None = None,
     raw: bool = False,
     lang: str | None = None,
+    secrets: list[str] | None = None,
 ) -> dict:
     """Run to completion. With `args` the program is executed directly (no shell
     quoting issues); without, `command` is a command line for the platform shell;
@@ -483,6 +582,13 @@ def run(
     Still running after `reply_within_s`, it keeps going (until `timeout_s`) and the
     answer says so; job_status(id) returns the rest."""
     extra_env = dict(env or {})
+    if secrets:  # stored with secret_prompt: given to the program, never shown (secret_store.py)
+        from . import secret_store
+
+        try:
+            extra_env.update(secret_store.load(list(secrets)))
+        except secret_store.SecretError as exc:
+            return {"error": str(exc)}
     if lang:
         if lang.lower() != "en":
             return {"error": "lang supports 'en' (English messages from dotnet/MSBuild/Visual Studio)"}
@@ -496,9 +602,11 @@ def run(
 
         refuse_placeholders(command, script, stdin, *(args or []))
         if script is not None:
-            if command:
-                return {"error": "give either command or script, not both"}
-            argv, temp_file, script_stdin = prepare_script(script, shell, full_env, args)
+            # command + script: the script runs with that interpreter (a project's venv python ...)
+            program = winenv.resolve_executable(command, full_env, cwd) if command else None
+            if program and shell:
+                return {"error": "give the interpreter as command or as shell, not both"}
+            argv, temp_file, script_stdin = prepare_script(script, shell, full_env, args, program)
             if script_stdin is not None:
                 if stdin is not None:
                     return {"error": "shell='wsl' reads the script from stdin, so stdin cannot be used too"}
@@ -516,7 +624,7 @@ def run(
             else:
                 argv = winenv.shell_command(command)
         else:
-            argv, notes = adjust_argv([winenv.resolve_executable(command, full_env), *args])
+            argv, notes = adjust_argv([winenv.resolve_executable(command, full_env, cwd), *args])
     except (ValueError, OSError) as exc:
         return {"error": str(exc)}
     if cwd and not os.path.isdir(os.path.expanduser(cwd)):
@@ -543,6 +651,8 @@ def run(
     job = _Running(f"run-{next(_run_ids)}", proc, argv, time.monotonic() + timeout_s)
     job.raw, job.temp_file, job.notes = raw, temp_file, notes
     job.command, job.nested_direct = command, nested_direct
+    if argv and re.search(r"(?i)(pwsh|powershell)(\.exe)?$", argv[0]):
+        job.script = script if script is not None else (command if args is None else None)
     if stdin is not None:
         threading.Thread(target=_feed, args=(proc, stdin), daemon=True).start()
     if job.wait(min(timeout_s, reply_within_s)):
@@ -599,7 +709,7 @@ def _exit_fields(job: _Running, stderr: str) -> dict:
     if note:
         fields["exit_note"] = note
     if code:
-        hint = _failure_hint(job.command, job.nested_direct, stderr)
+        hint = _failure_hint(job.command, job.nested_direct, stderr, job.script)
         if hint:
             fields["hint"] = hint
     return fields
@@ -642,17 +752,19 @@ def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:
         job.wait(5)
     out, err = job.text()
     text = out[since:]
-    omitted = max(len(text) - max_chars, 0)
+    kept = fitting(text, max_chars, from_end=True)  # counted as width(): Chinese output counts 3
+    omitted = len(text) - kept
     result = {
         "id": rid,
         "state": "finished" if done else "running",
         "command": subprocess.list2cmdline(job.argv),
-        "output": text[-max_chars:] if max_chars else "",
+        "output": text[len(text) - kept :],
         "cursor": len(out),
         "duration_ms": int((time.monotonic() - job.started) * 1000),
     }
     if omitted:
         result["omitted_chars"] = omitted
+    result["stderr_size"] = len(err)  # job_status matches patterns against what is new here too
     if done:
         result.update(_exit_fields(job, err))
         result["stderr"] = clip(err, max_chars // 2, keep="both")[0]
@@ -660,6 +772,8 @@ def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:
             result["timed_out"] = True
         if job.stopped:
             result["stopped"] = True
+    elif err:  # progress many programs print to stderr while they work (Codex, compilers, git)
+        result["stderr"] = clip(err, STDERR_TAIL_CHARS)[0]
     return result
 
 

@@ -66,6 +66,9 @@ class Rule:
     base: str | None = None  # the project folder of a project file; None for the global file
     command: str | None = None  # decision "command": a program decides (hooks.py), global file only
     label: str | None = None  # where a finding came from, when it is not a rule file (a hook)
+    # a `match` rule also refuses lines it cannot read (typed with editing keys...); winhand's own
+    # rules about one program do not, or they would refuse every such line in every session
+    blind: bool = True
 
     def summary(self) -> dict:
         out: dict = {"file": self.file, "rule": self.index, "on": list(self.on), "decision": self.decision}
@@ -207,9 +210,25 @@ def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
 
 
+_SEPARATORS = re.compile(r"([\\\\/]+)")
+
+
+def trim_components(path: str) -> str:
+    """The path Win32 really opens: without a \\\\?\\ prefix it drops trailing dots and spaces
+    from every component, so `desktop-apps.toml.` and `.env ` name `desktop-apps.toml` and `.env`."""
+    drive, rest = os.path.splitdrive(path)
+    parts = []
+    for part in _SEPARATORS.split(rest):
+        if part and not _SEPARATORS.fullmatch(part) and part not in (".", ".."):
+            part = part.rstrip(". ") or part
+        parts.append(part)
+    return drive + "".join(parts)
+
+
 def variants(path: str) -> list[str]:
     """Spellings of one path a rule must see: as given (without a \\\\?\\ prefix or an NTFS
-    stream suffix such as `::$DATA`) and with links, junctions and short names resolved."""
+    stream suffix such as `::$DATA`), as Windows opens it (trailing dots and spaces dropped) and
+    with links, junctions and short names resolved."""
     p = path
     if p.startswith(("\\\\?\\UNC\\", "\\\\.\\UNC\\")):
         p = "\\\\" + p[8:]
@@ -220,12 +239,17 @@ def variants(path: str) -> list[str]:
         if ":" in tail:
             p = os.path.join(head, tail.split(":", 1)[0])
     out = [p]
-    try:
-        real = os.path.realpath(p)
-    except (OSError, ValueError):
-        real = p
-    if _norm(real) != _norm(p):
-        out.append(real)
+    if os.name == "nt":
+        trimmed = trim_components(p)
+        if _norm(trimmed) != _norm(p):
+            out.append(trimmed)
+    for spelling in list(out):
+        try:
+            real = os.path.realpath(spelling)
+        except (OSError, ValueError):
+            real = spelling
+        if all(_norm(real) != _norm(o) for o in out):
+            out.append(real)
     return out
 
 
@@ -314,8 +338,12 @@ def matches(rule: Rule, action: Action) -> bool:
         return False
     if rule.base is not None and not any(_under(a, rule.base) for a in _anchors(action)):
         return False
-    if rule.match is not None and not action.opaque and not (action.text and rule.match.search(action.text)):
-        return False
+    if rule.match is not None:
+        if action.opaque:
+            if not rule.blind:
+                return False
+        elif not (action.text and rule.match.search(action.text)):
+            return False
     if rule.path and not any(
         _glob_match(v, g, rule.base) for p in action.paths for v in variants(p) for g in rule.path
     ):
@@ -338,11 +366,80 @@ class Verdict:
         )
 
 
+# ------------------------------------------------------------------ winhand's own rules
+
+BUILTIN = "winhand (built in)"
+_PROGRAM = r"\bharmonia(?:\.exe)?[\"']?\s+"
+_HARMONIA_FILES = r"\.harmonia[\\/]"  # the folder by its usual name, wherever the line puts it
+_HARMONIA_MANAGER = re.compile(rf"(?i){_PROGRAM}manager\b")
+_HARMONIA_ASK = re.compile(
+    rf"(?i){_PROGRAM}(?:export\b|var\s+list\b[^\n;&|]*--show\b|var\s+rm\b|logout\b|uninstall\b"
+    r"|shell\s+(?:uninstall|system-vars)\b|service\s+uninstall\b|update\s+(?:channel|auto)\b"
+    r"|env\s+(?:activate|deactivate|order)\b)"
+)
+_KEYS_REASON = (
+    "Harmonia 的数据目录：设备密钥能解开同步到这台电脑的全部密钥，只给 harmonia 命令行用。"
+    "需要密钥的程序用 harmonia exec 运行"
+)
+_STORE_REASON = (
+    "这台电脑的密钥库（secret_prompt 存的密钥）：程序用 run(secrets=[名字]) 拿到它们，"
+    "AI 不能读取或改写这个文件；新的密钥用 secret_prompt(message, key=名字) 让本人输入"
+)
+_builtin: dict[tuple[str, str], RuleFile] = {}
+
+
+def _spelled(path: str) -> str:
+    """This path in a command line, with either kind of slash."""
+    return r"[\\/]+".join(re.escape(part) for part in path.split("/") if part)
+
+
+def _files_named(folder: str) -> re.Pattern[str]:
+    """A command line naming Harmonia's folder: by its usual name, or by where HARMONIA_HOME puts it."""
+    return re.compile(rf"(?i){_HARMONIA_FILES}|{_spelled(folder)}(?:[\\/]|\b)")
+
+
+def _store_named(store: str) -> re.Pattern[str]:
+    """A command line naming the secret store: where it is, or as .winhand/secrets.env."""
+    return re.compile(rf"(?i){_spelled(store)}\b|\.winhand[\\/]+secrets\.env\b")
+
+
+def builtin_file() -> RuleFile:
+    """Limits winhand keeps whatever the owner's files say. The secret store (secret_store.py) is
+    written only through the masked dialog and read only into a program's environment. Harmonia
+    (harmonia.py): its data folder holds the device keys that decrypt every key synced here;
+    `harmonia manager` manages the whole account; some of its commands print keys in plain text or
+    change the setup, which Harmonia itself leaves to the person. They name only those files and
+    that program: nothing else is touched."""
+    from . import harmonia, secret_store
+
+    folder = os.path.abspath(str(harmonia.data_dir())).replace("\\", "/").rstrip("/")
+    store = os.path.abspath(str(secret_store.store_path())).replace("\\", "/")
+    if (folder, store) not in _builtin:
+        _builtin[(folder, store)] = RuleFile(
+            BUILTIN,
+            None,
+            [
+                Rule(BUILTIN, 5, ("read", "write", "edit", "delete", "move"), "deny", _STORE_REASON, path=(store,)),
+                Rule(BUILTIN, 6, ("command", "input"), "deny", _STORE_REASON, match=_store_named(store), blind=False),
+                Rule(BUILTIN, 1, ("read", "write", "edit", "delete", "move"), "deny", _KEYS_REASON,
+                     path=(folder + "/**",)),
+                Rule(BUILTIN, 2, ("command", "input"), "deny", _KEYS_REASON, match=_files_named(folder), blind=False),
+                Rule(BUILTIN, 3, ("command", "input"), "deny",
+                     "harmonia manager 能管理整个账号，只能由本人在自己的终端和浏览器里操作",
+                     match=_HARMONIA_MANAGER, blind=False),
+                Rule(BUILTIN, 4, ("command", "input"), "ask",
+                     "这条 harmonia 命令会以明文输出密钥，或者删除变量、改变 Harmonia 的设置",
+                     match=_HARMONIA_ASK, blind=False),
+            ],
+        )  # fmt: skip
+    return _builtin[(folder, store)]
+
+
 def judge(actions: list[Action], cache: dict | None = None) -> Verdict:
     verdict = Verdict()
     cache = {} if cache is None else cache  # one call looks each rule-file location up once
     for action in actions:
-        for rule_file in files_for(_anchors(action), cache):
+        for rule_file in [builtin_file(), *files_for(_anchors(action), cache)]:
             if rule_file.error:
                 if rule_file not in verdict.broken:
                     verdict.broken.append(rule_file)
@@ -357,7 +454,11 @@ def judge(actions: list[Action], cache: dict | None = None) -> Verdict:
 
 def rules_for(path: str | None) -> dict:
     """The rules that apply at a folder, for context(): summaries plus files that cannot be read."""
+    from . import harmonia, secret_store
+
     files = files_for([path] if path else [])
+    if harmonia.present() or secret_store.store_path().is_file():  # else nothing for them to protect
+        files = [builtin_file(), *files]
     out: dict = {"global_file": str(global_path()), "rules": [], "errors": []}
     for f in files:
         if f.error:
@@ -512,6 +613,11 @@ def _search_files(root: str, line: str, files_only: bool) -> list[str]:
     return out
 
 
+def _builtin_reaches(rule: Rule, folder: str) -> bool:
+    """Whether a built-in read rule can protect a file in this folder (it names one folder)."""
+    return any(_glob_match(v + "/x", g, None) for v in variants(folder) for g in rule.path)
+
+
 def _filter_search(result, args: dict):
     """fs_search on a folder reads every file below it: drop what the read rules keep from the AI."""
     import json
@@ -529,8 +635,12 @@ def _filter_search(result, args: dict):
     def read_rules_apply(folder: str) -> bool:
         # once per folder: a folder no read rule can reach lets its files through unjudged
         if folder not in folders:
-            found = files_for(variants(folder), cache)
-            folders[folder] = any(f.error or any("read" in r.on for r in f.rules) for f in found)
+            found = [builtin_file(), *files_for(variants(folder), cache)]
+            folders[folder] = any(
+                f.error
+                or any("read" in r.on and (f.path != BUILTIN or _builtin_reaches(r, folder)) for r in f.rules)
+                for f in found
+            )
         return folders[folder]
 
     def reachable(full: str) -> bool:

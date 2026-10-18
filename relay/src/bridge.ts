@@ -10,7 +10,8 @@ import {
 } from "./protocol";
 
 type Pending = {
-  socket: WebSocket;
+  /** The agent connection the answer comes on; null while it waits for the agent to resume it. */
+  socket: WebSocket | null;
   head: (response: Response) => void;
   fail: (message: string, status?: number) => void;
   writer?: WritableStreamDefaultWriter<Uint8Array>;
@@ -21,6 +22,10 @@ type Pending = {
   sse?: boolean;
   /** The bytes streamed so far end between two events. */
   between?: boolean;
+  /** Answer frames handled so far (the head is frame 0): where a resumed answer picks up. */
+  frames: number;
+  /** While orphaned: fails the call when the agent does not come back to resume it. */
+  orphaned?: ReturnType<typeof setTimeout>;
 };
 
 const HEAD_TIMEOUT_MS = 120_000;
@@ -111,20 +116,78 @@ export class Bridge extends DurableObject<Env> {
       return new Response("expected a WebSocket upgrade", { status: 426 });
     }
     // A newer connection from the agent replaces any stale one.
-    for (const old of this.ctx.getWebSockets("agent")) {
+    const old = this.ctx.getWebSockets("agent");
+    for (const socket of old) {
       try {
-        old.serializeAttachment({ ...(old.deserializeAttachment() as object | null), active: false });
-        old.close(4000, "replaced by a new agent connection");
+        socket.serializeAttachment({ ...(socket.deserializeAttachment() as object | null), active: false });
+        socket.close(4000, "replaced by a new agent connection");
       } catch {
         // already closed
       }
     }
-    this.failAll("winhand reconnected to the relay while this call was in flight; check history() before resending");
+    this.orphanOrFail(
+      old,
+      "winhand reconnected to the relay while this call was in flight; check history() before resending",
+    );
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1], ["agent"]);
     pair[1].serializeAttachment({ connectedAt: new Date().toISOString(), active: true });
+    // first frame on every connection: calls cut off by a drop can be resumed here
+    this.send(pair[1], { type: "welcome", resume: 1 });
     this.ctx.waitUntil(this.ctx.storage.delete("offlineSince"));
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** Whether the agent on this connection said it keeps calls across a drop (hello resume: 1). */
+  private resumes(socket: WebSocket): boolean {
+    return (socket.deserializeAttachment() as { resume?: number } | null)?.resume === 1;
+  }
+
+  /**
+   * The calls on these connections lost their way back. An agent that resumes keeps running them:
+   * they wait (the grace period) for it to come back and ask for the frames the relay missed.
+   * The others fail now, with `message`.
+   */
+  private orphanOrFail(sockets: WebSocket[], message: string) {
+    for (const [id, entry] of this.pending) {
+      if (!entry.socket || !sockets.includes(entry.socket)) continue;
+      if (!this.resumes(entry.socket)) {
+        if (entry.started) endStream(entry, message);
+        else entry.fail(message);
+        this.pending.delete(id);
+        continue;
+      }
+      entry.socket = null;
+      entry.orphaned = setTimeout(() => {
+        if (this.pending.get(id) !== entry || entry.socket) return;
+        if (entry.started) endStream(entry, message);
+        else entry.fail(message);
+        this.pending.delete(id);
+      }, this.graceMs());
+    }
+  }
+
+  /** A (re)connected agent listed the calls it still serves: pick each orphaned one up again. */
+  private resumeCalls(ws: WebSocket, listed: string[]) {
+    const still = new Set(listed);
+    for (const [id, entry] of this.pending) {
+      if (entry.socket) continue;
+      if (entry.orphaned !== undefined) clearTimeout(entry.orphaned);
+      entry.orphaned = undefined;
+      if (still.has(id)) {
+        entry.socket = ws;
+        this.send(ws, { type: "resume", id, from: entry.frames });
+      } else {
+        const message = "winhand on the PC lost this call while it was disconnected (it restarted?); check history() before resending";
+        if (entry.started) endStream(entry, message);
+        else entry.fail(message);
+        this.pending.delete(id);
+      }
+    }
+    // calls the relay no longer waits for (the caller gave up, or the relay restarted)
+    for (const id of still) {
+      if (!this.pending.has(id)) this.send(ws, { type: "cancel", id });
+    }
   }
 
   private send(socket: WebSocket, frame: RelayFrame) {
@@ -162,6 +225,7 @@ export class Bridge extends DurableObject<Env> {
       this.pending.set(id, {
         socket,
         started: false,
+        frames: 0,
         ids: rpc.ids,
         head: (r) => {
           clearTimeout(timer);
@@ -201,10 +265,14 @@ export class Bridge extends DurableObject<Env> {
     }
 
     request.signal?.addEventListener("abort", () => {
-      if (this.pending.has(id)) {
-        this.pending.get(id)?.writer?.close().catch(() => {});
+      const entry = this.pending.get(id);
+      if (entry) {
+        entry.writer?.close().catch(() => {});
+        if (entry.orphaned !== undefined) clearTimeout(entry.orphaned);
         this.pending.delete(id);
-        if (socket.readyState === WebSocket.OPEN) this.send(socket, { type: "cancel", id });
+        // the call may have moved to a newer connection; an orphaned one is cancelled on resume
+        const current = entry.socket;
+        if (current && current.readyState === WebSocket.OPEN) this.send(current, { type: "cancel", id });
       }
     });
     return response;
@@ -219,12 +287,15 @@ export class Bridge extends DurableObject<Env> {
       return;
     }
     if (frame.type === "hello") {
-      ws.serializeAttachment({ ...frame, ...(ws.deserializeAttachment() as object | null) });
+      const { pending, ...hello } = frame;
+      ws.serializeAttachment({ ...hello, ...(ws.deserializeAttachment() as object | null) });
+      this.resumeCalls(ws, this.resumes(ws) && Array.isArray(pending) ? pending.map(String) : []);
       this.wakeWaiters();
       return;
     }
     const entry = this.pending.get(frame.id);
     if (!entry || entry.socket !== ws) return;
+    entry.frames += 1;
     switch (frame.type) {
       case "head": {
         const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -244,11 +315,13 @@ export class Bridge extends DurableObject<Env> {
       case "end":
         await entry.writer?.close().catch(() => {});
         this.pending.delete(frame.id);
+        if (this.resumes(ws)) this.send(ws, { type: "ack", id: frame.id });
         break;
       case "error":
         if (entry.started) endStream(entry, frame.message);
         else entry.fail(frame.message);
         this.pending.delete(frame.id);
+        if (this.resumes(ws)) this.send(ws, { type: "ack", id: frame.id });
         break;
     }
   }
@@ -257,10 +330,10 @@ export class Bridge extends DurableObject<Env> {
     // A socket closed because a newer agent connection replaced it: the PC is not offline.
     // Only the calls sent down this socket fail; calls on the new one carry on.
     if (!this.replaced(ws)) await this.markOffline();
-    this.failAll(
+    this.orphanOrFail(
+      [ws],
       `winhand on the PC disconnected while this call was in flight (${code} ${reason}); ` +
         "check history() once it is back before resending",
-      ws,
     );
     try {
       ws.close(code, reason);
@@ -271,9 +344,9 @@ export class Bridge extends DurableObject<Env> {
 
   async webSocketError(ws: WebSocket): Promise<void> {
     if (!this.replaced(ws)) await this.markOffline();
-    this.failAll(
+    this.orphanOrFail(
+      [ws],
       "the connection to winhand on the PC failed while this call was in flight; check history() before resending",
-      ws,
     );
   }
 
@@ -290,14 +363,6 @@ export class Bridge extends DurableObject<Env> {
     }
   }
 
-  private failAll(message: string, socket?: WebSocket) {
-    for (const [id, entry] of this.pending) {
-      if (socket && entry.socket !== socket) continue;
-      if (entry.started) endStream(entry, message);
-      else entry.fail(message);
-      this.pending.delete(id);
-    }
-  }
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {

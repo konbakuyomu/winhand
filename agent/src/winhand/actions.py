@@ -197,11 +197,16 @@ def describe(
     if tool == "run":
         argv = [a.get("script") or a.get("command") or "", *(a.get("args") or [])]
         text = _join(argv).strip()
+        if a.get("script") and a.get("command"):  # the script runs under that program: judge both
+            text = f"{a['command']}\n{text}"
         if a.get("stdin"):  # what a shell or interpreter reads from stdin runs too
             text = f"{text}\n{a['stdin']}"
         return one("command", text=text, cwd=_abs(a.get("cwd")))
-    if tool == "job_start":
-        return one("command", text=a.get("command") or "", cwd=_abs(a.get("cwd")))
+    if tool == "job_start":  # a program run directly is judged with its arguments and stdin, as in run
+        text = _join([a.get("command") or "", *(a.get("args") or [])]).strip()
+        if a.get("stdin"):
+            text = f"{text}\n{a['stdin']}"
+        return one("command", text=text, cwd=_abs(a.get("cwd")))
     if tool == "remote_run":
         text = _join([a.get("script") or "", *(a.get("args") or [])]).strip()
         return one("command", text=text, host=a.get("host"))
@@ -215,6 +220,9 @@ def describe(
         return one("write", a.get("path"), expand_vars=True)
     if tool == "secret_prompt" and a.get("save_to"):
         return [Action("write", tool, (_abs(a.get("save_to"), vars_first=True),))]
+    if tool == "secret_prompt" and a.get("harmonia"):  # what winhand runs to store it (harmonia.py)
+        env, _, name = str(a["harmonia"]).rpartition("/")
+        return [Action("command", tool, text=f"harmonia var set {env} {name}")]
     if tool == "fs_edit":  # editing needs the content: a read rule covers it too
         return one("edit", a.get("path")) + one("read", a.get("path"))
     if tool == "fs_apply_patch":

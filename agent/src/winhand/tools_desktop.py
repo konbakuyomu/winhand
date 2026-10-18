@@ -22,7 +22,7 @@ from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import approvals, coalesce, desktop, jobs, media, proc, transfer, uia, winenv
+from . import approvals, coalesce, desktop, jobs, media, proc, secret_store, transfer, uia, winenv
 from . import ocr as screen_text
 from .secret_prompt import PromptUnavailable, ask_pick
 
@@ -32,15 +32,27 @@ MAX_JOB_WAIT_S = 40.0  # the reply must reach the client within its ~60 s limit
 JOB_POLL_S = 0.5
 
 
+def _new_text(status: dict, stderr_before: int | None) -> str:
+    """What a pattern is matched against: the new output, and stderr written during this wait."""
+    text = status.get("output") or ""
+    size, tail = status.get("stderr_size"), status.get("stderr") or ""
+    if stderr_before is not None and size is not None and size > stderr_before:
+        text += "\n" + tail[-(size - stderr_before) :]
+    return text
+
+
 async def wait_job(fetch, wait_s: float, regexes: list[re.Pattern[str]]) -> dict:
     """Poll a job's status until it is no longer running, its new output matches, or time is up."""
     began = time.monotonic()
     deadline = began + min(wait_s, MAX_JOB_WAIT_S)
+    stderr_before = None
     while True:
         status = await asyncio.to_thread(fetch)
         if status.get("error") or status.get("state") != "running":
             return status
-        output = status.get("output") or ""
+        if stderr_before is None:
+            stderr_before = status.get("stderr_size", 0)
+        output = _new_text(status, stderr_before)
         hit = next((r.pattern for r in regexes if r.search(output)), None)
         if hit is not None:
             return {**status, "matched": hit}
@@ -51,6 +63,65 @@ async def wait_job(fetch, wait_s: float, regexes: list[re.Pattern[str]]) -> dict
                 "note": "still running; call job_status again with since=cursor (and wait_s) to keep waiting",
             }
         await asyncio.sleep(JOB_POLL_S)
+
+
+MULTI_JOB_CHARS = 6_000  # output per job when several are waited on together
+
+
+def _is_run(job_id: str) -> bool:
+    """run-<n> is a `run` command that was still going when run answered; a background job may be
+    named run-something too (run-all-sim-1016122643), and is a job."""
+    return re.fullmatch(r"run-\d+", job_id) is not None
+
+
+def _job_fetch(job_id: str, since: int, limit: int) -> dict:
+    if _is_run(job_id):
+        return _errors(proc.run_status, job_id, since, limit)
+    return _errors(jobs.status, job_id, since, limit)
+
+
+async def wait_jobs(
+    ids: list[str], cursors: dict[str, int], limit: int, wait_s: float, regexes: list[re.Pattern[str]]
+) -> dict:
+    """Wait on several jobs at once: until one is no longer running, the new output of one matches,
+    or time is up. Every job's state and new output come back, keyed by id."""
+    began = time.monotonic()
+    deadline = began + min(wait_s, MAX_JOB_WAIT_S)
+    stderr_before: dict[str, int] = {}
+    while True:
+        statuses = {i: await asyncio.to_thread(_job_fetch, i, cursors[i], limit) for i in ids}
+        hit = None
+        for i, status in statuses.items():
+            if status.get("error") or status.get("state") != "running":
+                hit = {"id": i, "condition": "error" if status.get("error") else status.get("state")}
+                break
+            stderr_before.setdefault(i, status.get("stderr_size", 0))
+            text = _new_text(status, stderr_before[i])
+            pattern = next((r.pattern for r in regexes if r.search(text)), None)
+            if pattern is not None:
+                hit = {"id": i, "condition": "pattern", "pattern": pattern}
+                break
+        if hit or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(JOB_POLL_S)
+    running = [i for i, st in statuses.items() if st.get("state") == "running"]
+    out: dict[str, Any] = {
+        "jobs": statuses,
+        "cursors": {i: st.get("cursor", cursors[i]) for i, st in statuses.items()},
+        "running": running,
+    }
+    if hit:
+        out["hit"] = hit
+    else:
+        out["waited_s"] = round(time.monotonic() - began, 1)
+    done = [i for i in ids if i not in running]
+    out["next"] = (
+        f"call again with since=cursors{' and without the jobs that ended (' + ', '.join(done) + ')' if done else ''}"
+        " to keep waiting"
+        if running
+        else "every job has ended"
+    )
+    return out
 
 
 def _facts(data: dict) -> TextContent:
@@ -188,6 +259,9 @@ def match_controls(
     found = [e for e in elements if fits(e)]
     exact = [e for e in found if name and e.get("name") == name]
     return exact or found
+
+
+_CANDIDATE = ("name", "type", "automation_id", "value", "enabled", "rect")
 
 
 def _public(element: dict) -> dict:
@@ -459,7 +533,13 @@ def register(mcp: FastMCP) -> None:
         region: Annotated[
             list[int] | None, Field(description="[left, top, width, height] in screen pixels")
         ] = None,
-        max_side: Annotated[int, Field(description="Longest edge of the returned image")] = media.MAX_SIDE,
+        max_side: Annotated[
+            int,
+            Field(
+                description="Longest edge of the returned image; it also stays under about 1.15 MP "
+                "(more for a larger max_side), the most a model takes without scaling it again"
+            ),
+        ] = media.MAX_SIDE,
         wait: Annotated[
             str | None,
             Field(
@@ -566,7 +646,13 @@ def register(mcp: FastMCP) -> None:
         name: Annotated[str | None, Field(description="Control name (exact, wildcard or part)")] = None,
         automation_id: str | None = None,
         control_type: Annotated[str | None, Field(description="Button, Edit, CheckBox, ListItem ...")] = None,
-        index: Annotated[int, Field(ge=0, description="Which match, when several controls match")] = 0,
+        index: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                description="Which match, when several controls match (they are listed, nothing is done)",
+            ),
+        ] = None,
         value: Annotated[str | None, Field(description="For set_value")] = None,
         filter: Annotated[
             str | None, Field(description="For inspect: only controls containing this text")
@@ -631,9 +717,21 @@ def register(mcp: FastMCP) -> None:
                     f"no control matches name={name!r} automation_id={automation_id!r} "
                     f"type={control_type!r}; use action='inspect' to see the controls"
                 )
-            if index >= len(found):
-                raise desktop.DesktopError(f"only {len(found)} controls match; index {index} is out of range")
-            target = found[index]
+            if index is None and len(found) > 1:
+                return {
+                    "error": f"{len(found)} controls match; nothing was done. Pass index (the place in "
+                    "this list, from 0), automation_id or control_type",
+                    "matches": [
+                        {"index": i, **{k: e.get(k) for k in _CANDIDATE if e.get(k) not in (None, "")}}
+                        for i, e in enumerate(found[:20])
+                    ],
+                }
+            chosen = index or 0
+            if chosen >= len(found):
+                raise desktop.DesktopError(
+                    f"only {len(found)} controls match; index {chosen} is out of range"
+                )
+            target = found[chosen]
             if target.get("enabled") is False:
                 raise desktop.DesktopError(f"the control is disabled right now: {_public(target)}")
             # operating the program: the person's approval first (approvals.py), once the control is known
@@ -693,6 +791,14 @@ def register(mcp: FastMCP) -> None:
                     raise
                 except desktop.DesktopError:
                     pass  # the control may be visible anyway (topmost, or already in front)
+                if w.get("pid") and desktop.pid_at(cx, cy) != w["pid"]:
+                    # a real click lands on whatever is there: another program, or what the
+                    # control scrolled away from
+                    hidden = " (UI Automation reports it out of sight)" if target.get("offscreen") else ""
+                    raise desktop.DesktopError(
+                        f"another window is at ({cx}, {cy}), where the control is{hidden}; nothing was "
+                        "clicked. Bring the window to the front or scroll to the control, then try again"
+                    )
                 desktop.input_action("click", cx, cy, coordinates="screen")
                 done = f"clicked at ({cx}, {cy})"
             if not done:
@@ -796,7 +902,14 @@ def register(mcp: FastMCP) -> None:
             list[int] | None, Field(description="[left, top, width, height] in screen pixels")
         ] = None,
         state: Annotated[str, Field(description="For wait: exists (default) | gone")] = "exists",
-        index: Annotated[int, Field(ge=0, description="Which match: top to bottom, left to right")] = 0,
+        index: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                description="Which match, top to bottom, left to right; needed when the text is in "
+                "several places (they are listed, nothing is clicked)",
+            ),
+        ] = None,
         language: Annotated[
             str | None,
             Field(description="OCR language (en-US, zh-Hans-CN, ja ...); default: the user's plus English"),
@@ -849,22 +962,64 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool
     async def job_start(
-        command: Annotated[str, Field(description="PowerShell command(s) to run")],
+        command: Annotated[
+            str, Field(description="PowerShell command(s) to run; with `args`, the program to run directly")
+        ],
+        args: Annotated[
+            list[str] | None,
+            Field(
+                description="Run `command` as a program with these arguments (no PowerShell parsing; [] for none). "
+                "Its stdout and stderr are kept as written: job_status shows both while it runs"
+            ),
+        ] = None,
+        stdin: Annotated[
+            str | None,
+            Field(description="With args: text given to the program on stdin, as UTF-8 (a Codex brief ...)"),
+        ] = None,
         cwd: str | None = None,
         name: str | None = None,
         elevated: Annotated[
             bool, Field(description="Run as administrator; the person must approve a UAC prompt")
         ] = False,
+        shell: Annotated[
+            str | None,
+            Field(
+                description="For a command: powershell (Windows PowerShell 5.1, default) | pwsh (PowerShell 7)"
+            ),
+        ] = None,
+        secrets: Annotated[
+            list[str] | None,
+            Field(
+                description="Names in this machine's secret store: given to the job as environment "
+                "variables, you never see the values (not for elevated jobs)"
+            ),
+        ] = None,
     ) -> dict:
         """Run a command in the background, independent of winhand: it keeps running even if
         winhand restarts or is reinstalled, and its output and exit code stay available via
-        job_status. Use for long work, for anything that replaces winhand, and for admin tasks."""
-        return await asyncio.to_thread(_errors, jobs.start, command, cwd, name, elevated)
+        job_status. Use for long work, for anything that replaces winhand, and for admin tasks.
+        A program fed text on stdin (Codex: command='codex', args=['exec', '-'], stdin=brief) is
+        best run with args + stdin: the text and its output never pass through a PowerShell pipe."""
+
+        def work():
+            try:
+                env = secret_store.load(list(secrets or []))
+            except secret_store.SecretError as exc:
+                return {"error": str(exc)}
+            return jobs.start(command, cwd, name, elevated, args, stdin, shell, env or None)
+
+        return await asyncio.to_thread(_errors, work)
 
     @mcp.tool
     async def job_status(
-        id: Annotated[str | None, Field(description="Job id; omit to list recent jobs")] = None,
-        since: Annotated[int, Field(description="Output cursor from the previous call")] = 0,
+        id: Annotated[
+            str | list[str] | None,
+            Field(description="Job id, or a list of ids to wait on together; omit to list recent jobs"),
+        ] = None,
+        since: Annotated[
+            int | dict[str, int],
+            Field(description="Output cursor from the previous call ({id: cursor} for a list of ids)"),
+        ] = 0,
         wait_s: Annotated[
             float,
             Field(
@@ -882,15 +1037,21 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """State (running/finished/vanished), exit code and output of a background job or of a `run`
         that was still going (run-N). With wait_s it blocks until the job ends, new output matches
-        `patterns`, or the wait runs out (then call again with since=cursor)."""
+        `patterns`, or the wait runs out (then call again with since=cursor). Several ids wait for
+        whichever job finishes or matches first, and answer with every job's state and new output."""
         if id is None:
             return await asyncio.to_thread(_errors, lambda: {"jobs": jobs.list_jobs()})
+        if isinstance(id, list):
+            ids = list(dict.fromkeys(str(i) for i in id))
+            if len(ids) == 1:
+                id = ids[0]
+            else:
+                return await _job_statuses(ids, since, wait_s, patterns, tail)
+        start = since.get(id, 0) if isinstance(since, dict) else since
         limit = tail or 20_000
 
         def fetch() -> dict:
-            if id.startswith("run-"):  # a `run` command that was still going when run answered
-                return _errors(proc.run_status, id, since, limit)
-            return _errors(jobs.status, id, since, limit)
+            return _job_fetch(id, start, limit)
 
         if wait_s <= 0:
             return await asyncio.to_thread(fetch)
@@ -901,16 +1062,33 @@ def register(mcp: FastMCP) -> None:
         key = (
             "job_status",
             id,
-            since,
+            start,
             round(min(wait_s, MAX_JOB_WAIT_S), 1),
             coalesce.freeze(patterns),
             limit,
         )
         return await coalesce.shared(key, lambda: wait_job(fetch, wait_s, regexes))
 
+    async def _job_statuses(ids, since, wait_s, patterns, tail) -> dict:
+        cursors = {i: (since.get(i, 0) if isinstance(since, dict) else since) for i in ids}
+        limit = tail or MULTI_JOB_CHARS
+        try:
+            regexes = [re.compile(p, re.MULTILINE) for p in patterns or []]
+        except re.error as exc:
+            return {"error": f"invalid regex: {exc}"}
+        key = (
+            "job_statuses",
+            tuple(ids),
+            coalesce.freeze(cursors),
+            round(min(wait_s, MAX_JOB_WAIT_S), 1),
+            coalesce.freeze(patterns),
+            limit,
+        )
+        return await coalesce.shared(key, lambda: wait_jobs(ids, cursors, limit, wait_s, regexes))
+
     @mcp.tool
     async def job_stop(id: str) -> dict:
         """Stop a running background job (and its child processes)."""
-        if id.startswith("run-"):
+        if _is_run(id):
             return await asyncio.to_thread(_errors, proc.run_stop, id)
         return await asyncio.to_thread(_errors, jobs.stop, id)

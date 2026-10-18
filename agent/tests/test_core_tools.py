@@ -53,7 +53,8 @@ def test_run_python_script_with_args():
 
 
 def test_run_script_errors_are_explained():
-    assert "not both" in proc.run("echo hi", script="echo hi")["error"]
+    assert "is not one" in proc.run("echo hi", script="echo hi")["error"]  # not an interpreter
+    assert "not both" in proc.run(sys.executable, script="print(1)", shell="python")["error"]
     assert "shell must be" in proc.run(script="x", shell="fish")["error"]
     assert "give command" in proc.run()["error"]
 
@@ -106,7 +107,7 @@ def test_adjust_argv_fixes_python_isolation_and_powershell_encoding():
     assert proc.adjust_argv(["python", "-Ic", "print(1)"])[0][1:3] == ["-X", "utf8"]
     assert proc.adjust_argv(["python", "t.py", "-I"])[0] == ["python", "t.py", "-I"]
     argv, _ = proc.adjust_argv([r"C:\x\powershell.exe", "-NoProfile", "-Command", "Get-Date"])
-    assert argv[3].startswith("[Console]::OutputEncoding") and argv[3].endswith("; Get-Date")
+    assert argv[3] == f"{winenv._PWSH_UTF8}; Get-Date" and "UTF8Encoding $false" in argv[3]  # no BOM
     with pytest.raises(ValueError, match="line breaks"):
         proc.adjust_argv([r"C:\mise\shims\comet.cmd", "next", "line one\nline two"])
 
@@ -206,6 +207,66 @@ async def test_history_shows_what_ran():
         assert calls[1]["exit_code"] == 7 and calls[1]["status"] == "ok"
         only_run = (await client.call_tool("history", {"tool": "run"})).structured_content["calls"]
         assert len(only_run) == 1
+
+
+async def test_history_names_each_calls_client_and_marks_the_callers_own(monkeypatch):
+    from types import SimpleNamespace
+
+    from winhand import history
+
+    def ctx(session):
+        request = SimpleNamespace(headers={"mcp-session-id": session} if session else {})
+        info = SimpleNamespace(name="claude-ai", version="0.1.0")
+        return SimpleNamespace(
+            request_context=SimpleNamespace(request=request),
+            session=SimpleNamespace(client_params=SimpleNamespace(client_info=info)),
+        )
+
+    assert history.caller(ctx("s1")) == ("s1", "claude-ai 0.1.0")
+    # the newer protocol has no sessions: no id, rather than one made up for each request
+    assert history.caller(ctx(None)) == (None, "claude-ai 0.1.0")
+    assert history.caller(None) == (None, None)
+    recent = history.RecentCalls()
+    for n, (session, path) in enumerate([("s1", "a"), ("s2", "b"), (None, "c")]):
+        recent.entries.append({"n": n, "tool": "fs_stat", "args": {"path": path}, "_session": session})
+    listed = recent.list(5, session="s1")
+    assert [(c["args"]["path"], c.get("this_session")) for c in listed] == [
+        ("c", None),
+        ("b", False),
+        ("a", True),
+    ]
+    assert not any("_session" in c for c in listed) and "this_session" not in recent.list(5)[0]
+    async with Client(build_server(Config())) as client:
+        await client.call_tool("fs_stat", {"path": "."})
+        calls = (await client.call_tool("history", {"limit": 5})).structured_content["calls"]
+    assert calls[0]["client"]  # the in-process test client names itself too
+
+
+async def test_history_after_a_restart_lists_what_ran_before_it(winhand_home):
+    import json as _json
+
+    log = winhand_home / "activity" / f"{time.strftime('%Y-%m-%d')}.jsonl"
+    log.parent.mkdir(parents=True)
+    before = time.time() - 60
+    rows = [
+        {"id": "a", "t": before, "kind": "tool", "title": "run", "args": {"command": "git push"},
+         "status": "ok", "summary": "exit_code=0", "duration_ms": 900},
+        {"id": "b", "t": before + 1, "kind": "connection", "title": "离线", "status": "offline"},
+        {"id": "c", "t": time.time() + 3600, "kind": "tool", "title": "fs_stat", "status": "ok"},
+    ]  # fmt: skip
+    log.write_text("".join(_json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    async with Client(build_server(Config())) as client:
+        await client.call_tool("fs_stat", {"path": "."})
+        out = (await client.call_tool("history", {"limit": 5})).structured_content
+    # this run's call first; then the one logged before the restart (not the later or non-tool rows)
+    assert [(c["tool"], c.get("before_restart", False)) for c in out["calls"]] == [
+        ("fs_stat", False),
+        ("run", True),
+    ]
+    assert out["calls"][1]["args"] == {"command": "git push"} and "run ids are gone" in out["restarted"]
+    async with Client(build_server(Config())) as client:
+        only = (await client.call_tool("history", {"tool": "fs_read"})).structured_content
+    assert only["calls"] == [] and "restarted" not in only
 
 
 # ------------------------------------------------------------------ files: read/write/edit
@@ -337,10 +398,11 @@ def test_fs_search_retries_with_pcre2_and_keeps_partial_results(tmp_path, monkey
         tmp_path / "bin",
         "rg",
         "import sys, time\n"
+        "assert '--null' in sys.argv\n"  # paths come NUL-terminated, apart from the line text
         "if '--pcre2' in sys.argv:\n"
-        "    print(sys.argv[-1] + '/x.txt:1:found'); raise SystemExit(0)\n"
+        "    print(sys.argv[-1] + '/x.txt\\x001:found'); raise SystemExit(0)\n"
         "if 'slow' in sys.argv:\n"
-        "    print(sys.argv[-1] + '/y.txt:1:early', flush=True); time.sleep(30)\n"
+        "    print(sys.argv[-1] + '/y.txt\\x001:early', flush=True); time.sleep(30)\n"
         "sys.stderr.write('regex parse error: look-around, including look-ahead and look-behind, is not supported')\n"
         "raise SystemExit(2)\n",
     )

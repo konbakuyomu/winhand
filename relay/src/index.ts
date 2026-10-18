@@ -1,4 +1,10 @@
-import { AuthorizationError, type AuthRequest, OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import {
+  AuthorizationError,
+  type AuthRequest,
+  type GrantSummary,
+  type OAuthHelpers,
+  OAuthProvider,
+} from "@cloudflare/workers-oauth-provider";
 import { Bridge } from "./bridge";
 import { HOOK_PATH, hookRequest } from "./hook";
 import { consentPage, statusPage } from "./pages";
@@ -6,8 +12,14 @@ import { consentPage, statusPage } from "./pages";
 export { Bridge };
 
 const SCOPE = "winhand";
+const OWNER = "owner";
 const MAX_FAILURES = 5;
 const FAILURE_WINDOW_S = 15 * 60;
+// Every sign-in is its own grant, so several Claude accounts and sessions stay connected at once.
+// One that goes unused this long expires (each token refresh pushes it out again), and only the
+// newest few are kept.
+const GRANT_IDLE_S = 30 * 24 * 60 * 60;
+const MAX_GRANTS = 20;
 // One-time file links (/t/<token>) are capabilities checked by the agent; an IP that keeps
 // presenting unknown tokens is turned away for a while.
 const TRANSFER_PATH = /^\/t\/([A-Za-z0-9_-]{43})$/;
@@ -87,30 +99,83 @@ async function authorize(request: Request, env: Env): Promise<Response> {
       const denied = await oauth.denyConsent(request, handle);
       return new Response(null, { status: 302, headers: denied.headers });
     }
-    const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
-    const failKey = `winhand:fail:${ip}`;
-    const failures = Number((await env.OAUTH_KV.get(failKey)) ?? "0");
-    if (failures >= MAX_FAILURES) {
-      return html(consentPage({ handle, client, redirect, error: "尝试次数过多，请 15 分钟后再试。" }), 429);
-    }
-    if (!(await secretEquals(String(form.get("passphrase") ?? ""), env.OWNER_PASSPHRASE))) {
-      await env.OAUTH_KV.put(failKey, String(failures + 1), { expirationTtl: FAILURE_WINDOW_S });
-      return html(consentPage({ handle, client, redirect, error: "口令不对。" }), 401);
-    }
+    const refused = await checkPassphrase(request, env, String(form.get("passphrase") ?? ""));
+    if (refused) return html(consentPage({ handle, client, redirect, error: refused.error }), refused.status);
     const approved = await oauth.approveConsent(request, handle, { scope: [SCOPE] });
     const { redirectTo } = await oauth.completeAuthorization({
       request: approved.request,
-      userId: "owner",
+      userId: OWNER,
       metadata: { client },
       scope: [SCOPE],
-      props: { user: "owner" },
+      props: { user: OWNER },
+      // claude.ai signs every account in as the same client (one metadata document, one redirect
+      // URI): replacing that client's earlier grants would sign the other accounts out.
+      revokeExistingGrants: false,
     });
+    try {
+      const { failed } = await revokeOldGrants(oauth, MAX_GRANTS);
+      if (failed) console.warn(`could not trim ${failed} old sign-ins`); // the next sign-in tries again
+    } catch (error) {
+      console.warn("could not trim old sign-ins:", error); // the next sign-in tries again
+    }
     const headers = new Headers(approved.headers);
     headers.set("Location", redirectTo);
     return new Response(null, { status: 302, headers });
   } catch (error) {
     return authError(error);
   }
+}
+
+/** Why a passphrase is refused (counted per IP, as on the consent page), or null when it is right. */
+async function checkPassphrase(
+  request: Request,
+  env: Env,
+  given: string,
+): Promise<{ error: string; status: number } | null> {
+  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const failKey = `winhand:fail:${ip}`;
+  const failures = Number((await env.OAUTH_KV.get(failKey)) ?? "0");
+  if (failures >= MAX_FAILURES) return { error: "尝试次数过多，请 15 分钟后再试。", status: 429 };
+  if (await secretEquals(given, env.OWNER_PASSPHRASE)) return null;
+  await env.OAUTH_KV.put(failKey, String(failures + 1), { expirationTtl: FAILURE_WINDOW_S });
+  return { error: "口令不对。", status: 401 };
+}
+
+async function grants(oauth: OAuthHelpers): Promise<GrantSummary[]> {
+  const all: GrantSummary[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await oauth.listUserGrants(OWNER, { cursor, limit: 1000 });
+    all.push(...page.items);
+    cursor = page.cursor;
+  } while (cursor);
+  return all;
+}
+
+/** Keep the newest `keep` sign-ins and revoke the rest; counts the revocations that went through and failed. */
+async function revokeOldGrants(oauth: OAuthHelpers, keep: number): Promise<{ revoked: number; failed: number }> {
+  const old = (await grants(oauth)).sort((a, b) => b.createdAt - a.createdAt).slice(keep);
+  const results = await Promise.allSettled(old.map((grant) => oauth.revokeGrant(grant.id, OWNER)));
+  const failed = results.filter((result) => result.status === "rejected").length;
+  return { revoked: old.length - failed, failed };
+}
+
+async function home(request: Request, env: Env, notice?: { text: string; error?: boolean }, status = 200) {
+  const url = new URL(request.url);
+  const agent = (await (await bridge(env).fetch("https://bridge/status")).json()) as Record<string, unknown>;
+  const signedIn = await grants(env.OAUTH_PROVIDER).then((all) => all.length, () => null);
+  return html(statusPage(agent, `${url.origin}/mcp`, { signedIn, notice }), status);
+}
+
+/** The owner signs every client out (a leaked or forgotten sign-in); they sign in again. */
+async function signOutAll(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return Response.redirect(new URL("/", request.url).href, 303);
+  const form = await request.formData();
+  const refused = await checkPassphrase(request, env, String(form.get("passphrase") ?? ""));
+  if (refused) return home(request, env, { text: refused.error, error: true }, refused.status);
+  const { revoked, failed } = await revokeOldGrants(env.OAUTH_PROVIDER, 0);
+  if (failed) return home(request, env, { text: `已退出 ${revoked} 个登录，${failed} 个没退出成功，请再试一次。`, error: true }, 500);
+  return home(request, env, { text: `已退出 ${revoked} 个登录。各处再用时，重新输入主人口令登录。` });
 }
 
 function authError(error: unknown): Response {
@@ -148,10 +213,8 @@ const defaultHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/authorize") return authorize(request, env);
-    if (url.pathname === "/") {
-      const status = (await (await bridge(env).fetch("https://bridge/status")).json()) as Record<string, unknown>;
-      return html(statusPage(status, `${url.origin}/mcp`));
-    }
+    if (url.pathname === "/signout") return signOutAll(request, env);
+    if (url.pathname === "/") return home(request, env);
     return new Response("not found", { status: 404 });
   },
 };
@@ -172,6 +235,8 @@ function getProvider(origin: string): OAuthProvider<Env> {
       scopesSupported: [SCOPE],
       clientIdMetadataDocumentEnabled: true,
       accessTokenTTL: 3600,
+      refreshTokenTTL: GRANT_IDLE_S,
+      refreshTokenIdleTTL: GRANT_IDLE_S,
       resourceMetadata: {
         resource: `${origin}/mcp`,
         authorization_servers: [origin],

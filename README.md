@@ -28,7 +28,7 @@ winhand 把这些都当作**会话**，用同一套模型管理：
 | 真终端 | Windows 用 ConPTY（pywinpty），其他平台用 openpty。程序以为有人在屏幕前，所以提示符、颜色、密码提示、全屏界面都和人工操作时一模一样 |
 | 多种传输 | `pty`（默认）、`pipe`（普通子进程）、`serial`（COM 口，也支持 pyserial 的 URL 写法）、`tcp`（gdbserver 端口、RTT、OpenOCD 4444 端口、QEMU monitor，telnet 协商会自动处理） |
 | 状态推断 | 每次调用都返回 `state`、`reason`（判断依据）和 `next`（下一步建议）。状态分为：<br>`running`：正在输出<br>`awaiting_input`：提示符、确认问题或分页器在等输入<br>`needs_user`：要密码、验证码或浏览器登录，必须由人来处理<br>`idle`：安静但没有提示符<br>`blocked`：长时间无响应<br>`exited`：已退出 |
-| 通用等待 | `session_wait` 可以同时设多个条件（正则、状态、静默、屏幕稳定、输出量），并且能**跨多个会话同时等**。遇到 `needs_user` 或程序退出，一定会立刻返回。单次最多等 45 秒，给中转和客户端返回留出余量；超时不算失败，再调用一次就能接着等 |
+| 通用等待 | `session_wait` 可以同时设多个条件（正则、状态、静默、屏幕稳定、输出量），并且能**跨多个会话同时等**。遇到 `needs_user` 或程序退出，一定会立刻返回。单次最多等 40 秒，给中转和客户端返回留出余量；超时不算失败，再调用一次就能接着等 |
 | 虚拟屏幕 | `session_screen` 返回整屏文字、光标位置、反色（选中）行，menuconfig、htop、安装向导都能“看见” |
 | 游标读取 | 输出按绝对位置编号，读过的内容不会重复返回，也不会漏读；大段输出会截断并告诉你怎么翻页；完整日志保存在 `~/.winhand/logs` |
 | 自动应答 | 可以配置“看到某个提示就自动回答”，比如分页器、`Quit anyway? (y or n)`。永远不会自动回答密码 |
@@ -95,13 +95,22 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 最后在 claude.ai 的“设置 → 连接器 → 添加自定义连接器”里填入 `https://mcp.你的域名/mcp`，完成授权后，**新开一个会话**即可使用。打开 `https://mcp.你的域名/` 能看到电脑是否在线。
 
+多个 Claude 账号、多个会话可以同时连接这台电脑。每次输口令授权都是一个独立的登录，新登录不会让别处掉线：
+
+- 30 天没用过的登录会自动失效，再用时重新输一次口令；一直在用的登录不会过期。
+- 最多保留最新的 20 个登录，超出时作废最早的。
+- 打开 `https://mcp.你的域名/` 能看到现在有几个登录。在那里输入主人口令，可以一次退出所有登录（比如怀疑某个登录泄露了）；之后各处要重新授权。
+
 安全设计：
 
-- 授权页口令用常量时间比较；同一 IP 连续输错 5 次锁定 15 分钟。
-- 设备令牌只保存在 Worker secret 里。
+- 授权页口令用常量时间比较；同一 IP 连续输错 5 次锁定 15 分钟。状态页“退出所有登录”的口令和授权页共用这个计数。
+- 设备令牌在中转一侧只保存在 Worker secret 里，电脑一侧在 `~/.winhand/config.toml`；winhand 返回给模型的任何内容里它都会被遮挡（见[输出脱敏](#输出脱敏)）。
+- 电脑为隧道在 127.0.0.1 上开的端口只认隧道：每次启动随机生成一个口令，隧道转发的请求都带着它，本机其他程序或网页（DNS rebinding）连上这个端口也调不了工具；Host/Origin 不对的请求也会被拒绝。
+- 状态页谁都能打开，所以只显示电脑在不在线和 winhand 版本，不显示电脑名和 Windows 版本。
 - OAuth token 由中转校验，不会转发给电脑。
 - 授权页有防 CSRF 的一次性 handle 和绑定 cookie，并禁止被嵌入 iframe。
 - 电脑短暂掉线（winhand 重启或升级、网络切换）时，请求会先等它重连，默认最多 20 秒（变量 `AGENT_GRACE_S`），之后才报错。报错是带同一请求 id 的 JSON-RPC 错误，写明离线多久和可能原因，客户端会原样交给模型。
+- 电脑和中转之间的连接断一下（winhand 没重启）时，正在执行的调用不会丢：中转按帧记着已经收到多少，电脑重连后从断开处接着发，客户端那边看到的是一次完整的回复。电脑最多替断开的调用保留 60 秒、单个调用 8 MB 的回复。
 - 一次性文件链接 `https://mcp.你的域名/t/<令牌>` 不走 OAuth，靠令牌本身授权：
   - 令牌是 256 位随机数，只能用一次，默认 10 分钟内有效，最长 30 分钟；
   - 目标路径和大小上限在签发时就固定了，上传可以要求 sha256 一致；
@@ -121,8 +130,8 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 分组 | 工具 |
 |---|---|
 | 会话 | `session_start` `session_send` `session_wait` `session_read` `session_screen` `session_list` `session_stop` `session_resize` `session_prompt_user` `profile_list` |
-| 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值 |
-| 一次性命令和进程 | `run`（约 45 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`remote_run`（经本机的 ssh 配置在另一台机器上跑脚本）`proc_list` `proc_kill` `sys_info` |
+| 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值。只给 `key`（例如 `CLOUDFLARE_API_TOKEN`）时存进本机密钥库 `~/.winhand/secrets.env`，之后 `run`、`job_start` 用 `secrets=['CLOUDFLARE_API_TOKEN']` 把它作为环境变量交给程序，以后的会话也能用，不用再建新密钥。密钥库在结果里一律遮挡（重启后也是），AI 读不到也改不了 |
+| 一次性命令和进程 | `run`（约 40 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`remote_run`（经本机的 ssh 配置在另一台机器上跑脚本）`proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
 | 桌面 | `screenshot`（`wait` 等画面变化或停止变化）`window` `input` `ui` `ocr`（认屏幕上的字）`clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
@@ -131,11 +140,15 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 技能和本机 MCP | `skill(name)`：取一个技能的 SKILL.md 和文件清单（相当于 Claude Code 的 Skill 工具）；`mcp_tools` 列出本机 MCP 服务和它们的工具，`mcp_call` 调用其中的工具。见[本机的其他 MCP 服务](#本机的其他-mcp-服务) |
 | 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
 
-`run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义；只给 `command` 时整行交给 PowerShell 执行。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
+`run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义（解释器不在这几种里时，把它写在 `command`，例如 `run(command=r'.venv\Scripts\python.exe', script=...)`、`command='node'`）；只给 `command` 时整行交给 PowerShell 执行。PowerShell 的输出和管道统一是不带 BOM 的 UTF-8，Windows PowerShell 5.1 也一样，中文不会变成问号，传给原生程序的文本开头也不会多出 BOM。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
 
-`job_status` 的 `wait_s`（最多 40 秒）和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容。`fs_op` 删除默认进回收站。
+`job_status` 的 `wait_s`（最多 40 秒）和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容。`fs_op` 删除默认进回收站。
 
-截图和图片按大小预算编码（PNG，过大时改用 JPEG 并逐步缩小），保证能通过客户端的结果大小限制；原始分辨率的截图同时保存在本机（结果里的 `original_file`），需要看清细节时用 `fs_read` 加 `region` 放大那一块。
+模型常按 Claude Code 内置工具的习惯传参（`file_path`、`old_string`/`new_string`、`-A`/`-B`/`-C`、`head_limit`、按毫秒给的 `timeout` 等）。winhand 把这些换成自己的参数名再执行，结果里用 `args_note` 说明换了什么；认不出的参数，报错时列出这个工具真正的参数。路径里的 `%USERPROFILE%`、`$env:LOCALAPPDATA`、开头的 `~` 都会展开。
+
+单次结果有大小上限，按 UTF-8 字节计，约 4 万字节（一个中文字算 3 字节，接近它的 token 成本）。`fs_read`、`fs_list`、`fs_search`、`run`、`job_status` 和会话输出到上限就停，并说明从哪里接着读。以前一次能返回 6 万字左右，中文或密集代码会超过 Claude Code 单个结果 2.5 万 token 的上限，整条结果作废。
+
+截图和图片按大小预算编码（PNG，过大时改用 JPEG 并逐步缩小），保证能通过客户端的结果大小限制；长边不超过 1568 像素、总共不超过约 115 万像素，这是 Claude 不再自行缩小的上限，按截图像素点击才不会偏（以前 1920×1080 的屏幕发出去是 1568×882，会被再缩一次）；原始分辨率的截图同时保存在本机（结果里的 `original_file`），需要看清细节时用 `fs_read` 加 `region` 放大那一块。
 
 需要看界面或确认某个程序、对话框、安装程序的状态时，模型应自己调用 `screenshot`，不要让人截图；要点击时优先用 `ui`。`ui(action="wait")` 可以一直等到某个控件出现、消失、变为可用或显示某个值（比如安装程序的"下一步"按钮变为可点），`window(action="wait")` 等某个窗口出现或关闭，最多等 40 秒。按进程名选窗口时，优先选该程序的主窗口，不会选中它的提示框或弹出菜单。
 
@@ -153,6 +166,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
    - `ocr(action="wait", text=...)` 等文字出现，`state="gone"` 时等它消失；
    - 查找不区分大小写、全角和半角，忽略空格；
    - 没有完全匹配时，`similar` 给出 OCR 实际读成的相近文字，不会点击；
+   - 同一段文字出现在好几处、又没给 `index` 时，列出各处位置，不点击；只有一处独占一行（像按钮）时点那一处。`ui` 遇到多个同名控件也一样，列出候选让模型指定 `index` 或 `automation_id`；
 5. **坐标点击**：最后才用，每次点击后截图核对。
 
 `screenshot(wait="change")` 等画面和上一次截图相比有变化再返回；`wait="stable"` 等画面停止变化 `stable_ms` 后再返回。这两种等待都可以代替固定的睡眠，文字光标闪烁不算变化。
@@ -228,9 +242,35 @@ files = ['%LOCALAPPDATA%\vps-fleet\secrets\*.env']   # 这些文件里 KEY=VALUE
 ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 ```
 
-`secret_prompt` 收下的值也会自动遮挡。为了防止把占位符写回文件、冲掉真实值，`fs_write`、`fs_edit`、`fs_apply_patch` 和 `run` 会拒绝含有 `«redacted:` 的内容。本机其他 MCP 服务（`/mcp/<名称>`）不经过脱敏。
+不用配置也会遮挡的：
 
-短暂断网后，agent 会重连，本机仍存活的会话继续运行。连接恢复时先用 `history` 看刚才的调用是否已经执行（带 run id 和退出码），再用 `session_list` 找原会话，再用 `session_read(since=上次实际收到的 cursor)` 补读；游标未知时可从 `since=0` 开始。丢失回复不能证明操作失败，不要直接重发原命令。agent 进程重启属于另一种情况：交互会话不会自动恢复；需要跨 agent 重启继续的非交互工作用 `job_start`，之后以 `job_status` 查询。
+- winhand 自己的秘密：设备令牌；本机 MCP 服务的请求头（含其中的 Bearer 令牌）和它们 `env` 里名字带 token、secret、password、api_key 之类的值；`~/.winhand` 里文件名带 passphrase、password、token、secret、credential 的小文件（如 `owner-passphrase.txt`）里的值；
+- 常见令牌格式：GitHub（`ghp_`、`github_pat_`…）、OpenAI / Anthropic（`sk-`）、AWS 访问密钥、Slack、Google API key、GitLab、npm、Hugging Face、私钥块和 JWT。`known_secrets = false` 可以关掉这一项。
+
+`fs_send` 交出的文件里若含有被遮挡的值，文件不发出，换成一句说明。`secret_prompt` 收下的值也会自动遮挡。为了防止把占位符写回文件、冲掉真实值，`fs_write`、`fs_edit`、`fs_apply_patch` 和 `run` 会拒绝含有 `«redacted:` 的内容。本机其他 MCP 服务（`/mcp/<名称>`）不经过脱敏。
+
+短暂断网后，agent 会重连，本机仍存活的会话继续运行。连接恢复时先用 `history` 看刚才的调用是否已经执行（带 run id 和退出码；几个客户端同时用这台电脑时，`client` 写明每条是谁发的，客户端保持 MCP 会话时 `this_session` 标出你自己的；winhand 重启后，桌面端日志里重启前的调用也列出来，标 `before_restart`），再用 `session_list` 找原会话，再用 `session_read(since=上次实际收到的 cursor)` 补读；游标未知时可从 `since=0` 开始。丢失回复不能证明操作失败，不要直接重发原命令。agent 进程重启属于另一种情况：交互会话不会自动恢复；需要跨 agent 重启继续的非交互工作用 `job_start`，之后以 `job_status` 查询。
+
+### 用 Harmonia 管理密钥
+
+[Harmonia](https://github.com/harmonia-vault/harmonia)（和弦）在手机上管理 API Key，端到端加密后同步到你批准的电脑和服务器；`harmonia exec -- <程序>` 只把密钥交给这一个程序。这台电脑装好 Harmonia 并接入账号后，winhand 会自动配合它：
+
+- **遮挡**：Harmonia 给这台电脑的每个值（所有环境的，同名变量在不同环境里的值也都算），在任何工具结果里都换成 `«redacted:harmonia:变量名»`。手机上新加的变量同步到电脑后，从下一个结果起就被遮挡。winhand 用 `harmonia export` 自己读这些值，值只留在 winhand 进程里。`[redact]` 里写 `harmonia = false` 可以关掉。
+- **保护**：AI 读不到、也改不了 Harmonia 的数据目录（`~/.harmonia`，里面的设备密钥能解开同步到这台电脑的全部变量）；`harmonia manager` 一律拒绝；`harmonia export`、`var list --show`、`var rm`、`logout`、`uninstall` 这类会输出明文或改变设置的命令，要你在电脑上点允许。这几条规则是 winhand 内置的，不用写进 guards.toml，`context()` 里能看到。
+- **使用**：`context()` 列出可用的环境，AI 用 `run(command='harmonia', args=['exec', '--env', 'Cloudflare', '--', 'npx', 'wrangler', 'deploy'])` 这样运行需要密钥的程序。
+- **存新密钥**：`secret_prompt(message, harmonia='Cloudflare/CLOUDFLARE_API_TOKEN')` 在电脑上弹出掩码输入框，输入的值直接写进 Harmonia 的这个环境，再同步到其他设备，AI 看不到。这台电脑对该环境要有读写权限。
+
+接入 Harmonia（按它自己的说明）：
+
+1. 部署服务端：Fork [harmonia-worker](https://github.com/harmonia-vault/harmonia-worker)，在 Cloudflare 控制台 Workers & Pages → Create → Import a repository 选这个 Fork 部署，免费套餐即可。部署后立即用手机 App 注册：默认只有第一个注册的账号能成功。
+2. 手机装 App（Android 直接装 APK；iPhone 需要用 AltStore 这类工具自签），建环境（例如 Cloudflare、GitHub），添加变量。
+3. 电脑上装命令行：在 PowerShell 里运行 `$env:HARMONIA_YES = '0'; irm https://github.com/harmonia-vault/harmonia/releases/download/update-feed/install.ps1 | iex`，再运行 `harmonia login <服务器地址>`，在手机上核对核对码后批准，只勾选需要的环境。
+
+几点建议：
+
+- Windows 上不要开 Harmonia 的“写入用户环境变量”（它的 Shell 集成）：值会以明文写进注册表，之后启动的每个程序都读得到。只用 `harmonia exec`，范围最小。
+- Harmonia 还在 v0.x，作者建议先用于非关键密钥。
+- 遮挡是安全带，不是沙箱：存心绕过的程序可以把值编码后再输出。
 
 ## 本机规则与守卫
 

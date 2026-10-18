@@ -14,6 +14,7 @@ from fastmcp import Client
 from mcp.types import EmbeddedResource, ImageContent, TextContent
 from PIL import Image
 
+from winhand import media
 from winhand.config import Config
 from winhand.server import build_server
 
@@ -37,7 +38,9 @@ async def test_images_are_returned_as_pictures_and_scaled(client, tmp_path):
     Image.new("RGB", (4000, 2000), (30, 120, 200)).save(path)
     result = await client.call_tool("fs_read", {"path": str(path)})
     facts = json.loads(texts(result)[0])
-    assert facts["original_width"] == 4000 and facts["width"] == 1568 and facts["height"] == 784
+    # under 1568 px on the long edge and under the pixel cap, so no model scales it again
+    assert facts["original_width"] == 4000 and (facts["width"], facts["height"]) == (1517, 758)
+    assert facts["width"] * facts["height"] <= media.MAX_PIXELS
     (picture,) = images(result)
     assert (
         picture.mime_type in ("image/png", "image/jpeg")
@@ -170,6 +173,19 @@ def test_busy_images_stay_within_the_size_budget():
     assert facts["scale"] == round(facts["width"] / 3000, 4)
     flat = Image.new("RGB", (1200, 800), "white")
     assert media.encode_image(flat)[1] == "png"  # screen-like content keeps sharp PNG
+
+
+def test_screenshots_stay_under_the_pixels_a_model_takes_unscaled():
+    # a 1920x1080 screen used to go out at 1568x882 (1.38 MP), which Claude shrinks again: clicks drift
+    _, _, facts = media.encode_image(Image.new("RGB", (1920, 1080), "white"))
+    assert facts["width"] * facts["height"] <= media.MAX_PIXELS and facts["width"] == 1430
+    assert facts["scale"] == round(1430 / 1920, 4)
+    # small images and long strips are left as they are, up to the long-edge limit
+    assert media.encode_image(Image.new("RGB", (1000, 700), "white"))[2]["scale"] == 1.0
+    assert media.encode_image(Image.new("RGB", (1568, 200), "white"))[2]["width"] == 1568
+    # asking for a larger image raises the cap in step, for models that see more
+    _, _, big = media.encode_image(Image.new("RGB", (3840, 2160), "white"), max_side=2576)
+    assert big["width"] == 2349 and big["width"] * big["height"] <= 3_110_000
 
 
 async def test_zoom_into_part_of_an_image(client, tmp_path):

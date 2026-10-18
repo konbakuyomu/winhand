@@ -43,6 +43,16 @@ def _no_hooks_of_this_machine(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_harmonia_of_this_machine(tmp_path, monkeypatch):
+    """Harmonia's keys on the machine running the tests are never read; test_harmonia.py fakes it."""
+    from winhand import harmonia
+
+    monkeypatch.setenv("HARMONIA_HOME", str(tmp_path / "no-harmonia"))
+    monkeypatch.setattr(harmonia, "executable", lambda: None)
+    monkeypatch.setattr(harmonia, "_known", harmonia._Known())
+
+
+@pytest.fixture(autouse=True)
 def _no_local_mcp_left_over(monkeypatch):
     """Each test starts without the local MCP servers an earlier test's app registered."""
     from winhand import local_mcp
@@ -51,6 +61,8 @@ def _no_local_mcp_left_over(monkeypatch):
     monkeypatch.setattr(local_mcp, "_own", None)
     monkeypatch.setattr(local_mcp, "_calls", {})
     monkeypatch.setattr(local_mcp, "_listings", {})
+    monkeypatch.setattr(local_mcp, "reload_hook", None)
+    monkeypatch.setattr(local_mcp, "_stamp", None)
 
 
 @pytest.fixture

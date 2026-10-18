@@ -496,6 +496,14 @@ async def test_ui_automation_fills_and_presses_controls(test_form):
             await client.call_tool("ui", {"window": "winhand-ui-test", "filter": "Press"})
         ).structured_content
         assert any(e["name"] == "Press me" and e["type"] == "Button" for e in found["elements"])
+        # two Edits (a text box and a password box): which one is the caller's to say
+        unsure = (
+            await client.call_tool(
+                "ui",
+                {"window": "winhand-ui-test", "action": "set_value", "control_type": "Edit", "value": "x"},
+            )
+        ).structured_content
+        assert "nothing was done" in unsure["error"] and len(unsure["matches"]) == 2, unsure
         changed = (
             await client.call_tool(
                 "ui",
@@ -503,6 +511,7 @@ async def test_ui_automation_fills_and_presses_controls(test_form):
                     "window": "winhand-ui-test",
                     "action": "set_value",
                     "control_type": "Edit",
+                    "index": 0,
                     "value": "你好 UIA",
                 },
             )
@@ -760,9 +769,10 @@ async def test_waiting_for_the_picture_and_for_text(classic_form):
         unchanged = await shot(wait="change", timeout_s=1)
         assert unchanged["wait"]["matched"] is False and "did not change" in unchanged["wait"]["note"]
         # a focused text box blinks its cursor: that is not a change
-        await client.call_tool(
+        focused = await client.call_tool(
             "ui", {"window": "winhand-classic-test", "action": "focus", "control_type": "Edit"}
         )
+        assert "error" not in focused.structured_content, focused.structured_content
         blinking = await shot(wait="stable", stable_ms=1000, timeout_s=5)
         assert blinking["wait"]["matched"] is True, blinking
     done = _ocr_or_skip(ocr.wait, "Done", window="winhand-classic-test", timeout_s=5)

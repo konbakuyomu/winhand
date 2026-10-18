@@ -54,6 +54,10 @@ SECRET_PATTERNS = [
 AUTH_PATTERNS = [
     r"(?i)authenticate your account at",
     r"(?i)press enter to open (?:it )?in (?:the|your) browser",
+    # gh auth login / refresh: "Press Enter to open github.com/login/device in your browser..."
+    r"(?i)press enter to open\b[^\n]{0,160}\bin (?:the|your|a) (?:web )?browser",
+    r"(?i)\b(?:one[- ]time|device|user|verification) code\b[^\n]{0,20}[:：]\s*[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\s*$",
+    r"(?i)\b(?:github\.com/login/device|microsoft\.com/devicelogin|aka\.ms/devicelogin)\b",
     r"(?i)(?:open|visit|go to|navigate to) (?:this|the following) (?:url|link|page)",
     r"(?i)\b(?:device code|user code|enter the code)\b",
     r"(?i)waiting for (?:authentication|authorization|approval|you to (?:log|sign) in)",

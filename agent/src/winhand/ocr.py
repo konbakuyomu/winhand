@@ -297,10 +297,21 @@ def find(text: str, window=None, monitor=None, region=None, language: str | None
 _MOUSE = {"click": "click", "double_click": "double_click", "right_click": "right_click", "move": "move"}
 
 
+def _only(matches: list[dict], text: str) -> int | None:
+    """Which match to act on when the caller did not say: the only one, or the only one that is a
+    whole line by itself (a button's label rather than a sentence that mentions it)."""
+    if len(matches) == 1:
+        return 0
+    wanted = normalize(text)
+    whole = [i for i, m in enumerate(matches) if normalize(m["text"]) == wanted]
+    return whole[0] if len(whole) == 1 else None
+
+
 def act(
-    action: str, text: str, window=None, monitor=None, region=None, index: int = 0, language=None
+    action: str, text: str, window=None, monitor=None, region=None, index: int | None = None, language=None
 ) -> dict:
-    """Find the text, then move the mouse there or click it like a person."""
+    """Find the text, then move the mouse there or click it like a person. When the text is in
+    several places and `index` is not given, nothing is clicked: the places are listed."""
     if action not in _MOUSE:
         raise OcrError("action is read, find, click, double_click, right_click, move or wait")
     target = desktop.find_window(window) if window is not None else None
@@ -309,9 +320,19 @@ def act(
     found = find(text, target["hwnd"] if target else None, monitor, region, language)
     if not found["matches"]:
         return {**found, "error": f"{text!r} is not on the screen there; nothing was clicked"}
-    if index >= len(found["matches"]):
-        raise OcrError(f"only {len(found['matches'])} matches; index {index} is out of range")
-    x, y = found["matches"][index]["center"]
+    matches = found["matches"]
+    if index is None:
+        index = _only(matches, text)
+        if index is None:
+            return {
+                **found,
+                "matches": [{"index": i, **m} for i, m in enumerate(matches[:20])],
+                "error": f"{text!r} is on the screen {len(matches)} times; nothing was clicked. "
+                "Pass index (the place in this list, from 0), or a window or region that shows it once",
+            }
+    if index >= len(matches):
+        raise OcrError(f"only {len(matches)} matches; index {index} is out of range")
+    x, y = matches[index]["center"]
     if target is not None:
         if action != "move":  # clicking operates the program: its approval first, then to the front
             desktop.require_operable(target["hwnd"], f"按文字点击「{text}」")
@@ -327,7 +348,10 @@ def act(
                 "or close what covers it, then try again"
             )
     done = desktop.input_action(_MOUSE[action], x, y, coordinates="screen")
-    return {**found, "done": f"{action} at ({x}, {y})", "foreground": done.get("foreground")}
+    out = {**found, "done": f"{action} at ({x}, {y})", "foreground": done.get("foreground")}
+    if len(matches) > 1:
+        out["index"] = index
+    return out
 
 
 def wait(

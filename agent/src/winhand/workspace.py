@@ -38,6 +38,7 @@ from pathlib import Path
 from . import config, fs, guard, redact
 from .actions import Action
 from .config import Config
+from .session.text import fitting, width
 
 DEFAULT_SKILLS = ["~/.agents/skills", "~/.claude/skills", "~/.codex/skills"]
 PROJECT_SKILLS = [".agents/skills", ".claude/skills"]
@@ -53,7 +54,7 @@ GUARD_ERRORS_CHARS = 3_000
 ERROR_CHARS = 500
 OMITTED_CHARS = 2_500
 MAX_FILE_BYTES = 2_000_000
-BUDGET_CHARS = fs.READ_MAX_CHARS
+BUDGET_CHARS = 60_000  # the rules are the owner's and are kept whole up to this
 SKILLS_BUDGET_CHARS = 20_000
 SKILLS_FULL_CHARS = 16_000  # full entries; names of the rest fill up to SKILLS_BUDGET_CHARS
 DESCRIPTION_CHARS = 300
@@ -1020,21 +1021,23 @@ def skill(cfg: Config, name: str, path: str | None = None, repo: str | None = No
             text, _ = fs.read_text(found["path"])
         except (OSError, ValueError, fs.FsError) as exc:
             raise ValueError(f"cannot read {found['path']}: {exc}") from None
-        if len(text) > BUDGET_CHARS:
+        budget = fs.READ_MAX_CHARS  # what one result holds, as fs_read counts it (width)
+        if width(text) > budget:
             lines = text.splitlines(keepends=True)
             kept, used = 0, 0
-            while kept < len(lines) and used + len(lines[kept]) <= BUDGET_CHARS:
-                used += len(lines[kept])
+            while kept < len(lines) and used + width(lines[kept]) <= budget:
+                used += width(lines[kept])
                 kept += 1
             if kept:
                 out["truncated"] = _truncated(found["path"], kept, len(lines))
                 text = "".join(lines[:kept])
             else:
+                shown = fitting(text, budget)
                 out["truncated"] = (
-                    f"showing the first {BUDGET_CHARS} characters of its first line, which is longer "
+                    f"showing the first {shown} characters of its first line, which is longer "
                     f"(the whole file: {found['path']})"
                 )
-                text = text[:BUDGET_CHARS]
+                text = text[:shown]
         out["content"] = text
     out["files"], more = _skill_files(folder)
     if more:
@@ -1130,16 +1133,120 @@ def _activity(gitdir: str, common: str) -> float:
     return max(times, default=0.0)
 
 
-def _under_roots(cfg: Config) -> list[str]:
-    out = []
-    for folder in _setting(cfg, "repo_roots", []):
-        folder = _expand(folder)
-        out.append(folder)
-        try:
-            out += [e.path for e in sorted(os.scandir(folder), key=lambda e: e.name.lower()) if e.is_dir()]
-        except OSError:
+# Clones live in nested folders (D:\\Dev\\20_个人项目\\winhand): repo_roots and the folders around the
+# projects Codex and Claude Code know are searched a few levels down, within a time budget.
+REPO_SCAN_DEPTH = 4
+REPO_SCAN_BUDGET_S = 6.0
+REPO_SCAN_MAX_DIRS = 40_000
+NEARBY_LEVELS = 3  # how far above a known project its neighbourhood starts
+_SCAN_TTL_S = 600.0
+_SCAN_SKIP = {
+    "node_modules", "__pycache__", ".venv", "venv", "site-packages", "$recycle.bin",
+    "system volume information", "appdata", "windows", "program files", "program files (x86)",
+    "programdata", "build", "dist", "target", "out", "bin", "obj",
+}  # fmt: skip
+_scans: dict[tuple[str, int], tuple[float, list[str]]] = {}
+
+
+def _has_git(folder: str) -> bool:
+    return os.path.lexists(os.path.join(folder, ".git"))
+
+
+def git_roots_under(
+    roots: list[str], depth: int = REPO_SCAN_DEPTH, budget_s: float = REPO_SCAN_BUDGET_S
+) -> list[str]:
+    """Checkouts (folders holding .git) at most `depth` levels below each root, shallowest first.
+    Hidden and build folders, links and junctions are not entered, nor is a checkout's inside.
+    Complete scans are remembered for ten minutes."""
+    deadline = time.monotonic() + budget_s
+    found: list[str] = []
+    visited: set[str] = set()
+    for root in roots:
+        key = (os.path.normcase(os.path.abspath(root)), depth)
+        cached = _scans.get(key)
+        if cached and time.monotonic() - cached[0] < _SCAN_TTL_S:
+            found += [f for f in cached[1] if f not in found]
             continue
+        here: list[str] = []
+        queue = [(root, 0)]
+        complete = True
+        while queue:
+            if time.monotonic() > deadline or len(visited) > REPO_SCAN_MAX_DIRS:
+                complete = False
+                break
+            folder, level = queue.pop(0)
+            norm = os.path.normcase(folder)
+            if norm in visited:
+                continue
+            visited.add(norm)
+            if _has_git(folder):
+                here.append(folder)
+                continue
+            if level >= depth:
+                continue
+            try:
+                with os.scandir(folder) as entries:
+                    subs = sorted(
+                        (
+                            e.path
+                            for e in entries
+                            if e.is_dir(follow_symlinks=False)
+                            and not e.is_symlink()
+                            and not (getattr(e, "is_junction", None) and e.is_junction())
+                            and not e.name.startswith(".")
+                            and e.name.lower() not in _SCAN_SKIP
+                        ),
+                        key=str.lower,
+                    )
+            except OSError:
+                continue
+            queue += [(sub, level + 1) for sub in subs]
+        if complete:
+            _scans[key] = (time.monotonic(), here)
+        found += [f for f in here if f not in found]
+    return found
+
+
+def _nearby(known: list[str]) -> list[str]:
+    """Folders around the projects Codex and Claude Code know: up to NEARBY_LEVELS above each one,
+    never a drive root, the home folder or anything above it, or AppData."""
+    home = os.path.normcase(os.path.abspath(os.path.expanduser("~")))
+    appdata = os.path.join(home, "appdata")
+    out: list[str] = []
+    for level in range(1, NEARBY_LEVELS + 1):
+        for folder in known:
+            folder = folder[4:] if folder.startswith("\\\\?\\") else folder
+            p = Path(os.path.abspath(folder))
+            parents = list(p.parents)
+            if len(parents) < level:
+                continue
+            up = parents[level - 1]
+            norm = os.path.normcase(str(up))
+            if (
+                up.parent == up
+                or norm == home
+                or home.startswith(norm.rstrip("\\/") + os.sep)
+                or norm == appdata
+                or norm.startswith(appdata + os.sep)
+                or str(up) in out
+            ):
+                continue
+            out.append(str(up))
     return out
+
+
+def _under_roots(cfg: Config) -> list[str]:
+    roots = [_expand(folder) for folder in _setting(cfg, "repo_roots", [])]
+    return git_roots_under([r for r in roots if os.path.isdir(r)]) if roots else []
+
+
+def _with_nearby(sources: list, known: list[str], found: dict):
+    """The sources in order, then, only while nothing was found, the neighbourhood of known projects."""
+    yield from sources
+    if not found:
+        nearby = git_roots_under(_nearby(known))
+        sources.append(("nearby", nearby))
+        yield "nearby", nearby
 
 
 def find_repo(cfg: Config, repo: str) -> dict:
@@ -1149,6 +1256,7 @@ def find_repo(cfg: Config, repo: str) -> dict:
     want = repo_key(repo)
     if not want:
         raise ValueError(f"repo should be owner/name or a git remote URL, not {repo!r}")
+    known = _codex_projects() + [str(k) for k in _claude_projects()]
     sources = [
         ("codex", _codex_projects()),
         ("claude-code", [str(k) for k in _claude_projects()]),
@@ -1156,7 +1264,7 @@ def find_repo(cfg: Config, repo: str) -> dict:
     ]
     found: dict[str, tuple[str, str, float]] = {}
     checked: set[str] = set()
-    for source, folders in sources:
+    for source, folders in _with_nearby(sources, known, found):
         for folder in folders:
             folder = folder[4:] if folder.startswith("\\\\?\\") else folder
             if not os.path.isdir(folder):
@@ -1174,10 +1282,12 @@ def find_repo(cfg: Config, repo: str) -> dict:
     if not found:
         counts = ", ".join(f"{len(folders)} from {name}" for name, folders in sources)
         raise ValueError(
-            f"no checkout of {repo} found on this machine (folders looked at: {counts}; Codex's list is "
+            f"no checkout of {repo} found on this machine (folders looked at: {counts}, and the checkouts "
+            f"up to {REPO_SCAN_DEPTH} levels below the folders around those projects; Codex's list is "
             f"[projects] in {os.path.join(codex_home(), 'config.toml')}, Claude Code's is projects in "
             f"{claude_state_file()}). Add the folder that holds your clones to [context] repo_roots in "
-            f"{config.config_path()} (for example repo_roots = ['D:\\code']), or call context with path= instead."
+            f"{config.config_path()} (for example repo_roots = ['D:\\code']; searched {REPO_SCAN_DEPTH} levels "
+            "down), or call context with path= instead."
         )
     ordered = sorted(found.values(), key=lambda f: f[2], reverse=True)
     others, used = [], 0
@@ -1325,6 +1435,19 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         "names": mask([s.name for s in cfg.servers if s.enabled]),
         "note": "mcp_tools() lists their tools, mcp_call(server, tool, arguments) calls one",
     }
+    from . import harmonia, secret_store
+
+    stored = secret_store.stored_names()  # names only: the values go to programs, never here
+    if stored:
+        out["secrets"] = {
+            "names": stored,
+            "use": "run(..., secrets=['NAME']) or job_start(..., secrets=['NAME']) gives the program "
+            "these environment variables; you never see the values. A new one: secret_prompt(message, "
+            "key='NAME') asks the person to type it in.",
+        }
+    keys = harmonia.summary()  # keys synced from the owner's phone, and how to use them unseen
+    if keys is not None:
+        out["harmonia"] = mask(keys)
     out["next"] = (
         "Follow these rules while you work here. Call context again for another folder, and after the "
         "conversation is compacted."
