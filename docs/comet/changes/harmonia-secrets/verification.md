@@ -5,6 +5,7 @@
 **检查**
 - `agent/tests/test_harmonia.py` 10 项，用假的 `harmonia` 命令行（按 Harmonia 724411f 的输出格式）。
 - 全量：`uv run pytest -q` 739 passed、54 skipped；模拟没装 ripgrep 时 734 passed、59 skipped；`ruff check`、`ruff format --check` 通过。
+- GitHub Actions（workflow_dispatch，6d04889，agent run 39152560484）：Ubuntu、Windows 都通过，包括 Windows 上按真实路径匹配 Harmonia 数据目录的内置规则。
 
 **逐项结论**
 
