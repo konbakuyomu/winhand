@@ -1435,8 +1435,16 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         "names": mask([s.name for s in cfg.servers if s.enabled]),
         "note": "mcp_tools() lists their tools, mcp_call(server, tool, arguments) calls one",
     }
-    from . import harmonia
+    from . import harmonia, secret_store
 
+    stored = secret_store.stored_names()  # names only: the values go to programs, never here
+    if stored:
+        out["secrets"] = {
+            "names": stored,
+            "use": "run(..., secrets=['NAME']) or job_start(..., secrets=['NAME']) gives the program "
+            "these environment variables; you never see the values. A new one: secret_prompt(message, "
+            "key='NAME') asks the person to type it in.",
+        }
     keys = harmonia.summary()  # keys synced from the owner's phone, and how to use them unseen
     if keys is not None:
         out["harmonia"] = mask(keys)

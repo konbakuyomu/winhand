@@ -574,6 +574,7 @@ def run(
     shell: str | None = None,
     raw: bool = False,
     lang: str | None = None,
+    secrets: list[str] | None = None,
 ) -> dict:
     """Run to completion. With `args` the program is executed directly (no shell
     quoting issues); without, `command` is a command line for the platform shell;
@@ -581,6 +582,13 @@ def run(
     Still running after `reply_within_s`, it keeps going (until `timeout_s`) and the
     answer says so; job_status(id) returns the rest."""
     extra_env = dict(env or {})
+    if secrets:  # stored with secret_prompt: given to the program, never shown (secret_store.py)
+        from . import secret_store
+
+        try:
+            extra_env.update(secret_store.load(list(secrets)))
+        except secret_store.SecretError as exc:
+            return {"error": str(exc)}
     if lang:
         if lang.lower() != "en":
             return {"error": "lang supports 'en' (English messages from dotnet/MSBuild/Visual Studio)"}

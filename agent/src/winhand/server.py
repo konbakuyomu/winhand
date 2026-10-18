@@ -76,8 +76,11 @@ Quick rules
     running | awaiting_input | needs_user | idle | blocked | exited
   `needs_user` means a password/one-time code/browser sign-in: never invent it. Give URLs to the user,
   or call session_prompt_user so they type a secret into a masked dialog on the machine.
-- A token or password that must be stored on the machine: secret_prompt(message, save_to=...) lets the
-  person type it into a masked dialog; you never see it. «redacted:…» in results marks masked values:
+- A token or password that must be stored on the machine: secret_prompt(message, key='NAME') lets the
+  person type it into a masked dialog and keeps it in this machine's secret store; you never see it.
+  run(..., secrets=['NAME']) and job_start(..., secrets=['NAME']) give it to the program as an
+  environment variable, in this conversation and later ones (context() lists the names stored).
+  Never ask the person to paste a token into the chat. «redacted:…» in results marks masked values:
   never write such text back to a file.
 - Keys the owner keeps in Harmonia (context() then has a `harmonia` part with its environments): run
   the program that needs them as run(command='harmonia', args=['exec', '--env', '<environment>', '--',
@@ -183,8 +186,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   blocked | exited. `needs_user` is a password, code or browser sign-in: never invent it; give URLs to
   the person or call session_prompt_user. session_wait waits on several sessions at once; a timeout is
   not a failure, call it again (already returned output is not repeated).
-- A token or password that must be stored here: secret_prompt(message, save_to=...) asks the person in
-  a masked dialog; you never see it. «redacted:…» marks masked values: never write them back to a file.
+- A token a program needs (Cloudflare, GitHub ...): secret_prompt(message, key='NAME') once (the person
+  types it in a masked dialog), then run(..., secrets=['NAME']); you never see it. «redacted:…» marks
+  masked values: never write them back to a file.
 - Files: fs_read / fs_edit / fs_write / fs_search / fs_find / fs_list / fs_stat / fs_op / fs_apply_patch;
   prefer them to shell commands. Moving more than a few KB between your sandbox and this machine:
   fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
@@ -485,6 +489,14 @@ def build_server(
         lang: Annotated[
             str | None, Field(description="'en': ask dotnet/MSBuild/Visual Studio for English messages")
         ] = None,
+        secrets: Annotated[
+            list[str] | None,
+            Field(
+                description="Names in this machine's secret store (context() lists them; "
+                "secret_prompt(key=...) adds one): the program gets them as environment variables, you "
+                "never see the values"
+            ),
+        ] = None,
     ) -> dict:
         """Run a command or script to completion and return exit code, stdout and stderr. Answers
         within about 40 s: if it is still going then, the answer has `still_running` and an id, it
@@ -492,8 +504,18 @@ def build_server(
         Use a session instead for anything interactive or that must keep running."""
         return await asyncio.to_thread(
             lambda: proc.run(
-                command, args, cwd, timeout_s, env, stdin, script=script, shell=shell, raw=raw, lang=lang
-            )
+                command,
+                args,
+                cwd,
+                timeout_s,
+                env,
+                stdin,
+                script=script,
+                shell=shell,
+                raw=raw,
+                lang=lang,
+                secrets=secrets,
+            )  # fmt: skip
         )
 
     @mcp.tool
@@ -889,7 +911,12 @@ def build_server(
             str | None, Field(description="File to store it in (only this user can read it)")
         ] = None,
         key: Annotated[
-            str | None, Field(description="With save_to: store as KEY=value in that .env file (others kept)")
+            str | None,
+            Field(
+                description="A name such as CLOUDFLARE_API_TOKEN. Alone: kept in this machine's secret "
+                "store, which run/job_start(secrets=[name]) hand to programs. With save_to: a KEY=value "
+                "line in that .env file (others kept)"
+            ),
         ] = None,
         credential: Annotated[
             str | None, Field(description="Or: a Windows Credential Manager entry name to store it under")
@@ -908,7 +935,9 @@ def build_server(
     ) -> dict:
         """Ask the person at the machine to type a secret (masked dialog) and store it there without it
         ever reaching you: you get back only where it was saved. It is also masked in later results.
-        Use this whenever a token or password must exist on the machine."""
+        Use this whenever a token or password must exist on the machine. A token a program needs
+        (Cloudflare, GitHub ...): secret_prompt(message, key='NAME') once, then
+        run(..., secrets=['NAME']) every time, in this and later conversations."""
 
         def work():
             try:

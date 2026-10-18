@@ -381,28 +381,46 @@ _KEYS_REASON = (
     "Harmonia 的数据目录：设备密钥能解开同步到这台电脑的全部密钥，只给 harmonia 命令行用。"
     "需要密钥的程序用 harmonia exec 运行"
 )
-_builtin: dict[str, RuleFile] = {}
+_STORE_REASON = (
+    "这台电脑的密钥库（secret_prompt 存的密钥）：程序用 run(secrets=[名字]) 拿到它们，"
+    "AI 不能读取或改写这个文件；新的密钥用 secret_prompt(message, key=名字) 让本人输入"
+)
+_builtin: dict[tuple[str, str], RuleFile] = {}
+
+
+def _spelled(path: str) -> str:
+    """This path in a command line, with either kind of slash."""
+    return r"[\\/]+".join(re.escape(part) for part in path.split("/") if part)
 
 
 def _files_named(folder: str) -> re.Pattern[str]:
     """A command line naming Harmonia's folder: by its usual name, or by where HARMONIA_HOME puts it."""
-    spelled = r"[\\/]+".join(re.escape(part) for part in folder.split("/") if part)
-    return re.compile(rf"(?i){_HARMONIA_FILES}|{spelled}(?:[\\/]|\b)")
+    return re.compile(rf"(?i){_HARMONIA_FILES}|{_spelled(folder)}(?:[\\/]|\b)")
+
+
+def _store_named(store: str) -> re.Pattern[str]:
+    """A command line naming the secret store: where it is, or as .winhand/secrets.env."""
+    return re.compile(rf"(?i){_spelled(store)}\b|\.winhand[\\/]+secrets\.env\b")
 
 
 def builtin_file() -> RuleFile:
-    """Limits winhand keeps whatever the owner's files say, around Harmonia (harmonia.py): its data
-    folder holds the device keys that decrypt every key synced here; `harmonia manager` manages
-    the whole account; some of its commands print keys in plain text or change the setup, which
-    Harmonia itself leaves to the person. They only ever name Harmonia: nothing else is touched."""
-    from . import harmonia
+    """Limits winhand keeps whatever the owner's files say. The secret store (secret_store.py) is
+    written only through the masked dialog and read only into a program's environment. Harmonia
+    (harmonia.py): its data folder holds the device keys that decrypt every key synced here;
+    `harmonia manager` manages the whole account; some of its commands print keys in plain text or
+    change the setup, which Harmonia itself leaves to the person. They name only those files and
+    that program: nothing else is touched."""
+    from . import harmonia, secret_store
 
     folder = os.path.abspath(str(harmonia.data_dir())).replace("\\", "/").rstrip("/")
-    if folder not in _builtin:
-        _builtin[folder] = RuleFile(
+    store = os.path.abspath(str(secret_store.store_path())).replace("\\", "/")
+    if (folder, store) not in _builtin:
+        _builtin[(folder, store)] = RuleFile(
             BUILTIN,
             None,
             [
+                Rule(BUILTIN, 5, ("read", "write", "edit", "delete", "move"), "deny", _STORE_REASON, path=(store,)),
+                Rule(BUILTIN, 6, ("command", "input"), "deny", _STORE_REASON, match=_store_named(store), blind=False),
                 Rule(BUILTIN, 1, ("read", "write", "edit", "delete", "move"), "deny", _KEYS_REASON,
                      path=(folder + "/**",)),
                 Rule(BUILTIN, 2, ("command", "input"), "deny", _KEYS_REASON, match=_files_named(folder), blind=False),
@@ -414,7 +432,7 @@ def builtin_file() -> RuleFile:
                      match=_HARMONIA_ASK, blind=False),
             ],
         )  # fmt: skip
-    return _builtin[folder]
+    return _builtin[(folder, store)]
 
 
 def judge(actions: list[Action], cache: dict | None = None) -> Verdict:
@@ -436,10 +454,10 @@ def judge(actions: list[Action], cache: dict | None = None) -> Verdict:
 
 def rules_for(path: str | None) -> dict:
     """The rules that apply at a folder, for context(): summaries plus files that cannot be read."""
-    from . import harmonia
+    from . import harmonia, secret_store
 
     files = files_for([path] if path else [])
-    if harmonia.present():  # without Harmonia here these rules have nothing to protect
+    if harmonia.present() or secret_store.store_path().is_file():  # else nothing for them to protect
         files = [builtin_file(), *files]
     out: dict = {"global_file": str(global_path()), "rules": [], "errors": []}
     for f in files:

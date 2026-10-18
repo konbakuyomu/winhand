@@ -22,7 +22,7 @@ from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import approvals, coalesce, desktop, jobs, media, proc, transfer, uia, winenv
+from . import approvals, coalesce, desktop, jobs, media, proc, secret_store, transfer, uia, winenv
 from . import ocr as screen_text
 from .secret_prompt import PromptUnavailable, ask_pick
 
@@ -987,13 +987,28 @@ def register(mcp: FastMCP) -> None:
                 description="For a command: powershell (Windows PowerShell 5.1, default) | pwsh (PowerShell 7)"
             ),
         ] = None,
+        secrets: Annotated[
+            list[str] | None,
+            Field(
+                description="Names in this machine's secret store: given to the job as environment "
+                "variables, you never see the values (not for elevated jobs)"
+            ),
+        ] = None,
     ) -> dict:
         """Run a command in the background, independent of winhand: it keeps running even if
         winhand restarts or is reinstalled, and its output and exit code stay available via
         job_status. Use for long work, for anything that replaces winhand, and for admin tasks.
         A program fed text on stdin (Codex: command='codex', args=['exec', '-'], stdin=brief) is
         best run with args + stdin: the text and its output never pass through a PowerShell pipe."""
-        return await asyncio.to_thread(_errors, jobs.start, command, cwd, name, elevated, args, stdin, shell)
+
+        def work():
+            try:
+                env = secret_store.load(list(secrets or []))
+            except secret_store.SecretError as exc:
+                return {"error": str(exc)}
+            return jobs.start(command, cwd, name, elevated, args, stdin, shell, env or None)
+
+        return await asyncio.to_thread(_errors, work)
 
     @mcp.tool
     async def job_status(

@@ -259,7 +259,10 @@ def own_secrets(cfg) -> list[str]:
         if f.suffix.lower() in (".toml", ".json", ".lock", ".log", ".jsonl") or f.stat().st_size > 4096:
             continue
         found += file_values([str(f)], 8)
-    return [v.strip() for v in found if v and len(v.strip()) >= 8]
+    from .secret_store import store_path
+
+    store = [v.strip() for v in file_values([str(store_path())], 4)]  # secret_prompt(key=...), any size
+    return [v.strip() for v in found if v and len(v.strip()) >= 8] + [v for v in store if v]
 
 
 def build(settings: dict, cfg=None) -> Redactor:

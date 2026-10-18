@@ -139,15 +139,21 @@ def start(
     args: list[str] | None = None,
     stdin: str | None = None,
     shell: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict:
     """Start `command` (PowerShell) detached; with `args`, `command` is a program run directly.
-    Elevated jobs show a UAC prompt first."""
+    Elevated jobs show a UAC prompt first. `env` is added to its environment (not elevated jobs:
+    Windows starts those with the administrator's own)."""
     if not IS_WINDOWS:
         raise JobError("background jobs are available on Windows")
     if cwd and not os.path.isdir(cwd):
         raise JobError(f"working directory does not exist: {cwd}")
     if stdin is not None and args is None:
         raise JobError("stdin goes to a program run directly: give its arguments as args (args=[] for none)")
+    if env and elevated:
+        raise JobError(
+            "an elevated job starts with the administrator's environment: secrets and env cannot reach it"
+        )
     runner = _runner(shell)
     program = None
     if args is not None:
@@ -178,7 +184,7 @@ def start(
     if program is not None:
         meta["program"] = True
     flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-    env = winenv.build_env()
+    env = winenv.build_env(env)
     if elevated:
         # Start-Process -Verb RunAs is the supported way to ask for elevation; it returns at once
         quoted = " ".join(f'"{a}"' if " " in a else a for a in argv[1:])
