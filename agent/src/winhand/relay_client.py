@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import random
+import secrets
 import socket
 import time
 from collections.abc import Callable
@@ -211,9 +212,16 @@ class Calls:
 class Tunnel:
     """Serves relay frames arriving on one WebSocket connection."""
 
-    def __init__(self, ws: ClientConnection, http: httpx.AsyncClient, calls: Calls | None = None) -> None:
+    def __init__(
+        self,
+        ws: ClientConnection,
+        http: httpx.AsyncClient,
+        calls: Calls | None = None,
+        secret: str | None = None,
+    ) -> None:
         self.ws = ws
         self.http = http
+        self.secret = secret  # proves to the local port that a request comes through the tunnel
         self.calls = calls if calls is not None else Calls()
         self.requests: dict[str, dict] = {}
         self.send_lock = asyncio.Lock()
@@ -283,7 +291,12 @@ class Tunnel:
             self.calls.ack(rid)
 
     async def _serve(self, rid: str, request: dict) -> None:
-        headers = [(k, v) for k, v in request["headers"] if k.lower() != "host"]
+        from .mcp_bridge import LocalSecretOnly
+
+        drop = ("host", LocalSecretOnly.HEADER)
+        headers = [(k, v) for k, v in request["headers"] if k.lower() not in drop]
+        if self.secret:
+            headers.append((LocalSecretOnly.HEADER, self.secret))
         try:
             async with self.http.stream(
                 request["method"], request["path"], headers=headers, content=bytes(request["body"])
@@ -495,7 +508,11 @@ async def run_tunnel(
     port = _free_port()
     from .mcp_bridge import compose_app
 
-    server, server_task = await serve_local(compose_app(mcp.http_app(), services), port)
+    # the port answers only this tunnel (a secret made for this run) and checks Host/Origin, so
+    # neither another program on the machine nor a web page (DNS rebinding) can call the tools
+    secret = secrets.token_urlsafe(32)
+    app = compose_app(mcp.http_app(host_origin_protection="auto"), services, secret)
+    server, server_task = await serve_local(app, port)
     backoff = 1.0
     attempt = 0
     stop = stop or asyncio.Event()
@@ -540,7 +557,7 @@ async def run_tunnel(
                         connected_at = time.monotonic()
                         await ws.send(json.dumps(hello_frame(calls.pending())))
                         status("online", connected_at=time.time())
-                        tunnel = asyncio.create_task(Tunnel(ws, http, calls).run())
+                        tunnel = asyncio.create_task(Tunnel(ws, http, calls, secret).run())
                         stopper = asyncio.create_task(stop.wait())
                         try:
                             done, _ = await asyncio.wait(

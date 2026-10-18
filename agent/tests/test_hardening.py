@@ -120,3 +120,56 @@ async def test_a_binary_file_holding_a_masked_value_is_not_sent(relay_config, tm
     async with Client(build_server(Config())) as c:
         sent = await c.call_tool("fs_send", {"path": str(blob)})
     assert "not sent" in _text(sent) and "dev-token" not in _text(sent)
+
+
+# ------------------------------------------------------------------ the tunnel's local port
+
+
+async def test_the_local_port_answers_only_the_tunnel():
+    import httpx
+
+    from winhand.mcp_bridge import LocalSecretOnly, compose_app
+
+    app = compose_app(build_server(Config()).http_app(host_origin_protection="auto"), None, "s3cret")
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+    body = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    headers = {"accept": "application/json, text/event-stream"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:41234") as http:
+        bare = await http.post("/mcp", json=body, headers=headers)
+        assert bare.status_code == 403
+        wrong = await http.post("/mcp", json=body, headers={**headers, LocalSecretOnly.HEADER: "guess"})
+        assert wrong.status_code == 403
+        rebinding = await http.post(
+            "/mcp",
+            json=body,
+            headers={**headers, LocalSecretOnly.HEADER: "s3cret", "host": "evil.example:41234"},
+        )
+        assert rebinding.status_code == 421
+
+
+async def test_a_tunnel_request_passes_with_the_secret():
+    import httpx
+
+    from winhand.mcp_bridge import LocalSecretOnly, compose_app
+
+    mcp = build_server(Config())
+    app = compose_app(mcp.http_app(host_origin_protection="auto"), None, "s3cret")
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:41234") as http:
+            init = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "1"},
+                },
+            }
+            ok = await http.post(
+                "/mcp",
+                json=init,
+                headers={"accept": "application/json, text/event-stream", LocalSecretOnly.HEADER: "s3cret"},
+            )
+            assert ok.status_code == 200, ok.text

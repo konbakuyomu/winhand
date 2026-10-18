@@ -86,7 +86,10 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "http":
         from .server import build_server
 
-        build_server().run(transport="http", host=args.host, port=args.port, show_banner=False)
+        # Host/Origin checks: a web page cannot reach these tools through DNS rebinding
+        build_server().run(
+            transport="http", host=args.host, port=args.port, show_banner=False, host_origin_protection="auto"
+        )
         return 0
     if cmd == "connect":
         from . import config

@@ -211,7 +211,7 @@ async def run_script(monkeypatch, script, *, stop_online=False):
         monkeypatch.setattr(rc.random, "uniform", lambda *_: 1.0)
     monkeypatch.setattr(rc, "_free_port", lambda: 0)
     monkeypatch.setattr(rc, "hello_frame", lambda *_: {"type": "hello"})
-    monkeypatch.setattr(mb, "compose_app", lambda app, services: app)
+    monkeypatch.setattr(mb, "compose_app", lambda app, services, secret=None: app)
 
     async def serve_local(*_):
         return server
@@ -264,7 +264,7 @@ async def run_script(monkeypatch, script, *, stop_online=False):
         await rc.run_tunnel(
             "ws://offline.invalid",
             "fake",
-            mcp=SimpleNamespace(http_app=lambda: None),
+            mcp=SimpleNamespace(http_app=lambda **_: None),
             stop=stop,
             on_status=status,
         )

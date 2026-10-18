@@ -974,10 +974,34 @@ class Services:
         await asyncio.gather(*(s.close() for s in self.services.values()), return_exceptions=True)
 
 
-def compose_app(mcp_app, services: Services | None):
+class LocalSecretOnly:
+    """The tunnel's local port answers only the tunnel: every request it replays carries a secret
+    made for this run, so another program on the machine (or a web page reaching 127.0.0.1) that
+    finds the port gets nothing. The relay has already checked the caller's OAuth token."""
+
+    HEADER = "x-winhand-local"
+
+    def __init__(self, app, secret: str) -> None:
+        self.app, self.secret = app, secret.encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            import hmac
+
+            given = dict(scope.get("headers") or []).get(self.HEADER.encode(), b"")
+            if not hmac.compare_digest(given, self.secret):
+                from starlette.responses import Response
+
+                await Response("not for you", status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def compose_app(mcp_app, services: Services | None, secret: str | None = None):
     """winhand's own MCP app at /mcp, one endpoint per local server at /mcp/<name>, the one-time
     file links at /transfer/<token> (see transfer.py) and the session-start hook at /hook/<event>
-    (see session_bridge.py), which alone the relay's hook identity may reach."""
+    (see session_bridge.py), which alone the relay's hook identity may reach. With `secret`, only
+    requests carrying it (the tunnel's) are served."""
     from starlette.applications import Starlette
     from starlette.middleware import Middleware
     from starlette.routing import Mount, Route
@@ -994,10 +1018,11 @@ def compose_app(mcp_app, services: Services | None):
     if services is not None:
         routes.append(Route("/mcp/{name}", services.endpoint, methods=["GET", "POST", "DELETE"]))
     routes.append(Mount("/", app=mcp_app))
+    middleware = [Middleware(LocalSecretOnly, secret=secret)] if secret else []
     return Starlette(
         routes=routes,
         lifespan=mcp_app.lifespan,
-        middleware=[Middleware(session_bridge.HookIdentityOnly)],
+        middleware=[*middleware, Middleware(session_bridge.HookIdentityOnly)],
     )
 
 
