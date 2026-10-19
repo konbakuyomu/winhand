@@ -130,7 +130,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 分组 | 工具 |
 |---|---|
 | 会话 | `session_start` `session_send` `session_wait` `session_read` `session_screen` `session_list` `session_stop` `session_resize` `session_prompt_user` `profile_list` |
-| 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值。只给 `key`（例如 `CLOUDFLARE_API_TOKEN`）时存进本机密钥库 `~/.winhand/secrets.env`，之后 `run`、`job_start` 用 `secrets=['CLOUDFLARE_API_TOKEN']` 把它作为环境变量交给程序，以后的会话也能用，不用再建新密钥。密钥库在结果里一律遮挡（重启后也是），AI 读不到也改不了。电脑前的人在桌面 App 的“设置 → 密钥”里查看名字、添加、修改、改名、删除、显示或复制值（显示期间截图拍不到 App 窗口） |
+| 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值。只给 `key`（例如 `CLOUDFLARE_API_TOKEN`）时存进本机密钥库 `~/.winhand/secrets.env`，之后 `run`、`job_start` 用 `secrets=['CLOUDFLARE_API_TOKEN']` 把它作为环境变量交给程序，以后的会话也能用，不用再建新密钥。密钥库在结果里一律遮挡（重启后也是），AI 读不到也改不了。AI 一连上就从 winhand 的说明里看到已存的名字（“Stored here: …”，密钥库一变就更新），不用先调 `context()`；对已存的名字再调 `secret_prompt` 时，输入框会提示“已经存在”，点取消即可。电脑前的人在桌面 App 的“设置 → 密钥”里查看名字、添加、修改、改名、删除、显示或复制值（显示期间截图拍不到 App 窗口） |
 | 一次性命令和进程 | `run`（约 40 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`remote_run`（经本机的 ssh 配置在另一台机器上跑脚本）`proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
 | 桌面 | `screenshot`（`wait` 等画面变化或停止变化）`window` `input` `ui` `ocr`（认屏幕上的字）`clipboard` |
