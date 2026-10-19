@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import textwrap
+import weakref
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -79,7 +81,8 @@ Quick rules
 - A token or password that must be stored on the machine: secret_prompt(message, key='NAME') lets the
   person type it into a masked dialog and keeps it in this machine's secret store; you never see it.
   run(..., secrets=['NAME']) and job_start(..., secrets=['NAME']) give it to the program as an
-  environment variable, in this conversation and later ones (context() lists the names stored).
+  environment variable, in this conversation and later ones. The names already stored are in the
+  instructions you got when connecting ("Stored here") and in context(): use them, do not ask again.
   Never ask the person to paste a token into the chat. «redacted:…» in results marks masked values:
   never write such text back to a file.
 - Keys the owner keeps in Harmonia (context() then has a `harmonia` part with its environments): run
@@ -180,37 +183,40 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   waits for the rest. Never sleep or poll in a loop.
 - Interactive, long-running or stateful programs (shells, REPLs, gdb, gdbserver, installers, serial or
   telnet consoles, full-screen TUIs) -> a session: session_start -> session_send / session_wait ->
-  session_read / session_screen -> session_stop. profile_list knows common tools (gdb, pyocd, openocd,
-  jlink, serial, ssh, menuconfig ...).
-- Session results carry `state` + `reason` + `next`: running | awaiting_input | needs_user | idle |
-  blocked | exited. `needs_user` is a password, code or browser sign-in: never invent it; give URLs to
-  the person or call session_prompt_user. session_wait waits on several sessions at once; a timeout is
-  not a failure, call it again (already returned output is not repeated).
-- A token a program needs (Cloudflare, GitHub ...): secret_prompt(message, key='NAME') once (the person
-  types it in a masked dialog), then run(..., secrets=['NAME']); you never see it. «redacted:…» marks
-  masked values: never write them back to a file.
+  session_read / session_screen -> session_stop. profile_list knows common tools (gdb, pyocd, serial ...).
+- Session results carry `state` + `next`: running | awaiting_input | needs_user | idle | blocked | exited.
+  `needs_user` (a password, code or sign-in): never invent it; tell the person or call session_prompt_user.
+  session_wait waits on several sessions at once; a timeout is not a failure, call it again.
+{secrets}
 - Files: fs_read / fs_edit / fs_write / fs_search / fs_find / fs_list / fs_stat / fs_op / fs_apply_patch;
   prefer them to shell commands. Moving more than a few KB between your sandbox and this machine:
   fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
-- Full-screen programs (menuconfig, htop, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
-  then session_screen; `highlighted` shows the selected row.
+- Full-screen programs (menuconfig, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
+  then session_screen (`highlighted` is the selected row).
 - The desktop: take a screenshot yourself instead of asking the person for one. To operate a program
   prefer its own CLI/API, then ui (controls and menus by name), then keys; without controls (canvases,
   self-drawn apps) ocr(action='click', text=...) finds text on screen; input pixel clicks come last.
-  screenshot(wait='change' | 'stable') waits for the screen instead of sleeping. A locked screen or an
-  administrator program's window cannot be operated: the error says so; tell the person. The first
-  click, key or ui action on a program waits for the person's OK in a dialog there (window list:
-  `approval`); terminals are not typed into: use run or a session.
-- job_start runs PowerShell in the background, independent of winhand (long work, anything that
-  restarts winhand, elevated=true for admin tasks); with args it runs a program directly and stdin=
-  feeds it text (Codex: command='codex', args=['exec', '-'], stdin=brief). Follow it with
-  job_status(id, wait_s=40); a list of ids waits on several jobs or runs in one call.
+  screenshot(wait='change' | 'stable') waits for the screen instead of sleeping. Locked screens and
+  administrator windows cannot be operated (the error says so). The first click, key or ui action on a
+  program waits for the person's OK there (window list: `approval`); terminals: use run or a session.
+- job_start runs in the background, independent of winhand (long work, anything that restarts winhand,
+  elevated=true for admin tasks); args= runs a program directly, stdin= feeds it text (Codex:
+  command='codex', args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
 - Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the
   usual suspects with fixes. A tool missing from your list: call(tool, arguments) reaches it.
 - Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
   tools, mcp_call(server, tool, arguments) calls one.
 - After a connection error, call history() before resending anything.
 """
+
+# The secret store's names, filled in when a client connects: an agent that never calls context()
+# still knows which tokens are there and does not ask the person to type one in again.
+SECRETS_LINE = (
+    "- Tokens and passwords: run(..., secrets=['NAME']) or job_start(..., secrets=[...]) gives the program "
+    "the stored value; you never see it. Stored here: {names}. Only a name not stored needs "
+    "secret_prompt(message, key='NAME') (the person types it in a masked dialog); never ask for a token "
+    "in the chat. «redacted:…» marks masked values: never write them back to a file."
+)
 
 GUIDE_CONTEXT = """\
 - The machine's owner may have written rules and skills for agents: before working in a folder, and
@@ -220,12 +226,55 @@ GUIDE_CONTEXT = """\
 """
 
 
+INSTRUCTIONS_MAX = 4096  # what Claude Code keeps of a server's instructions
+
+
+def _secrets_line(room: int) -> str:
+    """SECRETS_LINE with the stored names, as many as fit in `room` characters."""
+
+    def line(names: str) -> str:
+        return textwrap.fill(
+            SECRETS_LINE.replace("{names}", names),
+            width=104,
+            subsequent_indent="  ",
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+
+    stored = secret_store.stored_names()
+    for shown in range(len(stored), -1, -1):
+        more = len(stored) - shown
+        names = ", ".join(stored[:shown]) or "none yet"
+        if more:
+            names = (names + ", " if shown else "") + f"{more} more (context() lists them)"
+        text = line(names)
+        if len(text) <= room:
+            return text
+    return line("see context()")
+
+
 def instructions(cfg: Config, local_stdio: bool = False) -> str:
     """The instructions for this entry point: stdio clients on this machine read their own rules,
-    so they get the context() hint only when [context] stdio_hint is set."""
+    so they get the context() hint only when [context] stdio_hint is set. The secret store's names
+    are filled in (refreshed when it changes, see _live)."""
     flag = (cfg.context or {}).get("stdio_hint")
     hint = not local_stdio or flag is True or str(flag).strip().lower() in ("true", "1", "yes", "on")
-    return GUIDE + GUIDE_CONTEXT if hint else GUIDE
+    rest = GUIDE.replace("{secrets}\n", "") + (GUIDE_CONTEXT if hint else "")
+    secrets = _secrets_line(INSTRUCTIONS_MAX - len(rest) - 1)
+    text = GUIDE.replace("{secrets}", secrets)
+    return text + GUIDE_CONTEXT if hint else text
+
+
+# servers running in this process, so a change to the secret store reaches the next client to connect
+_live: weakref.WeakKeyDictionary[FastMCP, tuple[Config, bool]] = weakref.WeakKeyDictionary()
+
+
+def _refresh_instructions() -> None:
+    for server, (cfg, local_stdio) in list(_live.items()):
+        server.instructions = instructions(cfg, local_stdio)
+
+
+secret_store.listeners.append(_refresh_instructions)
 
 
 def _text(value: str) -> TextContent:
@@ -268,6 +317,7 @@ def build_server(
     cfg = cfg if cfg is not None else load_config()
     sessions = manager or SessionManager()
     mcp = FastMCP("winhand", instructions=instructions(cfg, local_stdio), version=__version__)
+    _live[mcp] = (cfg, local_stdio)
     local_servers = [s.name for s in cfg.servers if s.enabled]
     recent = RecentCalls()
     mcp.add_middleware(recent)
@@ -937,7 +987,8 @@ def build_server(
         ever reaching you: you get back only where it was saved. It is also masked in later results.
         Use this whenever a token or password must exist on the machine. A token a program needs
         (Cloudflare, GitHub ...): secret_prompt(message, key='NAME') once, then
-        run(..., secrets=['NAME']) every time, in this and later conversations."""
+        run(..., secrets=['NAME']) every time, in this and later conversations. A name already stored
+        (winhand's instructions and context() list them) needs no prompt; ask again only to replace it."""
 
         def work():
             try:

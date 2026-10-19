@@ -110,7 +110,11 @@ def test_the_person_manages_the_store_in_the_app(winhand_home):
     store = winhand_home / "secrets.env"
     store.write_text(f"# kept as written\nGH_TOKEN={TOKEN}\nXUI_PASSWORD=pw-123456\n", encoding="utf-8")
     told = []
-    secret_store.listeners.append(lambda: told.append(1))
+
+    def listener():
+        told.append(1)
+
+    secret_store.listeners.append(listener)
     try:
         assert secret_store.summary()["items"] == [
             {"name": "GH_TOKEN", "chars": len(TOKEN)}, {"name": "XUI_PASSWORD", "chars": 9},
@@ -135,7 +139,7 @@ def test_the_person_manages_the_store_in_the_app(winhand_home):
             with pytest.raises(secret_store.SecretError, match=why):
                 bad()
     finally:
-        secret_store.listeners.clear()
+        secret_store.listeners.remove(listener)
 
 
 async def test_a_value_set_in_the_app_is_masked_at_once(client, winhand_home):
@@ -160,3 +164,52 @@ def test_no_screenshot_while_the_app_shows_a_value(winhand_home):
         assert not secret_store.shown()
     finally:
         secret_store.hide()
+
+
+# ------------------------------------------------------------------ 0.7.2: known without context()
+
+
+async def test_a_connecting_agent_is_told_the_stored_names(winhand_home):
+    from winhand import server
+
+    redact.reset()
+    mcp = build_server(Config())
+    async with Client(mcp) as c:
+        assert "Stored here: none yet." in c.instructions
+    secret_store.put("GH_TOKEN", TOKEN)  # the app or secret_prompt adds one: the next client knows
+    secret_store.put("CLOUDFLARE_API_TOKEN", TOKEN + "x")
+    async with Client(mcp) as c:
+        text = c.instructions
+    assert "Stored here: CLOUDFLARE_API_TOKEN, GH_TOKEN." in text and TOKEN not in text
+    assert len(text) <= server.INSTRUCTIONS_MAX and text.endswith(server.GUIDE_CONTEXT)
+    redact.reset()
+
+
+def test_many_names_still_fit_in_what_claude_code_keeps(winhand_home):
+    from winhand import server
+
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    names = [f"SOME_RATHER_LONG_SERVICE_NAME_{i:02d}_API_TOKEN" for i in range(40)]
+    (winhand_home / "secrets.env").write_text(
+        "".join(f"{n}=v{i}\n" for i, n in enumerate(names)), encoding="utf-8"
+    )
+    text = server.instructions(Config())
+    assert len(text) <= server.INSTRUCTIONS_MAX and text.endswith(server.GUIDE_CONTEXT)
+    flat = " ".join(text.split())  # the line is wrapped
+    assert names[0] in flat and "37 more (context() lists them)" in flat and names[-1] not in flat
+
+
+async def test_asked_again_for_a_stored_name_the_person_can_just_cancel(monkeypatch, winhand_home):
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    (winhand_home / "secrets.env").write_text(f"GH_TOKEN={TOKEN}\n", encoding="utf-8")
+    asked = []
+    monkeypatch.setattr(secret_store, "ask_secret", lambda title, message: asked.append(message))
+    async with Client(build_server(Config())) as c:
+        out = (
+            await c.call_tool("secret_prompt", {"message": "GitHub token", "key": "GH_TOKEN"})
+        ).structured_content
+    assert asked[0].startswith("GH_TOKEN 已经存在这台电脑上了") and asked[0].endswith("GitHub token")
+    assert (
+        out["saved"] is False and out["already_stored"] == "GH_TOKEN" and "secrets=['GH_TOKEN']" in out["use"]
+    )
+    assert (winhand_home / "secrets.env").read_text(encoding="utf-8") == f"GH_TOKEN={TOKEN}\n"  # unchanged

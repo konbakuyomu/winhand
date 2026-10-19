@@ -307,17 +307,28 @@ def prompt_and_save(
             pattern = re.compile(validate)
         except re.error as exc:
             raise SecretError(f"invalid validate regex: {exc}") from exc
-    question = message
+    # asked again for a name the store already holds: the person may only need to say no
+    stored = target is None and credential is None and _is_store(save_to) and key in stored_names()
+    ask = (
+        f"{key} 已经存在这台电脑上了。只有要换成新的值才需要输入；不换就点取消。\n\n{message}"
+        if stored
+        else message
+    )
+    question = ask
     for _ in range(max(1, attempts)):
         value = ask_secret(title, question)
         if value is None:
-            return {"saved": False, "reason": "the person cancelled"}
+            out = {"saved": False, "reason": "the person cancelled"}
+            if stored:
+                out["already_stored"] = key
+                out["use"] = f"run(..., secrets=['{key}']) gives a program the stored value; do not ask again"
+            return out
         value = value.strip()
         if not value:
-            question = "没有输入内容，请重新输入。\n\n" + message
+            question = "没有输入内容，请重新输入。\n\n" + ask
             continue
         if pattern is not None and not pattern.fullmatch(value):
-            question = "格式不对，请检查是否复制完整后重新输入。\n\n" + message
+            question = "格式不对，请检查是否复制完整后重新输入。\n\n" + ask
             continue
         redact.remember(value)
         if target is not None:
