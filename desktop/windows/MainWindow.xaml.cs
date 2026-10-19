@@ -94,6 +94,7 @@ public sealed partial class MainWindow : Window
         if (_shuttingDown)
             return;
         _backendError = message;
+        HideSecret();
         RefreshStatus();
         ScheduleRestart();
     }
@@ -121,6 +122,7 @@ public sealed partial class MainWindow : Window
         _sessions = Json.Arr(snapshot, "sessions").ToList();
         ApplyMcp(Json.Obj(snapshot, "mcp"));
         ApplyApps(Json.Obj(snapshot, "apps"));
+        ApplySecrets(Json.Obj(snapshot, "secrets"));
         LoadActivity(Json.Arr(snapshot, "activity"));
         RenderSessions();
         RenderSettings();
@@ -148,6 +150,9 @@ public sealed partial class MainWindow : Window
                 break;
             case "apps":
                 ApplyApps(e.Data);
+                break;
+            case "secrets":
+                ApplySecrets(e.Data);
                 break;
         }
     }
@@ -227,7 +232,12 @@ public sealed partial class MainWindow : Window
         PageTitle.Text = page switch { "activity" => "活动", "sessions" => "会话", "mcp" => "MCP 服务", "settings" => "设置", _ => "概览" };
         PageHost.Content = _pages[page];
         if (page == "settings")
+        {
             _ = RefreshAppsAsync(); // `winhand apps` or an edited file changes them without an event
+            _ = RefreshSecretsAsync(); // so does editing secrets.env by hand
+        }
+        else
+            HideSecret();
         if (!fromNavigation)
             RootNavigation.SelectedItem = RootNavigation.MenuItems.OfType<NavigationViewItem>().First(i => (string)i.Tag == page);
     }
@@ -261,6 +271,7 @@ public sealed partial class MainWindow : Window
             return;
         // Closing the window keeps winhand running in the notification area.
         args.Cancel = true;
+        HideSecret();
         ShowWindow(_hwnd, SwHide);
     }
 

@@ -22,7 +22,7 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
-from . import __version__, approvals, config, desktop, local_mcp, transfer
+from . import __version__, approvals, config, desktop, local_mcp, secret_store, transfer
 from .activity import ActivityHub, ToolActivity
 from .mcp_bridge import Services, probe
 from .relay_client import AlreadyRunning, Replaced, run_tunnel, single_instance
@@ -80,6 +80,7 @@ class Backend:
         self.services = Services(self.cfg.servers, self.hub)
         self.services.listeners.append(lambda _snapshot: self.emit("mcp", self.mcp_state()))
         approvals.subscribe(self._apps_changed)  # an answered approval dialog shows up at once
+        secret_store.listeners.append(self._secrets_changed)  # secret_prompt adds a name: listed at once
         transfer.listeners.append(self._on_transfer)
         self.status: dict[str, Any] = {}
         self.tunnel: asyncio.Task | None = None
@@ -255,6 +256,7 @@ class Backend:
             "activity": self.hub.snapshot(),
             "sessions": self.session_list(),
             "apps": self.apps_state(),
+            "secrets": secret_store.summary(),
         }
 
     async def m_initialize(self, params: dict) -> dict:
@@ -542,6 +544,55 @@ class Backend:
         self.hub.record("settings", f"在应用中撤销了 {exe} 的授权", status="ok", summary="")
         return await asyncio.to_thread(self.apps_state)
 
+    # ------------------------------------------------------------ secret store
+
+    def _secrets_changed(self) -> None:
+        self.emit("secrets", secret_store.summary())
+
+    async def m_secrets_list(self, params: dict) -> dict:
+        return secret_store.summary()
+
+    async def m_secrets_save(self, params: dict) -> dict:
+        name, original = str(params.get("name") or "").strip(), str(params.get("original_name") or "").strip()
+        try:
+            saved = await asyncio.to_thread(
+                secret_store.put, name, str(params.get("value") or ""), original or None
+            )
+        except secret_store.SecretError as exc:
+            raise RpcError("secrets", str(exc)) from None
+        if not original:
+            title = f"在应用中添加了密钥 {saved}"
+        elif original != saved:
+            title = f"在应用中把密钥 {original} 改名为 {saved}"
+        else:
+            title = f"在应用中修改了密钥 {saved}"
+        self.hub.record("settings", title, status="ok", summary="")
+        return {**secret_store.summary(), "saved": saved}
+
+    async def m_secrets_delete(self, params: dict) -> dict:
+        name = str(params.get("name") or "").strip()
+        try:
+            await asyncio.to_thread(secret_store.remove, name)
+        except secret_store.SecretError as exc:
+            raise RpcError("secrets", str(exc)) from None
+        self.hub.record("settings", f"在应用中删除了密钥 {name}", status="ok", summary="")
+        return secret_store.summary()
+
+    async def m_secrets_reveal(self, params: dict) -> dict:
+        name, copy = str(params.get("name") or "").strip(), bool(params.get("copy"))
+        try:
+            value = await asyncio.to_thread(secret_store.reveal, name, not copy)
+        except secret_store.SecretError as exc:
+            raise RpcError("secrets", str(exc)) from None
+        self.hub.record(
+            "settings", f"在应用中{'复制' if copy else '查看'}了密钥 {name}", status="ok", summary=""
+        )
+        return {"name": name, "value": value}
+
+    async def m_secrets_hide(self, params: dict) -> dict:
+        secret_store.hide()
+        return {"ok": True}
+
     async def m_shutdown(self, params: dict) -> dict:
         self.done.set()
         return {"ok": True}
@@ -569,6 +620,9 @@ class Backend:
         if local_mcp.reload_hook == self._reload_from_disk:
             local_mcp.reload_hook = None
         approvals.unsubscribe(self._apps_changed)
+        with contextlib.suppress(ValueError):
+            secret_store.listeners.remove(self._secrets_changed)
+        secret_store.hide()
         self.done.set()
         await self.stop_tunnel(quiet=True)
         await self.services.close()

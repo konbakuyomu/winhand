@@ -33,9 +33,14 @@
 | `apps_set_enabled` | `enabled` | 开关“AI 操作程序前先问我”，写入授权文件的 `ask`；返回程序授权状态。授权文件有错时不改写它，错误码 `approvals_file` |
 | `apps_allow` | `exe`（如 `notepad.exe`，大小写和路径不限，没有扩展名时补 `.exe`） | 加入“一直允许”（人在设置页操作，不再弹确认框）；返回程序授权状态，另加 `added`（规范化后的 exe 名）和 `caution?`（浏览器、终端等要提醒的话）。`exe` 为空时错误码 `invalid_exe`，授权文件有错时 `approvals_file` |
 | `apps_revoke` | `exe` | 同时撤销“一直允许”和“允许到 WinHand 重启”；返回程序授权状态。授权文件有错时只撤销后者，错误码 `approvals_file` |
+| `secrets_list` | — | 密钥库状态（见下） |
+| `secrets_save` | `name`，`value?`，`original_name?`（修改或改名时） | 添加、修改或改名；修改时 `value` 留空保持原值。返回密钥库状态，另加 `saved`（存下的名字）。名字不合法、重名、值为空或有多行时错误码 `secrets`，`message` 是给人看的中文说明 |
+| `secrets_delete` | `name` | 删除这一行；返回密钥库状态。没有这个名字时错误码 `secrets` |
+| `secrets_reveal` | `name`，`copy?: bool` | `{name, value}`：给 App 显示或复制用。不带 `copy` 时视为“正在显示”：此后 35 秒内（或直到 `secrets_hide`）winhand 不截图，截图和 OCR 工具报错说明原因 |
+| `secrets_hide` | — | `{ok: true}`，App 已隐藏显示的值，截图恢复 |
 | `shutdown` | — | `{ok: true}`，随后退出 |
 
-快照字段：`version`、`generation`、`paths{home,config,activity,logs}`、`relay{url,has_token}`、`mcp`（见下）、`apps`（见下）、`status`、`counts{ok,error}`、`activity[]`（最近 200 条，含今天的审计日志）、`sessions[]`。
+快照字段：`version`、`generation`、`paths{home,config,activity,logs}`、`relay{url,has_token}`、`mcp`（见下）、`apps`（见下）、`secrets`（见下）、`status`、`counts{ok,error}`、`activity[]`（最近 200 条，含今天的审计日志）、`sessions[]`。
 
 本机 MCP 服务状态（快照里的 `mcp`、`mcp_*` 方法的结果、`mcp` 事件）：`base_url`（`https://<中转>/mcp`，未配置中转时为 null）和 `servers[]`。每个服务：配置字段（名字像密钥的 env/headers 值替换为 `••••••••`；保存时原样传回表示不修改）、`kind`（`stdio` / `http`）、`public_url`（远程客户端添加连接器用的地址）和 `status{state,error,pid,server{name,version},protocol,calls,sessions,started_at,last_used,stderr_tail[],log_file}`，`state` 为 `stopped` / `starting` / `running` / `error`。
 
@@ -48,6 +53,13 @@
 - `denied[{exe,left_s}]`：刚被拒绝、还在 10 分钟冷却里的程序；
 - `terminals[]`：算作终端的程序（另外所有控制台窗口都算终端），不在“一直允许”里时直接拒绝；
 - `running[{exe,title}]`：现在开着窗口的程序（不含 WinHand 自己），供设置页挑选。
+
+密钥库状态（快照里的 `secrets`、`secrets_*` 方法的结果、`secrets` 事件）：`~/.winhand/secrets.env` 里的密钥，AI 用 `run` / `job_start` 的 `secrets=[名字]` 把值交给程序，自己看不到（`agent/src/winhand/secret_store.py`）。
+
+- `file`：密钥库文件的路径；`error?`：读不了时的说明；
+- `items[{name,chars}]`：按名字排序，`chars` 是值的长度。这里从不带值，值只由 `secrets_reveal` 给出。
+
+App 显示值时把窗口设为不进屏幕截图（`SetWindowDisplayAffinity` 的 `WDA_EXCLUDEFROMCAPTURE`），30 秒后、离开设置页或隐藏窗口时自动隐藏并调用 `secrets_hide`；复制时不进剪贴板历史，也不跨设备同步。
 
 ## 事件
 
@@ -69,4 +81,5 @@
 - `activity`：时间线条目，用 `id` 去重或更新。字段：`id`、`t`（Unix 秒）、`kind`（`tool` / `connection` / `session` / `mcp` / `transfer` / `settings`）、`title`、`status`（`running` / `ok` / `error` 或连接状态）、`args`（截断预览，env/token 已隐藏）、`duration_ms`、`summary`。工具调用先发出 `running`，结束后以同一 `id` 发出 `ok` 或 `error`。只有结束的条目写入 `~/.winhand/activity/YYYY-MM-DD.jsonl`。
 - `mcp`：本机 MCP 服务的配置或运行状态变化，`data` 同上。通过这些服务的工具调用也进入 `activity`，`title` 为 `服务名 · 工具名`，并带 `server` 字段。
 - `sessions`：会话列表变化（新增、结束、状态或是否有未读输出变化），`data.sessions` 为完整列表。
+- `secrets`：密钥库变化（AI 用 `secret_prompt(key=...)` 让人输入了新密钥，或 App 增删改），`data` 同密钥库状态。手动改文件不会推送；App 打开设置页时调用 `secrets_list` 重新获取。
 - `apps`：这个后端里的程序授权变化（人回答了授权弹窗、在设置页增删或开关），`data` 同程序授权状态。命令行 `winhand apps` 或手动改文件不会推送；App 打开设置页时调用 `apps_get` 重新获取。

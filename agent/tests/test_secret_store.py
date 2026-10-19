@@ -100,3 +100,63 @@ def test_context_lists_the_names_never_the_values(winhand_home, tmp_path):
     )
     assert TOKEN not in json.dumps(out)
     assert any(r["file"] == guard.BUILTIN for r in out["guards"]["rules"])
+
+
+# ------------------------------------------------------------------ the app's 密钥 section
+
+
+def test_the_person_manages_the_store_in_the_app(winhand_home):
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    store = winhand_home / "secrets.env"
+    store.write_text(f"# kept as written\nGH_TOKEN={TOKEN}\nXUI_PASSWORD=pw-123456\n", encoding="utf-8")
+    told = []
+    secret_store.listeners.append(lambda: told.append(1))
+    try:
+        assert secret_store.summary()["items"] == [
+            {"name": "GH_TOKEN", "chars": len(TOKEN)}, {"name": "XUI_PASSWORD", "chars": 9},
+        ]  # fmt: skip
+        assert secret_store.put("CLOUDFLARE_API_TOKEN", "  cf-new-value-123  \n") == "CLOUDFLARE_API_TOKEN"
+        # renamed in place, the value kept (left empty); then a new value
+        secret_store.put("GITHUB_TOKEN", "", original="GH_TOKEN")
+        secret_store.put("XUI_PASSWORD", "pw-changed-789", original="XUI_PASSWORD")
+        assert store.read_text(encoding="utf-8") == (
+            f"# kept as written\nGITHUB_TOKEN={TOKEN}\nXUI_PASSWORD=pw-changed-789\nCLOUDFLARE_API_TOKEN=cf-new-value-123\n"
+        )
+        secret_store.remove("XUI_PASSWORD")
+        assert "XUI_PASSWORD" not in store.read_text(encoding="utf-8") and len(told) == 4
+        for bad, why in (
+            (lambda: secret_store.put("9X", "v"), "不能以数字开头"),
+            (lambda: secret_store.put("GITHUB_TOKEN", "v"), "已经有叫 GITHUB_TOKEN"),
+            (lambda: secret_store.put("NEW", ""), "请填写值"),
+            (lambda: secret_store.put("NEW", "a\nb"), "一行"),
+            (lambda: secret_store.put("NEW", "", original="GONE"), "没有叫 GONE"),
+            (lambda: secret_store.remove("GONE"), "没有叫 GONE"),
+        ):
+            with pytest.raises(secret_store.SecretError, match=why):
+                bad()
+    finally:
+        secret_store.listeners.clear()
+
+
+async def test_a_value_set_in_the_app_is_masked_at_once(client, winhand_home):
+    secret_store.put("PANEL_PASSWORD", "panel-pass-424242")
+    ran = (
+        await client.call_tool("run", {**_echo("PANEL_PASSWORD"), "secrets": ["PANEL_PASSWORD"]})
+    ).structured_content
+    assert ran["stdout"].startswith("17 «redacted:") and "panel-pass-424242" not in json.dumps(ran)
+
+
+def test_no_screenshot_while_the_app_shows_a_value(winhand_home):
+    from winhand import desktop
+
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    (winhand_home / "secrets.env").write_text(f"GH_TOKEN={TOKEN}\n", encoding="utf-8")
+    try:
+        assert secret_store.reveal("GH_TOKEN", show=False) == TOKEN and not secret_store.shown()  # copied
+        assert secret_store.reveal("GH_TOKEN") == TOKEN and secret_store.shown()
+        with pytest.raises(desktop.DesktopError, match="looking at a stored secret"):
+            desktop.capture()
+        secret_store.hide()
+        assert not secret_store.shown()
+    finally:
+        secret_store.hide()

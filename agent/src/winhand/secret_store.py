@@ -9,16 +9,20 @@ Manager, or into a Harmonia environment, which syncs it to the owner's other mac
 With only a key it goes into this machine's own store, ~/.winhand/secrets.env: run and job_start
 hand the keys a program needs to it as environment variables (`secrets=[...]`), so a token is
 stored once and used from then on without anyone pasting it. The store is masked in every result,
-also after a restart, and the AI's tools never read or change it (guard.py).
+also after a restart, and the AI's tools never read or change it (guard.py). The person manages
+it in the app's 设置 → 密钥 (put, remove, reveal; desktop_backend.py).
 """
 
 from __future__ import annotations
 
 import getpass
+import logging
 import os
 import re
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from . import fs, harmonia, proc, redact, winenv
@@ -26,6 +30,7 @@ from .secret_prompt import ask_secret
 
 IS_WINDOWS = sys.platform == "win32"
 _KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+log = logging.getLogger("winhand.secrets")
 
 
 STORE_NAME = "secrets.env"
@@ -78,6 +83,109 @@ def load(names: list[str]) -> dict[str, str]:
             f"secret_prompt(message, key='{missing[0]}') asks the person to type it in"
         )
     return {n: items[n] for n in names}
+
+
+# ------------------------------------------------------------------ the app's 密钥 section
+
+listeners: list[Callable[[], None]] = []  # told whenever the store changes (the app shows it)
+SHOWN_FOR_S = 35.0  # the app hides a shown value after 30 s; screenshots wait at most this long
+_shown_until = 0.0
+
+
+def _changed() -> None:
+    for listener in list(listeners):
+        try:
+            listener()
+        except Exception:  # noqa: BLE001 - a listener's failure is not the store's
+            log.exception("secret store listener failed")
+
+
+def summary() -> dict:
+    """What the app lists: the file, and each name with its length. Never a value."""
+    out: dict = {"file": str(store_path()), "items": []}
+    try:
+        out["items"] = [{"name": k, "chars": len(v.strip())} for k, v in sorted(_store_items().items())]
+    except (OSError, ValueError, fs.FsError) as exc:
+        out["error"] = str(exc)
+    return out
+
+
+def _rewrite(old: str | None, key: str, value: str | None) -> None:
+    """Put `key=value` where `old` or `key` was (value None: remove `key`); other lines stay."""
+    full = winenv.long_path(str(store_path()))
+    text = fs.read_text(full)[0] if os.path.isfile(full) else ""
+    lines, placed = [], False
+    for line in text.splitlines():
+        name = line.split("=", 1)[0].strip().removeprefix("export ").strip()
+        if "=" in line and name in (old, key):
+            if value is not None and not placed:
+                lines.append(f"{key}={value}")
+                placed = True
+            continue
+        lines.append(line)
+    if value is not None and not placed:
+        lines.append(f"{key}={value}")
+    fs.write_bytes_atomic(full, ("\n".join(lines) + "\n").encode("utf-8") if lines else b"")
+    _restrict(full)
+
+
+def put(name: str, value: str = "", original: str | None = None) -> str:
+    """Add a key, change its value or rename it (`original`: its current name). An empty value
+    keeps the current one. The person does this in the app; its messages are for them."""
+    name, value, original = (name or "").strip(), (value or "").strip(), (original or "").strip() or None
+    if not _KEY.match(name):
+        raise SecretError(f"名字只能用英文字母、数字和 _ . -，不能以数字开头：{name!r}")
+    if "\n" in value or "\r" in value:
+        raise SecretError("值只能有一行")
+    items = _store_items()
+    if original is not None and original not in items:
+        raise SecretError(f"没有叫 {original} 的密钥（可能刚被删除）")
+    if name != original and name in items:
+        raise SecretError(f"已经有叫 {name} 的密钥：要改它的值，请点它那一行的“修改”")
+    if not value:
+        if original is None:
+            raise SecretError("请填写值")
+        value = items[original].strip()
+    redact.remember(value)
+    _rewrite(original, name, value)
+    _changed()
+    return name
+
+
+def remove(name: str) -> None:
+    if name not in _store_items():
+        raise SecretError(f"没有叫 {name} 的密钥（可能已经删除）")
+    _rewrite(None, name, None)
+    _changed()
+
+
+def reveal(name: str, show: bool = True) -> str:
+    """A stored value, for the person at the machine (the app's 显示 and 复制). While one is shown,
+    winhand takes no screenshots (desktop.capture): a picture would carry it past the masking."""
+    global _shown_until
+    items = _store_items()
+    if name not in items:
+        raise SecretError(f"没有叫 {name} 的密钥（可能已经删除）")
+    if show:
+        _shown_until = time.monotonic() + SHOWN_FOR_S
+    return items[name].strip()
+
+
+def hide() -> None:
+    global _shown_until
+    _shown_until = 0.0
+
+
+def shown() -> bool:
+    """Whether the app is showing a stored value right now."""
+    return time.monotonic() < _shown_until
+
+
+def _is_store(path: str) -> bool:
+    def norm(p: str) -> str:
+        return os.path.normcase(os.path.abspath(os.path.expanduser(os.path.expandvars(p))))
+
+    return norm(path) == norm(str(store_path()))
 
 
 def _restrict(path: str) -> None:
@@ -219,5 +327,8 @@ def prompt_and_save(
                 raise SecretError(str(exc)) from exc
         if credential is not None:
             return save_to_credential_manager(credential, value, key)
-        return save_to_file(save_to, value, key)
+        saved = save_to_file(save_to, value, key)
+        if _is_store(save_to):
+            _changed()  # the app's list shows the new name at once
+        return saved
     return {"saved": False, "reason": f"no valid value after {attempts} tries; nothing saved"}
