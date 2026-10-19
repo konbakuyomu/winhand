@@ -1124,6 +1124,13 @@ def capture(
     """The full-resolution picture of a window (even when covered by others), a monitor, a region
     [left, top, width, height] or the whole desktop, and where it sits on the screen:
     {'left', 'top', 'target', 'key', 'note'?}."""
+    from . import secret_store
+
+    if secret_store.shown():  # masking covers text, not pictures
+        raise DesktopError(
+            "The person is looking at a stored secret in WinHand's window: no screenshots until they "
+            f"hide it (at most {secret_store.SHOWN_FOR_S:.0f} s). Try again in a moment."
+        )
     _require_windows()
     _dpi_aware()
     from PIL import ImageGrab

@@ -220,3 +220,36 @@ async def test_local_mcp_servers_are_managed_from_the_app(tmp_path):
     finally:
         backend.proc.stdin.close()
         await asyncio.wait_for(backend.proc.wait(), 15)
+
+
+async def test_the_app_manages_the_secret_store(tmp_path):
+    backend = await spawn(tmp_path)
+    try:
+        init = (await backend.call("initialize", protocol_version=1, connect=False))["result"]
+        assert init["secrets"] == {"file": str(tmp_path / "secrets.env"), "items": []}
+        added = (await backend.call("secrets_save", name="GH_TOKEN", value="gh-token-0123456789"))["result"]
+        assert added["saved"] == "GH_TOKEN" and added["items"] == [{"name": "GH_TOKEN", "chars": 19}]
+        assert "gh-token" not in json.dumps(added)
+        await backend.event("secrets", lambda d: [i["name"] for i in d["items"]] == ["GH_TOKEN"])
+        renamed = (await backend.call("secrets_save", name="GITHUB_TOKEN", original_name="GH_TOKEN"))[
+            "result"
+        ]
+        assert renamed["items"] == [{"name": "GITHUB_TOKEN", "chars": 19}]
+        shown = (await backend.call("secrets_reveal", name="GITHUB_TOKEN"))["result"]
+        assert shown == {"name": "GITHUB_TOKEN", "value": "gh-token-0123456789"}
+        assert (await backend.call("secrets_hide"))["result"] == {"ok": True}
+        taken = await backend.call("secrets_save", name="GITHUB_TOKEN", value="x")
+        assert taken["error"]["code"] == "secrets" and "已经有" in taken["error"]["message"]
+        assert (await backend.call("secrets_delete", name="GITHUB_TOKEN"))["result"]["items"] == []
+        titles = [
+            e["data"]["title"]
+            for e in backend.events
+            if e["event"] == "activity" and e["data"]["kind"] == "settings"
+        ]
+        assert titles == [
+            "在应用中添加了密钥 GH_TOKEN", "在应用中把密钥 GH_TOKEN 改名为 GITHUB_TOKEN",
+            "在应用中查看了密钥 GITHUB_TOKEN", "在应用中删除了密钥 GITHUB_TOKEN",
+        ]  # fmt: skip
+    finally:
+        backend.proc.stdin.close()
+        await backend.proc.wait()
