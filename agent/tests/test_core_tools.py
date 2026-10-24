@@ -287,8 +287,9 @@ def test_fs_write_is_atomic_appends_and_detects_changes(tmp_path):
     p = tmp_path / "notes" / "a.md"
     first = fs.fs_write(str(p), "one\n")
     assert first["sha256"] == fs.sha256_of(str(p))
-    with pytest.raises(fs.FsError, match="must not|changed since"):
-        fs.fs_write(str(p), "two\n", expected_sha256="")
+    with pytest.raises(fs.FsError, match="already exists"):
+        fs.fs_write(str(p), "two\n", overwrite=False)
+    assert p.read_text() == "one\n"
     p.write_text("someone else\n")
     with pytest.raises(fs.FsError, match="changed since you read it"):
         fs.fs_write(str(p), "two\n", expected_sha256=first["sha256"])

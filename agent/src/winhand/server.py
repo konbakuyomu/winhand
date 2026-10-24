@@ -15,7 +15,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import CallToolResult, TextContent
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from . import (
     __version__,
@@ -54,6 +54,8 @@ GUIDE_FULL = """\
 winhand drives the Windows machine it runs on.
 
 Quick rules
+- Optional parameters: leave them out. Never write a parameter's name with nothing after it ('' or an
+  empty value): the call can fail before it reaches winhand ("could not be parsed as JSON").
 - One-shot command that finishes by itself -> `run`:
     run(command='git', args=['log', '-3'])        program + args, no shell, no quoting problems
     run(script='...', shell='pwsh')                a multi-line script (pwsh | powershell | cmd |
@@ -106,7 +108,8 @@ Quick rules
   fs_stat (hash='sha256') / fs_op (copy, move, delete to the Recycle Bin, mkdir) /
   fs_apply_patch (a unified diff onto a work tree: encoding, CRLF and -p handled, all or nothing).
   Prefer these over shell commands for files. fs_read returns sha256: pass it as expected_sha256
-  to fs_write/fs_edit when someone else may change the file meanwhile.
+  to fs_write/fs_edit when someone else may change the file meanwhile. fs_write(overwrite=false)
+  only creates a file that is not there yet.
   fs_read also shows images and reads PDF (scans as page images), Word, PowerPoint and Excel.
   fs_send hands any file to you as-is; fs_write_bytes writes binary content here;
   fs_pick lets the person choose files in a dialog (their way to "upload" to you).
@@ -279,6 +282,11 @@ secret_store.listeners.append(_refresh_instructions)
 
 def _text(value: str) -> TextContent:
     return TextContent(type="text", text=value)
+
+
+def _none_as_empty(value: Any) -> Any:
+    """null for an optional string whose "not given" is the empty string: some clients send it."""
+    return "" if value is None else value
 
 
 def _mcp_result(result: dict) -> ToolResult:
@@ -614,7 +622,8 @@ def build_server(
             Field(description="Profile name from profile_list (e.g. gdb, rtthread-msh, menuconfig)"),
         ] = None,
         command: Annotated[
-            list[str] | str | None, Field(description="Program + args (pty/pipe). Empty = interactive shell")
+            list[str] | str | None,
+            Field(description="Program + args (pty/pipe). Leave out for an interactive shell"),
         ] = None,
         args: Annotated[
             list[str] | None, Field(description="Extra args appended to the profile's command")
@@ -1069,17 +1078,22 @@ def build_server(
         content: str,
         encoding: str = "utf-8",
         append: Annotated[bool, Field(description="Add to the end instead of replacing the file")] = False,
+        overwrite: Annotated[
+            bool, Field(description="false: create only, refuse if the file already exists")
+        ] = True,
         expected_sha256: Annotated[
-            str | None,
+            str,
+            BeforeValidator(_none_as_empty),
             Field(
-                description="Only write if the file still has this sha256 (from fs_read); '' = must not exist"
+                description="Only write if the file still has this sha256 (from fs_read). Leave it out "
+                "to write without that check"
             ),
-        ] = None,
+        ] = "",
     ) -> dict:
         """Create or overwrite a file (parent folders are created). Replacing is atomic: a reader
         never sees half a file. Returns the new sha256."""
         return await asyncio.to_thread(
-            _fs, fs.fs_write, path, content, encoding, True, append, expected_sha256
+            _fs, fs.fs_write, path, content, encoding, True, append, expected_sha256, overwrite
         )
 
     @mcp.tool
@@ -1088,7 +1102,10 @@ def build_server(
         old: Annotated[
             str | None, Field(description="Exact text to replace (must be unique unless replace_all)")
         ] = None,
-        new: str | None = None,
+        new: Annotated[
+            str | None,
+            Field(description="Replacement text. To delete text, use edits=[{old, new: ''}]"),
+        ] = None,
         replace_all: bool = False,
         edits: Annotated[
             list[Edit] | None,
@@ -1097,8 +1114,13 @@ def build_server(
             ),
         ] = None,
         expected_sha256: Annotated[
-            str | None, Field(description="Only edit if the file still has this sha256 (from fs_read)")
-        ] = None,
+            str,
+            BeforeValidator(_none_as_empty),
+            Field(
+                description="Only edit if the file still has this sha256 (from fs_read). Leave it out "
+                "to edit without that check"
+            ),
+        ] = "",
     ) -> dict:
         """Replace exact snippets in a file; keeps the file's encoding and CRLF/LF line endings."""
         ops = [e.model_dump() for e in edits] if edits else None

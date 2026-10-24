@@ -102,8 +102,9 @@ def sha256_of(path: str) -> str:
 
 def _check_expected(path: str, expected: str | None) -> None:
     """Optimistic locking: refuse to write when the file is not what the caller last saw.
-    expected="" means the file must not exist yet."""
-    if expected is None:
+    Nothing, or an empty value (what a model sends for "not given"), means no check: "the file
+    must not exist" is fs_write(overwrite=False), which needs no empty value to say."""
+    if not expected or not expected.strip():
         return
     full = _p(path)
     current = sha256_of(path) if os.path.isfile(full) else ""
@@ -246,11 +247,14 @@ def fs_write(
     create_dirs: bool = True,
     append: bool = False,
     expected_sha256: str | None = None,
+    overwrite: bool = True,
 ) -> dict:
     from .redact import refuse_placeholders
 
     refuse_placeholders(content)
     full = _p(path)
+    if not overwrite and os.path.exists(full):
+        raise FsError(f"{path} already exists; overwrite=false only creates a file that is not there yet")
     _check_expected(path, expected_sha256)
     note = None
     if append:
@@ -319,7 +323,11 @@ def fs_edit(
 
     refuse_placeholders(*(o for op in ops for o in op[:2]))
     text, encoding, data = _read_text_bytes(path)
-    if expected_sha256 is not None and hashlib.sha256(data).hexdigest() != expected_sha256.strip().lower():
+    if (
+        expected_sha256
+        and expected_sha256.strip()
+        and hashlib.sha256(data).hexdigest() != expected_sha256.strip().lower()
+    ):
         raise FsError(f"{path} changed since you read it; read it again before editing")
     results = []
     for n, (o, nw, ra) in enumerate(ops, 1):
