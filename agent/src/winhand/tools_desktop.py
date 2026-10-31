@@ -17,13 +17,27 @@ import time
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
 from pydantic import Field
 
-from . import approvals, coalesce, desktop, jobs, media, proc, secret_store, transfer, uia, winenv
+from . import (
+    approvals,
+    coalesce,
+    desktop,
+    fs,
+    jobs,
+    jobwatch,
+    media,
+    proc,
+    secret_store,
+    transfer,
+    uia,
+    waiting,
+    winenv,
+)
 from . import ocr as screen_text
 from .secret_prompt import PromptUnavailable, ask_pick
 
@@ -42,11 +56,21 @@ def _new_text(status: dict, stderr_before: int | None) -> str:
     return text
 
 
-async def wait_job(fetch, wait_s: float, regexes: list[re.Pattern[str]]) -> dict:
-    """Poll a job's status until it is no longer running, its new output matches, or time is up."""
+async def wait_job(
+    fetch,
+    wait_s: float,
+    regexes: list[re.Pattern[str]],
+    ceiling: float = MAX_JOB_WAIT_S,
+    watch=None,
+) -> dict:
+    """Poll a job's status until it is no longer running, its new output matches, or time is up.
+    With `watch` (its activity, see jobwatch), the wait also ends when the job opens a new window
+    (a dialog waiting for someone) or goes quiet with no CPU while we wait."""
     began = time.monotonic()
-    deadline = began + min(wait_s, MAX_JOB_WAIT_S)
+    deadline = began + min(wait_s, ceiling)
     stderr_before = None
+    first: dict | None = None
+    next_look = began + jobwatch.CHECK_EVERY_S
     while True:
         status = await asyncio.to_thread(fetch)
         if status.get("error") or status.get("state") != "running":
@@ -57,13 +81,60 @@ async def wait_job(fetch, wait_s: float, regexes: list[re.Pattern[str]]) -> dict
         hit = next((r.pattern for r in regexes if r.search(output)), None)
         if hit is not None:
             return {**status, "matched": hit}
+        now = time.monotonic()
+        if watch is not None and (first is None or now >= next_look):
+            activity = await asyncio.to_thread(watch)
+            next_look = time.monotonic() + jobwatch.CHECK_EVERY_S
+            if first is None:
+                first = activity  # what was already there is no news
+            else:
+                before = {w["hwnd"] for w in first.get("windows", [])}
+                new = [w for w in activity.get("windows", []) if w["hwnd"] not in before]
+                if new:
+                    return {
+                        **status,
+                        "matched": "window",
+                        "activity": activity,
+                        "note": "the job opened a window: read it (screenshot / ui inspect) before waiting on",
+                    }
+                if activity.get("stalled") and not first.get("stalled"):
+                    return {**status, "matched": "stalled", "activity": activity}
         if time.monotonic() >= deadline:
-            return {
+            out = {
                 **status,
                 "waited_s": round(time.monotonic() - began, 1),
                 "note": "still running; call job_status again with since=cursor (and wait_s) to keep waiting",
             }
+            if watch is not None:
+                out["activity"] = await asyncio.to_thread(watch)
+            return out
         await asyncio.sleep(JOB_POLL_S)
+
+
+def _activity(job_id: str) -> dict:
+    """processes, CPU, memory, quiet_s, stalled and windows of a running job or `run` command."""
+    info = proc.watch_info(job_id) if _is_run(job_id) else jobs.watch_info(job_id)
+    return jobwatch.snapshot(*info) if info else {}
+
+
+def _file_tails(paths: list[str], lines: int = 20, max_bytes: int = 8192) -> dict:
+    """The end of each file: what a job writes besides its own output (a router's log ...)."""
+    out: dict = {}
+    for path in paths:
+        try:
+            full = fs._p(path)
+            info = os.stat(full)
+            with open(full, "rb") as fh:
+                fh.seek(max(0, info.st_size - max_bytes))
+                text = proc._decode(fh.read())
+            out[path] = {
+                "size": info.st_size,
+                "quiet_s": int(max(0.0, time.time() - info.st_mtime)),
+                "tail": "\n".join(text.splitlines()[-lines:]),
+            }
+        except OSError as exc:
+            out[path] = {"error": f"{type(exc).__name__}: {exc.strerror or exc}"}
+    return out
 
 
 MULTI_JOB_CHARS = 6_000  # output per job when several are waited on together
@@ -144,12 +215,17 @@ def _job_fetch(job_id: str, since: int, limit: int) -> dict:
 
 
 async def wait_jobs(
-    ids: list[str], cursors: dict[str, int], limit: int, wait_s: float, regexes: list[re.Pattern[str]]
+    ids: list[str],
+    cursors: dict[str, int],
+    limit: int,
+    wait_s: float,
+    regexes: list[re.Pattern[str]],
+    ceiling: float = MAX_JOB_WAIT_S,
 ) -> dict:
     """Wait on several jobs at once: until one is no longer running, the new output of one matches,
     or time is up. Every job's state and new output come back, keyed by id."""
     began = time.monotonic()
-    deadline = began + min(wait_s, MAX_JOB_WAIT_S)
+    deadline = began + min(wait_s, ceiling)
     stderr_before: dict[str, int] = {}
     while True:
         statuses = {i: await asyncio.to_thread(_job_fetch, i, cursors[i], limit) for i in ids}
@@ -1051,7 +1127,8 @@ def register(mcp: FastMCP) -> None:
         shell: Annotated[
             str | None,
             Field(
-                description="For a command: powershell (Windows PowerShell 5.1, default) | pwsh (PowerShell 7)"
+                description="For a command: pwsh (PowerShell 7, the default when installed) | powershell "
+                "(Windows PowerShell 5.1)"
             ),
         ] = None,
         secrets: Annotated[
@@ -1061,24 +1138,39 @@ def register(mcp: FastMCP) -> None:
                 "variables, you never see the values (not for elevated jobs)"
             ),
         ] = None,
+        timeout_s: Annotated[
+            float | None,
+            Field(gt=0, description="End the job and every process it started after this many seconds"),
+        ] = None,
+        after: Annotated[
+            list[str] | None,
+            Field(description="Job ids to wait for: this one starts when they have ended (a chain of steps)"),
+        ] = None,
+        keep_awake: Annotated[
+            bool, Field(description="Hold off sleep while it runs (the display may still turn off)")
+        ] = True,
     ) -> dict:
         """Run a command in the background, independent of winhand: it keeps running even if
         winhand restarts or is reinstalled, and its output and exit code stay available via
         job_status. Use for long work, for anything that replaces winhand, and for admin tasks.
-        A program fed text on stdin (Codex: command='codex', args=['exec', '-'], stdin=brief) is
-        best run with args + stdin: the text and its output never pass through a PowerShell pipe."""
+        The PC does not sleep while it runs. A program fed text on stdin (Codex: command='codex',
+        args=['exec', '-'], stdin=brief) is best run with args + stdin: the text and its output
+        never pass through a PowerShell pipe."""
 
         def work():
             try:
                 env = secret_store.load(list(secrets or []))
             except secret_store.SecretError as exc:
                 return {"error": str(exc)}
-            return jobs.start(command, cwd, name, elevated, args, stdin, shell, env or None)
+            return jobs.start(
+                command, cwd, name, elevated, args, stdin, shell, env or None, timeout_s, after, keep_awake
+            )
 
         return await asyncio.to_thread(_errors, work)
 
     @mcp.tool
     async def job_status(
+        ctx: Context,
         id: Annotated[
             str | list[str] | None,
             Field(description="Job id, or a list of ids to wait on together; omit to list recent jobs"),
@@ -1091,8 +1183,10 @@ def register(mcp: FastMCP) -> None:
             float,
             Field(
                 ge=0,
-                description="Wait up to this long (max 40 s) for the job to finish or a pattern to appear; "
-                "0 answers at once. Use instead of sleeping or polling",
+                description="Wait up to this long for the job to finish or a pattern to appear: up to "
+                "1800 s when your client shows progress (Claude Code: past 2 min the call goes to the "
+                "background and you are told when it ends), else 40 s; 0 answers at once. One long "
+                "wait instead of sleeping or polling",
             ),
         ] = 0,
         patterns: Annotated[
@@ -1101,11 +1195,17 @@ def register(mcp: FastMCP) -> None:
         tail: Annotated[
             int | None, Field(ge=1, description="Return at most this many characters of output (the end)")
         ] = None,
+        files: Annotated[
+            list[str] | None,
+            Field(description="Also show the end of these files (a log the job writes besides its output)"),
+        ] = None,
     ) -> dict:
         """State (running/finished/vanished), exit code and output of a background job or of a `run`
         that was still going (run-N). With wait_s it blocks until the job ends, new output matches
-        `patterns`, or the wait runs out (then call again with since=cursor). Several ids wait for
-        whichever job finishes or matches first, and answer with every job's state and new output."""
+        `patterns`, the job opens a window or stops working (`matched`: window / stalled), or the
+        wait runs out (then call again with since=cursor). A running job's `activity` gives its
+        processes, CPU, memory, how long it has been quiet and the windows it shows. Several ids
+        wait for whichever job finishes or matches first, and answer with every job's state."""
         if id is None:
             return await asyncio.to_thread(_errors, lambda: {"jobs": jobs.list_jobs()})
         id = _job_ids(id)
@@ -1114,7 +1214,7 @@ def register(mcp: FastMCP) -> None:
             if len(ids) == 1:
                 id = ids[0]
             else:
-                return await _job_statuses(ids, since, wait_s, patterns, tail)
+                return _with_files(await _job_statuses(ctx, ids, since, wait_s, patterns, tail), files)
         start = since.get(id, 0) if isinstance(since, dict) else since
         limit = tail or 20_000
 
@@ -1122,44 +1222,61 @@ def register(mcp: FastMCP) -> None:
             return _job_fetch(id, start, limit)
 
         if wait_s <= 0:
-            return trim_repeat(id, start, await asyncio.to_thread(fetch), tail is not None)
+            status = await asyncio.to_thread(fetch)
+            if status.get("state") == "running":
+                status = {**status, "activity": await asyncio.to_thread(_activity, id)}
+            return _with_files(trim_repeat(id, start, status, tail is not None), files)
         try:
             regexes = [re.compile(p, re.MULTILINE) for p in patterns or []]
         except re.error as exc:
             return {"error": f"invalid regex: {exc}"}
-        key = (
-            "job_status",
-            id,
-            start,
-            round(min(wait_s, MAX_JOB_WAIT_S), 1),
-            coalesce.freeze(patterns),
-            limit,
+        ceiling = waiting.limit(ctx, wait_s)
+        key = ("job_status", id, start, round(ceiling, 1), coalesce.freeze(patterns), limit)
+        shared = coalesce.shared(
+            key, lambda: wait_job(fetch, ceiling, regexes, ceiling, watch=lambda: _activity(id))
         )
-        status = await coalesce.shared(key, lambda: wait_job(fetch, wait_s, regexes))
-        return trim_repeat(id, start, status, tail is not None)
+        status = await waiting.heartbeat(ctx, shared, ceiling, f"job {id}")
+        note = waiting.capped_note(ctx, wait_s)
+        if note and status.get("state") == "running":
+            status = {**status, "wait_note": note}
+        return _with_files(trim_repeat(id, start, status, tail is not None), files)
 
-    async def _job_statuses(ids, since, wait_s, patterns, tail) -> dict:
+    async def _job_statuses(ctx, ids, since, wait_s, patterns, tail) -> dict:
         cursors = {i: (since.get(i, 0) if isinstance(since, dict) else since) for i in ids}
         limit = tail or MULTI_JOB_CHARS
         try:
             regexes = [re.compile(p, re.MULTILINE) for p in patterns or []]
         except re.error as exc:
             return {"error": f"invalid regex: {exc}"}
+        ceiling = waiting.limit(ctx, wait_s)
         key = (
             "job_statuses",
             tuple(ids),
             coalesce.freeze(cursors),
-            round(min(wait_s, MAX_JOB_WAIT_S), 1),
+            round(ceiling, 1),
             coalesce.freeze(patterns),
             limit,
         )
-        out = await coalesce.shared(key, lambda: wait_jobs(ids, cursors, limit, wait_s, regexes))
+        shared = coalesce.shared(key, lambda: wait_jobs(ids, cursors, limit, ceiling, regexes, ceiling))
+        out = await waiting.heartbeat(ctx, shared, ceiling, f"{len(ids)} jobs")
         if not isinstance(out.get("jobs"), dict):
             return out
+        running = [i for i, st in out["jobs"].items() if st.get("state") == "running"]
+        seen = await asyncio.gather(*(asyncio.to_thread(_activity, i) for i in running))
+        activity = dict(zip(running, seen, strict=True))
         trimmed = {
-            i: trim_repeat(i, cursors.get(i, 0), st, tail is not None) for i, st in out["jobs"].items()
+            i: trim_repeat(
+                i,
+                cursors.get(i, 0),
+                {**st, **({"activity": activity[i]} if i in activity else {})},
+                tail is not None,
+            )
+            for i, st in out["jobs"].items()
         }
         return {**out, "jobs": trimmed}
+
+    def _with_files(result: dict, files: list[str] | None) -> dict:
+        return {**result, "files": _file_tails(files)} if files and isinstance(result, dict) else result
 
     @mcp.tool
     async def job_stop(id: str) -> dict:

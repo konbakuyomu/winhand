@@ -36,6 +36,9 @@ const HOOK_GRACE_MS = 5_000;
 // The agent drops off for seconds at a time (winhand restarting or updating, the PC's network
 // switching). A request arriving then waits this long for it to come back before failing.
 const DEFAULT_GRACE_S = 20;
+// Offline longer than this: answer at once instead of waiting the grace period on every call (a PC
+// asleep for hours made each call wait 20 s, and parallel calls 60 s, for nothing).
+const LONG_OFFLINE_MS = 120_000;
 
 // One Bridge instance per device. The agent keeps a single WebSocket open to it;
 // every authenticated MCP request is pushed down that socket and the agent's
@@ -80,7 +83,7 @@ export class Bridge extends DurableObject<Env> {
   /** The agent's socket, waiting up to the grace period (or `limitMs`) for it to (re)connect. */
   private async waitForAgent(limitMs?: number): Promise<WebSocket | undefined> {
     const socket = this.agent();
-    if (socket) return socket;
+    if (socket || limitMs === 0) return socket;
     await new Promise<void>((resolve) => {
       const done = () => {
         clearTimeout(timer);
@@ -101,13 +104,22 @@ export class Bridge extends DurableObject<Env> {
     for (const wake of waiting) wake();
   }
 
-  private async offlineMessage(): Promise<string> {
+  private async offlineMessage(waitedMs: number): Promise<string> {
     const since = await this.ctx.storage.get<number>("offlineSince");
     const when = since ? ` since ${new Date(since).toISOString()} (${describe(Date.now() - since)} ago)` : "";
+    const waited = waitedMs
+      ? `waited ${Math.round(waitedMs / 1000)} s for it to reconnect`
+      : "did not wait, it has been away for minutes";
+    const origin = this.env.PUBLIC_ORIGIN?.replace(/\/$/, "");
+    const watch = origin
+      ? ` To learn when it is back without calling tools: ${origin}/status.json says "online": true ` +
+        `(a background loop such as: until curl -fsS ${origin}/status.json | grep -q '"online":true'; do sleep 60; done).`
+      : "";
     return (
-      `winhand on the PC is offline${when}; waited ${Math.round(this.graceMs() / 1000)} s for it to reconnect. ` +
+      `winhand on the PC is offline${when}; ${waited}. ` +
       "Likely the PC is asleep or off, winhand is restarting or updating, or its network changed. " +
-      "Try again in a minute; once it is back, call history() to see whether earlier calls ran before resending them."
+      "Try again later; once it is back, call history() to see whether earlier calls ran before resending them." +
+      watch
     );
   }
 
@@ -204,8 +216,11 @@ export class Bridge extends DurableObject<Env> {
     const reply = errorReply(rpc);
 
     const hook = path.startsWith("/hook/");
-    const socket = await this.waitForAgent(hook ? HOOK_GRACE_MS : undefined);
-    if (!socket) return reply(await this.offlineMessage(), 503);
+    const since = this.agent() ? undefined : await this.ctx.storage.get<number>("offlineSince");
+    const longGone = since !== undefined && Date.now() - since > LONG_OFFLINE_MS;
+    const limit = hook ? HOOK_GRACE_MS : longGone ? 0 : undefined;
+    const socket = await this.waitForAgent(limit);
+    if (!socket) return reply(await this.offlineMessage(limit === 0 ? 0 : Math.min(this.graceMs(), limit ?? Infinity)), 503);
     const headTimeout = hook ? HOOK_HEAD_TIMEOUT_MS : HEAD_TIMEOUT_MS;
 
     const id = crypto.randomUUID();

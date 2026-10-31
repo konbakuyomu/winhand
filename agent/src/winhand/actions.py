@@ -233,6 +233,9 @@ def describe(
         return one("read", a.get("path"), expand_vars=True)
     if tool == "fs_search":  # reads the files below path
         return one("read", a.get("path") or ".")
+    if tool == "job_status" and a.get("files"):  # shows the end of these files
+        files = a["files"] if isinstance(a["files"], list) else [a["files"]]
+        return one("read", *[str(f) for f in files])
     if tool == "mcp_call" and not a.get("call_id"):  # waiting for an earlier call runs nothing new
         return [Action("mcp", tool, text=mcp_text(a.get("server"), a.get("tool"), a.get("arguments")))]
     if tool == "fs_op":

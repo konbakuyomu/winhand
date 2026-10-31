@@ -21,7 +21,7 @@ from pathlib import Path
 
 import psutil
 
-from . import config, winenv
+from . import config, power, winenv
 from .session.text import clip, fitting, strip_ansi
 
 _TOOLS = (
@@ -500,6 +500,7 @@ class _Running:
     def __init__(self, rid: str, proc: subprocess.Popen, argv: list[str], deadline: float) -> None:
         self.id, self.proc, self.argv, self.deadline = rid, proc, argv, deadline
         self.started = time.monotonic()
+        self.last_output = self.started  # when stdout or stderr last grew (jobwatch: quiet for how long)
         self.out = bytearray()
         self.err = bytearray()
         self.lock = threading.Lock()
@@ -522,6 +523,7 @@ class _Running:
         for chunk in iter(lambda: stream.read1(65536), b""):
             with self.lock:
                 sink.extend(chunk)
+                self.last_output = time.monotonic()
 
     def wait(self, seconds: float) -> bool:
         try:
@@ -531,6 +533,7 @@ class _Running:
         for t in self.readers:
             t.join(timeout=5)
         self._cleanup()
+        power.keeper.release(self.id)
         return True
 
     def _cleanup(self) -> None:
@@ -696,6 +699,7 @@ def run(
     # waitable from the start: a reply lost on the way leaves an id in history() to follow
     _running[job.id] = job
     _note_run_id(job.id)
+    power.keeper.hold(job.id)  # no sleep while it runs; released when it ends (_Running.wait)
     if stdin is not None:
         threading.Thread(target=_feed, args=(proc, stdin), daemon=True).start()
     if job.wait(min(timeout_s, reply_within_s)):
@@ -720,7 +724,7 @@ def run(
         "duration_ms": int((time.monotonic() - job.started) * 1000),
         "next": (
             f"Still running after {reply_within_s:.0f}s, so this is its output so far; it keeps running "
-            f"(killed after timeout_s={timeout_s:.0f}s). job_status(id='{job.id}', since=cursor, wait_s=40) "
+            f"(killed after timeout_s={timeout_s:.0f}s). job_status(id='{job.id}', since=cursor, wait_s=1800) "
             f"waits for the rest and the exit code; job_stop(id='{job.id}') ends it."
         ),
     }
@@ -780,6 +784,14 @@ def _result(job: _Running, output_limit: int) -> dict:
     if job.notes:
         result["notes"] = job.notes
     return result
+
+
+def watch_info(rid: str) -> tuple[int, None, float] | None:
+    """(pid, None, seconds since it last wrote output) of a command still running, else None."""
+    job = _running.get(rid)
+    if job is None or job.proc.poll() is not None:
+        return None
+    return job.proc.pid, None, time.monotonic() - job.last_output
 
 
 def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:

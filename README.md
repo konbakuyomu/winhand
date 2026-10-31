@@ -109,7 +109,8 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 - 状态页谁都能打开，所以只显示电脑在不在线和 winhand 版本，不显示电脑名和 Windows 版本。
 - OAuth token 由中转校验，不会转发给电脑。
 - 授权页有防 CSRF 的一次性 handle 和绑定 cookie，并禁止被嵌入 iframe。
-- 电脑短暂掉线（winhand 重启或升级、网络切换）时，请求会先等它重连，默认最多 20 秒（变量 `AGENT_GRACE_S`），之后才报错。报错是带同一请求 id 的 JSON-RPC 错误，写明离线多久和可能原因，客户端会原样交给模型。
+- 电脑短暂掉线（winhand 重启或升级、网络切换）时，请求会先等它重连，默认最多 20 秒（变量 `AGENT_GRACE_S`），之后才报错。离线超过 2 分钟（睡着了、关机了）就不再等，立刻报错。报错是带同一请求 id 的 JSON-RPC 错误，写明离线多久和可能原因，客户端会原样交给模型。
+- `https://mcp.你的域名/status.json` 给脚本用：`online`、`version`、`offline_since`、`offline_for_s`，同样不含电脑名。云端会话可以在后台循环查它，电脑一回来就接着干活，不用等人提醒。
 - 电脑和中转之间的连接断一下（winhand 没重启）时，正在执行的调用不会丢：中转按帧记着已经收到多少，电脑重连后从断开处接着发，客户端那边看到的是一次完整的回复。电脑最多替断开的调用保留 60 秒、单个调用 8 MB 的回复。
 - 一次性文件链接 `https://mcp.你的域名/t/<令牌>` 不走 OAuth，靠令牌本身授权：
   - 令牌是 256 位随机数，只能用一次，默认 10 分钟内有效，最长 30 分钟；
@@ -142,9 +143,13 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 `run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义（解释器不在这几种里时，把它写在 `command`，例如 `run(command=r'.venv\Scripts\python.exe', script=...)`、`command='node'`）；只给 `command` 时整行交给 PowerShell 执行。PowerShell 的输出和管道统一是不带 BOM 的 UTF-8，Windows PowerShell 5.1 也一样，中文不会变成问号，传给原生程序的文本开头也不会多出 BOM。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
 
-`job_status` 的 `wait_s`（最多 40 秒）和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。从同一个游标接着问时只回新的东西：启动命令和日志路径只在第一次回，stderr 只回上次之后新写的部分（给了 `tail` 时照常回末尾）。`run-N` 的编号记在 `~/.winhand/run-counter`，winhand 重启后接着编，不会重复；每个 `run` 一开始就有 id，回复在路上丢了时，`history()` 里能看到它，`job_status` 也能接着等。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容（不检查就别写这个参数，空值也当作没写）；`fs_write` 加 `overwrite=false` 表示只新建、文件已存在就拒绝。可选参数不要写成“有名字没有值”：这样的调用在到达 winhand 之前就会被客户端当作无法解析的 JSON 拒绝。`fs_edit` 的多处修改里，新旧文本一样的那处会跳过并注明，不再连累其他修改；同时给了 `old/new` 和 `edits`、而 `old/new` 正好是其中一处时照常执行。`fs_op` 删除默认进回收站。
+`job_status` 的 `wait_s` 和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。客户端愿意接收进度通知时（请求里带 progress token，Claude Code 就是这样），一次最多等 1800 秒：开始时立刻发一次进度，之后每 15 秒一次，所以不会被 Claude Code 的“首字节 60 秒”和“5 分钟没动静”两个计时器切断；主对话里超过 2 分钟的调用会被 Claude Code 转到后台，结束时通知模型，等待期间不耗回合。不接收进度通知的客户端仍是每次最多 40 秒。等待中途，任务弹出新窗口（常常是等人点的对话框）或者长时间没有输出也不占 CPU 时，会提前返回，`matched` 分别是 `window` 和 `stalled`。还在跑的任务带 `activity`：进程数、CPU、内存、多久没输出、是否卡住、弹出的窗口；`files=[…]` 顺便给出其他文件（比如布线器自己的日志）的末尾。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。从同一个游标接着问时只回新的东西：启动命令和日志路径只在第一次回，stderr 只回上次之后新写的部分（给了 `tail` 时照常回末尾）。`run-N` 的编号记在 `~/.winhand/run-counter`，winhand 重启后接着编，不会重复；每个 `run` 一开始就有 id，回复在路上丢了时，`history()` 里能看到它，`job_status` 也能接着等。`job_start` 的 `timeout_s` 到时结束整棵进程树（退出码 -1，`timed_out`）；`after=[任务 id]` 让它等前面的任务结束再开始，用来把几步串起来；不写 `shell` 时，装了 PowerShell 7 就用它（`*>`、Out-File 写出的是 UTF-8，不再是 UTF-16）。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容（不检查就别写这个参数，空值也当作没写）；`fs_write` 加 `overwrite=false` 表示只新建、文件已存在就拒绝。可选参数不要写成“有名字没有值”：这样的调用在到达 winhand 之前就会被客户端当作无法解析的 JSON 拒绝。`fs_edit` 的多处修改里，新旧文本一样的那处会跳过并注明，不再连累其他修改；同时给了 `old/new` 和 `edits`、而 `old/new` 正好是其中一处时照常执行。`fs_op` 删除默认进回收站。
 
 模型常按 Claude Code 内置工具的习惯传参（`file_path`、`old_string`/`new_string`、`-A`/`-B`/`-C`、`head_limit`、按毫秒给的 `timeout` 等）。winhand 把这些换成自己的参数名再执行，结果里用 `args_note` 说明换了什么；认不出的参数，报错时列出这个工具真正的参数。路径里的 `%USERPROFILE%`、`$env:LOCALAPPDATA`、开头的 `~` 都会展开。
+
+任务和命令运行期间电脑不会睡眠（只是不睡，显示器照常可以关）：`run` 由 winhand 自己向系统声明，后台任务由它自己的包装脚本声明，所以 winhand 重启也不影响；做完就撤销，之后照常按空闲时间睡眠。`config.toml` 里写 `[power] keep_awake = false` 可以关掉，单个后台任务可以用 `job_start(keep_awake=false)`。
+
+工具在列表里带着客户端认得的提示：读类工具标 `readOnlyHint`（Claude Code 会把它们并行执行，连接断了还会在新连接上自动补发一次），停止类工具标 `idempotentHint`；`run`、`job_start`、`job_status`、`remote_run`、`fs_*` 等常用工具带 `anthropic/alwaysLoad`，会话开始就加载，不用先搜索工具。
 
 单次结果有大小上限，按 UTF-8 字节计，约 4 万字节（一个中文字算 3 字节，接近它的 token 成本）。`fs_read`、`fs_list`、`fs_search`、`run`、`job_status` 和会话输出到上限就停，并说明从哪里接着读。以前一次能返回 6 万字左右，中文或密集代码会超过 Claude Code 单个结果 2.5 万 token 的上限，整条结果作废。
 

@@ -32,6 +32,7 @@ from . import (
     tools_desktop,
     transfer,
     venv_repair,
+    waiting,
     winenv,
     workspace,
 )
@@ -48,6 +49,7 @@ from .secret_prompt import PromptUnavailable, ask_secret
 from .session import SessionManager, SessionSpec, TransportError, wait_for
 from .session.session import TRANSPORTS
 from .session.wait import MAX_WAIT_S
+from .tool_hints import ToolHints
 from .tools_desktop import media_result
 
 GUIDE_FULL = """\
@@ -71,8 +73,10 @@ Quick rules
   Never put `powershell -Command "..."` inside a command line: the outer PowerShell expands its
   $variables first. Use script= or args= instead. Output comes back as clean UTF-8 text.
   `run` answers within ~40 s; a command still going then comes back with `still_running` and an id:
-  it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code.
-  Never sleep or poll in a loop to wait: job_status(wait_s=40, patterns=[...]) does it.
+  it keeps running; job_status(id, since=cursor, wait_s=1800) waits for the rest and the exit code
+  in one call. A client that shows progress (Claude Code) can wait up to 1800 s per call: past two
+  minutes the call moves to the background and you are told when it ends. Other clients: 40 s per
+  call. Never sleep or poll in a loop to wait: job_status(wait_s=..., patterns=[...]) does it.
 - Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
   config and says whether a failure was the connection, host key, key or the script. Prefer it to
   run('ssh', ...): the script goes in on stdin with LF line ends, nothing to quote.
@@ -155,7 +159,7 @@ Quick rules
   never asked about.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
-  follow it with job_status(id, wait_s=40). With args it starts the program directly and stdin= gives
+  follow it with job_status(id, wait_s=1800). With args it starts the program directly and stdin= gives
   it text as UTF-8, never through a PowerShell pipe (Codex: command='codex', args=['exec', '-'],
   stdin=brief); job_status shows its stdout and stderr while it runs. job_status(id=[a, b])
   waits on several jobs, or `run` ids, at once: it answers when the first finishes or matches.
@@ -188,8 +192,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
                                               | wsl) written to a file: $vars, quotes, Chinese arrive as is
     run(command='...')                        one command line for PowerShell
   Never nest `powershell -Command "..."` in a command line; use script= or args=. `run` answers within
-  ~40 s; if still going you get `still_running` + an id, and job_status(id, since=cursor, wait_s=40)
-  waits for the rest. Never sleep or poll in a loop.
+  ~40 s; if still going you get `still_running` + an id: job_status(id, since=cursor, wait_s=1800)
+  waits for the rest in one call (Claude Code backgrounds it after 2 min and tells you when it ends;
+  other clients: 40 s per call). Never sleep or poll in a loop.
 - Another machine over SSH -> remote_run(host, script): this machine's ssh config and keys, script on
   stdin, says whether a failure was the connection or the script. Not run('ssh', ...).
 - Interactive or stateful programs (shells, REPLs, gdb, serial/telnet consoles, TUIs, installers) -> a
@@ -206,9 +211,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   screenshot(wait='change' | 'stable') waits for the screen instead of sleeping. Locked screens and
   administrator windows cannot be operated (the error says so). The first click, key or ui action on a
   program waits for the person's OK there (window list: `approval`); terminals: use run or a session.
-- job_start runs in the background, independent of winhand (long work, anything that restarts winhand,
-  elevated=true for admin tasks); args= runs a program directly, stdin= feeds it text (Codex:
-  command='codex', args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
+- job_start runs in the background, independent of winhand (long work, winhand restarts, elevated=true
+  for admin); args= runs a program directly, stdin= feeds it text (Codex: command='codex',
+  args=['exec', '-'], stdin=brief). job_status(id, wait_s=1800) follows one or several.
 - Odd behaviour (garbled text, a failing shim)? sys_info(checks=true). A tool missing from your list:
   call(tool, arguments) reaches it.
 - Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
@@ -332,6 +337,7 @@ def build_server(
     _live[mcp] = (cfg, local_stdio)
     local_servers = [s.name for s in cfg.servers if s.enabled]
     recent = RecentCalls()
+    mcp.add_middleware(ToolHints())  # read-only / idempotent / always-load hints on tools/list
     mcp.add_middleware(recent)
     mcp.add_middleware(RedactOutput())  # inside RecentCalls: history only ever sees masked results
     # Claude Code-style names (file_path, old_string, -A ...) become winhand's before anything is judged
@@ -562,7 +568,7 @@ def build_server(
     ) -> dict:
         """Run a command or script to completion and return exit code, stdout and stderr. Answers
         within about 40 s: if it is still going then, the answer has `still_running` and an id, it
-        keeps running, and job_status(id, wait_s=40) waits for the rest.
+        keeps running, and job_status(id, wait_s=1800) waits for the rest.
         Use a session instead for anything interactive or that must keep running."""
         return await asyncio.to_thread(
             lambda: proc.run(
@@ -829,7 +835,11 @@ def build_server(
         ] = None,
         min_chars: Annotated[int | None, Field(description="Stop once this much new output arrived")] = None,
         timeout_s: Annotated[
-            float, Field(description="Max wait for this call (capped at 40s; call again to keep waiting)")
+            float,
+            Field(
+                description="Max wait for this call: up to 1800 s when your client shows progress "
+                "(Claude Code), else 40 s; call again to keep waiting"
+            ),
         ] = 30,
         include_screen: bool = False,
     ) -> dict:
@@ -837,11 +847,11 @@ def build_server(
         with no condition it waits for a prompt, a request for the user, or exit. `needs_user` and exit
         always end the wait. Returns which session/condition fired plus each session's new output and state."""
         id_list = [ids] if isinstance(ids, str) else list(ids)
+        ceiling = waiting.limit(ctx, timeout_s)
         key = coalesce.freeze(
             ("session_wait", id_list, patterns, ignore_case, states, quiet_ms, screen_stable_ms, min_chars)
-            + (timeout_s, include_screen)
+            + (ceiling, include_screen)
         )
-        progress = await _progress(ctx)
 
         async def wait() -> dict:
             try:
@@ -854,14 +864,15 @@ def build_server(
                     quiet_ms=quiet_ms,
                     screen_stable_ms=screen_stable_ms,
                     min_chars=min_chars,
-                    timeout_s=timeout_s,
+                    timeout_s=ceiling,
                     include_screen=include_screen,
-                    progress=progress,
+                    max_wait_s=max(ceiling, waiting.SHORT_WAIT_S),
                 )
             except (KeyError, ValueError) as exc:
                 return {"error": str(exc)}
 
-        return await coalesce.shared(key, wait)
+        # each caller gets its own progress beat (the wait itself may be shared with identical calls)
+        return await waiting.heartbeat(ctx, coalesce.shared(key, wait), ceiling, "session_wait")
 
     @mcp.tool
     def session_read(
