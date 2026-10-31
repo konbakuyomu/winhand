@@ -1059,7 +1059,8 @@ def test_the_frame_shows_while_acting_and_stays_out_of_screenshots():
         assert not set(strips) & {w["hwnd"] for w in desktop.windows()}  # never listed as a window
         m = desktop.monitors()[0]
         _, _, facts = desktop.screenshot(region=[m["left"], m["top"], 400, presence.BORDER_PX])
-        pixels = Image.open(facts["original_file"]).convert("RGB").getdata()
+        data = Image.open(facts["original_file"]).convert("RGB").tobytes()
+        pixels = [tuple(data[i : i + 3]) for i in range(0, len(data), 3)]
         # 90 % opaque orange over anything: red high, green middling, blue low
         orange = [p for p in pixels if p[0] >= 220 and 95 <= p[1] <= 145 and p[2] <= 35]
         assert not orange, f"the frame shows in a screenshot ({len(orange)} orange pixels)"

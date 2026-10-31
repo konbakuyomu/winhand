@@ -1356,7 +1356,7 @@ def _foreground_box(place: dict, size: tuple[int, int]):
     return (left, top, right, bottom), _title(hwnd)
 
 
-def _on_screen(box, place: dict, judge) -> dict:
+def _changed_area(box, place: dict, judge) -> dict:
     """A changed area of a wait's picture in screen pixels, and the window that shows it."""
     dx, dy = (judge[0][0], judge[0][1]) if judge else (0, 0)
     left, top = place["left"] + dx + box[0], place["top"] + dy + box[1]
@@ -1445,7 +1445,7 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
                 reference, last_change, states, forgiven = grey, earlier, kept, now
                 box = None
         if condition == "stable" and box is not None:
-            moving = _on_screen(box, place, judge)
+            moving = _changed_area(box, place, judge)
             if small_change(box, zoom):
                 if not any(changed_box(state, grey) is None for state in states):
                     states = [*states[-3:], grey]  # a new small picture, not a cursor blinking back

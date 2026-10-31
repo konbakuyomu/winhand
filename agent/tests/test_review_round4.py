@@ -253,10 +253,12 @@ async def test_input_and_screenshot_pass_the_new_arguments_on(monkeypatch):
 
 
 def test_saving_a_screenshot_is_judged_as_a_write():
+    import os
+
     from winhand import actions
 
     (act,) = actions.describe("screenshot", {"window": "app", "path": "/data/shot.png"})
-    assert act.kind == "write" and act.paths == ("/data/shot.png",)
+    assert act.kind == "write" and act.paths == (os.path.abspath("/data/shot.png"),)  # D:\data\... on Windows
     assert actions.describe("screenshot", {"window": "app"}) == []
 
 
