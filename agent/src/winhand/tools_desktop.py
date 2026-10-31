@@ -628,25 +628,73 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool
     async def fs_upload_url(
-        path: Annotated[str, Field(description="Absolute path on this machine to create")],
-        sha256: Annotated[str | None, Field(description="Expected sha256; a mismatch is refused")] = None,
+        path: Annotated[
+            str,
+            Field(
+                description="Absolute path on this machine to create (with extract: the folder to unpack into)"
+            ),
+        ],
+        sha256: Annotated[
+            str | None, Field(description="Expected sha256 of what you send; a mismatch is refused")
+        ] = None,
         max_mb: Annotated[float, Field(gt=0, le=95)] = transfer.DEFAULT_MAX_MB,
         ttl_s: Annotated[float, Field(ge=30, le=1800)] = transfer.DEFAULT_TTL_S,
         overwrite: bool = False,
+        extract: Annotated[
+            bool,
+            Field(
+                description="Send a zip or tar (.tar.gz, .tgz ...) and have it unpacked into the folder `path`: "
+                "many files in one upload. All or nothing: unsafe names, files the rules protect, or files "
+                "that exist (without overwrite) refuse the whole archive"
+            ),
+        ] = False,
+        size: Annotated[
+            int | None,
+            Field(
+                gt=0,
+                description="The file's size in bytes. Over part_mb it goes in parts, one link each: use it "
+                "for anything over about 8 MB (bigger single uploads time out in some sandboxes)",
+            ),
+        ] = None,
+        part_mb: Annotated[float, Field(ge=1, le=64)] = transfer.DEFAULT_PART_MB,
     ) -> dict:
-        """A one-time link to upload one file from your own shell or sandbox straight to `path` on
-        this machine (curl -T file URL), so its bytes never pass through the conversation. Use it
-        for anything bigger than a few KB: patches, archives, builds. Single use, expires."""
-        return await asyncio.to_thread(_errors, transfer.issue_upload, path, sha256, max_mb, ttl_s, overwrite)
+        """A one-time link to upload from your own shell or sandbox straight to `path` on this
+        machine (curl -T file URL), so the bytes never pass through the conversation. Use it for
+        anything bigger than a few KB: patches, archives, builds. Several files: zip or tar them and
+        pass extract=true. Big files: pass size= and send the parts. Single use, expires."""
+        return await asyncio.to_thread(
+            _errors, transfer.issue_upload, path, sha256, max_mb, ttl_s, overwrite, extract, size, part_mb
+        )
 
     @mcp.tool
     async def fs_download_url(
-        path: Annotated[str, Field(description="Absolute path of a file on this machine")],
+        path: Annotated[
+            str | None, Field(description="Absolute path of a file, or of a folder (downloads as one zip)")
+        ] = None,
         ttl_s: Annotated[float, Field(ge=30, le=1800)] = transfer.DEFAULT_TTL_S,
+        paths: Annotated[
+            list[str] | None,
+            Field(description="Several files and folders in one zip (with or instead of path)"),
+        ] = None,
+        include: Annotated[
+            list[str] | None,
+            Field(
+                description="Folders: only files matching one of these, by path below the folder or by name "
+                '("*.log", "src/*.py")'
+            ),
+        ] = None,
+        exclude: Annotated[
+            list[str] | None,
+            Field(
+                description='Folders: leave out files and folders matching these ("node_modules", ".git", "*.tmp")'
+            ),
+        ] = None,
     ) -> dict:
-        """A one-time link to download one file from this machine into your own shell or sandbox
-        (curl -o name URL), for files too big for fs_send. Single use, expires."""
-        return await asyncio.to_thread(_errors, transfer.issue_download, path, ttl_s)
+        """A one-time link to download from this machine into your own shell or sandbox (curl -o
+        name URL), for files too big for fs_send. A folder, or several paths, come as one zip made
+        while it downloads; files the read rules protect are left out (the answer says which).
+        Single use, expires."""
+        return await asyncio.to_thread(_errors, transfer.issue_download, path, ttl_s, paths, include, exclude)
 
     @mcp.tool
     async def fs_pick(

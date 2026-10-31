@@ -58,6 +58,28 @@ def config_path() -> Path:
     return home() / "config.toml"
 
 
+SCRATCH_ENV = "WINHAND_SCRATCH"
+
+
+def scratch_dir(raw: dict | None = None) -> Path:
+    """winhand's own folder for files an AI keeps between calls (downloads, unpacked archives,
+    build output to look at). The owner clears %TEMP% by hand, and twice files kept there were
+    lost (2026-11-01 review). `[scratch] folder = "D:/..."` in config.toml puts it elsewhere.
+    Nothing in it is deleted automatically."""
+    if raw is None:
+        with contextlib.suppress(Exception):
+            raw = load().raw
+    wanted = (
+        ((raw or {}).get("scratch") or {}).get("folder")
+        if isinstance((raw or {}).get("scratch"), dict)
+        else None
+    )
+    folder = Path(os.path.expandvars(os.path.expanduser(str(wanted)))) if wanted else home() / "scratch"
+    with contextlib.suppress(OSError):
+        folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 @dataclass
 class ServerEntry:
     """A local MCP server: a command speaking stdio, or a local HTTP endpoint (`url`)."""

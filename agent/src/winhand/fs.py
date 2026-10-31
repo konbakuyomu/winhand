@@ -4,6 +4,7 @@ CRLF files CRLF and copes with long, spaced and CJK paths on Windows."""
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -15,6 +16,7 @@ import subprocess
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -275,6 +277,38 @@ def fs_write(
     return out
 
 
+CLOSEST_MAX_LINES = 20_000  # files longer than this are not searched for a near match
+
+
+def _closest(text: str, old: str) -> str:
+    """The part of the file most like `old`, with its lines and a diff, so the next try can copy the
+    real text instead of guessing again (the way DesktopCommander's edit_block answers a miss)."""
+    want = old.replace("\r\n", "\n").strip("\n")
+    lines = text.replace("\r\n", "\n").split("\n")
+    size = len(want.split("\n"))
+    if not want.strip() or len(lines) > CLOSEST_MAX_LINES:
+        return ""
+    best, at = 0.0, -1
+    matcher = difflib.SequenceMatcher(None, "", want, autojunk=False)  # `want` indexed once
+    for i in range(max(1, len(lines) - size + 1)):
+        matcher.set_seq1("\n".join(lines[i : i + size]))
+        if matcher.real_quick_ratio() <= best or matcher.quick_ratio() <= best:
+            continue
+        ratio = matcher.ratio()
+        if ratio > best:
+            best, at = ratio, i
+    if at < 0 or best < 0.6:
+        return ""
+    found = lines[at : at + size]
+    diff = "\n".join(difflib.unified_diff(want.split("\n"), found, "your old", "the file", lineterm="", n=1))
+    if len(diff) > 2000:
+        diff = diff[:2000] + "\n…"
+    return (
+        f". Closest text: lines {at + 1}-{at + size}, {round(best * 100)}% alike; differences "
+        f"(- yours, + the file):\n{diff}"
+    )
+
+
 def _apply_edit(text: str, path: str, old: str, new: str, replace_all: bool, label: str) -> tuple[str, dict]:
     if old == new:
         raise FsError(f"{label}old and new are identical")
@@ -290,7 +324,9 @@ def _apply_edit(text: str, path: str, old: str, new: str, replace_all: bool, lab
         if first and first in text:
             line_no = text[: text.index(first)].count("\n") + 1
             hint = f" (its first line appears near line {line_no}; check whitespace/indentation)"
-        raise FsError(f"{label}old text not found in {path}{hint}")
+        if '\\"' in old and '\\"' not in text:
+            hint += '. old has \\" (a backslash before a quote) and the file has none: the quotes were escaped twice'
+        raise FsError(f"{label}old text not found in {path}{hint}{_closest(text, old)}")
     if count > 1 and not replace_all:
         raise FsError(
             f"{label}old text occurs {count} times in {path}; add context to make it unique "
@@ -301,6 +337,119 @@ def _apply_edit(text: str, path: str, old: str, new: str, replace_all: bool, lab
     return updated, {"replacements": count if replace_all else 1, "line": text[:first_at].count("\n") + 1}
 
 
+@dataclass
+class _Planned:
+    """One file's edits worked out in memory: nothing is written yet."""
+
+    path: str
+    text: str
+    encoding: str
+    data: bytes
+    original: str
+    results: list[dict]
+    skipped: list[int]
+    ops: list[tuple[str, str, bool]]
+
+
+def _ops(old: str | None, new: str | None, replace_all: bool, edits: list[dict] | None) -> list:
+    if edits:
+        ops = [(e.get("old") or "", e.get("new") or "", bool(e.get("replace_all"))) for e in edits]
+        # old/new repeating one of the edits is harmless; anything else is ambiguous
+        if (old is not None or new is not None) and not any((o, nw) == (old, new) for o, nw, _ in ops):
+            raise FsError("give either old/new or edits, not both")
+        return ops
+    if old is None or new is None:
+        raise FsError("give old and new (or edits=[{old, new}, ...])")
+    return [(old, new, replace_all)]
+
+
+def _plan(path: str, ops: list, expected_sha256: str | None) -> _Planned:
+    from .redact import refuse_placeholders
+
+    refuse_placeholders(*(o for op in ops for o in op[:2]))
+    text, encoding, data = _read_text_bytes(path)
+    original = text
+    if (
+        expected_sha256
+        and expected_sha256.strip()
+        and hashlib.sha256(data).hexdigest() != expected_sha256.strip().lower()
+    ):
+        raise FsError(f"{path} changed since you read it; read it again before editing")
+    results, skipped = [], []
+    for n, (o, nw, ra) in enumerate(ops, 1):
+        if o == nw and o:
+            skipped.append(n)  # an edit that changes nothing: skipped, not a reason to drop the rest
+            continue
+        text, info = _apply_edit(text, path, o, nw, ra, f"edit {n}: " if len(ops) > 1 else "")
+        results.append(info)
+    return _Planned(path, text, encoding, data, original, results, skipped, ops)
+
+
+def _unchanged(p: _Planned) -> dict:
+    return {
+        "path": p.path,
+        "replacements": 0,
+        "sha256": hashlib.sha256(p.data).hexdigest(),
+        "note": "nothing to change: old and new are identical; the file was not written",
+    }
+
+
+def _notes(p: _Planned, out: dict) -> dict:
+    if p.skipped:
+        out["skipped"] = f"edit {', '.join(map(str, p.skipped))}: old and new are identical, nothing to do"
+    if any('\\"' in nw and '\\"' not in o for o, nw, _ in p.ops) and '\\"' not in p.original:
+        out["warning"] = (
+            'the new text has \\" (a backslash before a quote) the file never had: check the quotes were not escaped twice'
+        )
+    if len(p.results) > 1:
+        out["edits"] = p.results
+    return out
+
+
+PREVIEW_CHARS = 6000
+
+
+def _preview(p: _Planned, budget: int = PREVIEW_CHARS) -> dict:
+    """dry_run: what the edit would change, as a unified diff; nothing is written."""
+    if not p.results:
+        return {**_unchanged(p), "dry_run": True}
+    name = os.path.basename(p.path)
+    diff = "".join(
+        difflib.unified_diff(
+            p.original.splitlines(keepends=True),
+            p.text.splitlines(keepends=True),
+            f"a/{name}",
+            f"b/{name}",
+            n=2,
+        )
+    )
+    out = {
+        "path": p.path,
+        "dry_run": True,
+        "replacements": sum(r["replacements"] for r in p.results),
+        "line": p.results[0]["line"],
+        "diff": diff
+        if len(diff) <= budget
+        else diff[:budget] + f"\n… ({len(diff) - budget} more characters)",
+    }
+    return _notes(p, out)
+
+
+def _write_planned(p: _Planned) -> dict:
+    write_enc, note = write_text_like(p.path, p.text, p.encoding)
+    out = {
+        "path": p.path,
+        "replacements": sum(r["replacements"] for r in p.results),
+        "line": p.results[0]["line"],
+        "encoding": write_enc,
+        "sha256": sha256_of(p.path),
+    }
+    _notes(p, out)
+    if note:
+        out["note"] = note
+    return out
+
+
 def fs_edit(
     path: str,
     old: str | None = None,
@@ -308,57 +457,80 @@ def fs_edit(
     replace_all: bool = False,
     edits: list[dict] | None = None,
     expected_sha256: str | None = None,
+    dry_run: bool = False,
 ) -> dict:
     """Replace exact snippets. Fails loudly when one is missing or ambiguous; with several
-    `edits` either all apply or the file is left untouched."""
-    if edits:
-        ops = [(e.get("old") or "", e.get("new") or "", bool(e.get("replace_all"))) for e in edits]
-        # old/new repeating one of the edits is harmless; anything else is ambiguous
-        if (old is not None or new is not None) and not any((o, nw) == (old, new) for o, nw, _ in ops):
-            raise FsError("give either old/new or edits, not both")
-    else:
-        if old is None or new is None:
-            raise FsError("give old and new (or edits=[{old, new}, ...])")
-        ops = [(old, new, replace_all)]
-    from .redact import refuse_placeholders
+    `edits` either all apply or the file is left untouched. dry_run: show the diff, write nothing."""
+    p = _plan(path, _ops(old, new, replace_all, edits), expected_sha256)
+    if dry_run:
+        return _preview(p)
+    return _write_planned(p) if p.results else _unchanged(p)
 
-    refuse_placeholders(*(o for op in ops for o in op[:2]))
-    text, encoding, data = _read_text_bytes(path)
-    if (
-        expected_sha256
-        and expected_sha256.strip()
-        and hashlib.sha256(data).hexdigest() != expected_sha256.strip().lower()
-    ):
-        raise FsError(f"{path} changed since you read it; read it again before editing")
-    results = []
-    skipped = []
-    for n, (o, nw, ra) in enumerate(ops, 1):
-        if o == nw and o:
-            skipped.append(n)  # an edit that changes nothing: skipped, not a reason to drop the rest
+
+EDIT_FILES_MAX = 50
+
+
+def fs_edit_files(files: list[dict], dry_run: bool = False) -> dict:
+    """Edits in several files at once: every file's edits are worked out first, and if any fails
+    nothing is written. Should writing one file fail after others were written (a file locked by
+    another program), those are put back as they were. Two entries for one file are applied in
+    order, as one. From the 2026-11-01 review: 15 cards and 38 places were changed with scripts the
+    AI wrote itself, and those failed six times on their first run."""
+    if not files:
+        raise FsError("give files=[{path, old, new} or {path, edits: [...]}, ...]")
+    if len(files) > EDIT_FILES_MAX:
+        raise FsError(f"at most {EDIT_FILES_MAX} files in one call")
+    merged: dict[str, tuple[str, list, str | None]] = {}
+    for n, entry in enumerate(files, 1):
+        path = entry.get("path")
+        if not path:
+            raise FsError(f"file {n} has no path")
+        key = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+        ops = _ops(entry.get("old"), entry.get("new"), bool(entry.get("replace_all")), entry.get("edits"))
+        if key in merged:
+            first, before, sha = merged[key]
+            merged[key] = (first, before + ops, sha)
+        else:
+            merged[key] = (path, ops, entry.get("expected_sha256"))
+    planned, failed = [], []
+    for path, ops, sha in merged.values():
+        try:
+            planned.append(_plan(path, ops, sha))
+        except FsError as exc:
+            failed.append(f"{path}: {exc}")
+    if failed:
+        raise FsError(
+            f"nothing was written ({len(failed)} of {len(merged)} file(s) failed): " + " | ".join(failed)
+        )
+    if dry_run:
+        budget = max(1500, PREVIEW_CHARS * 2 // max(1, len(planned)))
+        return {"dry_run": True, "files": [_preview(p, budget) for p in planned]}
+    done: list[tuple[_Planned, dict]] = []
+    for p in planned:
+        if not p.results:
             continue
-        text, info = _apply_edit(text, path, o, nw, ra, f"edit {n}: " if len(ops) > 1 else "")
-        results.append(info)
-    if not results:
-        return {
-            "path": path,
-            "replacements": 0,
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "note": "nothing to change: old and new are identical; the file was not written",
-        }
-    write_enc, note = write_text_like(path, text, encoding)
+        try:
+            done.append((p, _write_planned(p)))
+        except (OSError, FsError) as exc:
+            restored, stuck = [], []
+            for back, _ in done:
+                try:
+                    write_bytes_atomic(back.path, back.data, create_dirs=False)
+                    restored.append(back.path)
+                except OSError:
+                    stuck.append(back.path)
+            message = f"writing {p.path} failed ({exc}); "
+            message += f"the {len(restored)} file(s) written before it were put back as they were"
+            if stuck:
+                message += f", except {', '.join(stuck)}, which keep the new text"
+            raise FsError(message) from exc
     out = {
-        "path": path,
-        "replacements": sum(r["replacements"] for r in results),
-        "line": results[0]["line"],
-        "encoding": write_enc,
-        "sha256": sha256_of(path),
+        "files": [result for _, result in done],
+        "replacements": sum(r["replacements"] for _, r in done),
     }
-    if skipped:
-        out["skipped"] = f"edit {', '.join(map(str, skipped))}: old and new are identical, nothing to do"
-    if len(results) > 1:
-        out["edits"] = results
-    if note:
-        out["note"] = note
+    unchanged = [p.path for p in planned if not p.results]
+    if unchanged:
+        out["unchanged"] = unchanged
     return out
 
 

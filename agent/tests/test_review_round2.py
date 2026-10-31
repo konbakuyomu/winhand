@@ -190,20 +190,22 @@ def test_activity_shows_cpu_quiet_time_and_a_stall():
 async def test_a_long_wait_ends_when_the_job_goes_quiet_without_cpu(monkeypatch):
     from winhand import jobwatch
 
-    monkeypatch.setattr(jobwatch, "STALL_AFTER_S", 1.0)
+    # quiet for longer than the setup takes even on a busy machine: a job already stalled when the
+    # wait first looks is no news, and the wait would sit out its whole time
+    monkeypatch.setattr(jobwatch, "STALL_AFTER_S", 2.0)
     monkeypatch.setattr(jobwatch, "CHECK_EVERY_S", 0.5)
     code = "import time\nprint('working', flush=True)\ntime.sleep(60)\n"
-    res = proc.run(sys.executable, ["-c", code], timeout_s=90, reply_within_s=0.3)
-    try:
-        async with Client(build_server(Config())) as client:
+    async with Client(build_server(Config())) as client:
+        res = proc.run(sys.executable, ["-c", code], timeout_s=90, reply_within_s=0.3)
+        try:
             began = time.monotonic()
             out = (
                 await client.call_tool("job_status", {"id": res["id"], "since": res["cursor"], "wait_s": 30})
             ).structured_content
-        assert out["matched"] == "stalled" and out["activity"]["stalled"]
-        assert time.monotonic() - began < 15  # did not sit out the whole wait
-    finally:
-        proc.run_stop(res["id"])
+        finally:
+            proc.run_stop(res["id"])
+    assert out["matched"] == "stalled" and out["activity"]["stalled"]
+    assert time.monotonic() - began < 15  # did not sit out the whole wait
 
 
 async def test_job_status_shows_the_end_of_other_files(tmp_path):

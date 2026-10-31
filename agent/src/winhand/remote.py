@@ -8,6 +8,8 @@ failure was SSH (connection, host key, key refused) or the script itself.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shlex
 
@@ -88,19 +90,54 @@ def build(
         remote = f"{shell} - {quoted}".strip()
     else:
         remote = f"{shell} -s -- {quoted}".strip()
-    head = []
-    for key, value in (env or {}).items():
+    for key in env or {}:
         if not _ENV_NAME.match(key):
             raise ValueError(f"not a valid environment variable name: {key!r}")
-        head.append(f"export {key}={shlex.quote(str(value))}")
-    if cwd:
-        head.append(f"cd -- {shlex.quote(cwd)} || exit 97")
-    if head and shell.rsplit("/", 1)[-1].startswith("python"):
-        raise ValueError("env and cwd are for shell scripts; set them inside the Python script")
+    head = []
+    if shell.rsplit("/", 1)[-1].startswith("python"):
+        # a Python script gets the same: environment and folder set before its first line
+        if env or cwd:
+            head.append("import os as _winhand_os")
+        if env:
+            head.append(f"_winhand_os.environ.update({json.dumps({k: str(v) for k, v in env.items()})})")
+        if cwd:
+            head.append(f"_winhand_os.chdir({json.dumps(cwd)})")
+    else:
+        head = [f"export {key}={shlex.quote(str(value))}" for key, value in (env or {}).items()]
+        if cwd:
+            head.append(f"cd -- {shlex.quote(cwd)} || exit 97")
     body = "\n".join([*head, script.replace("\r\n", "\n")])
     if not body.endswith("\n"):
         body += "\n"
     return [*SSH_OPTIONS, host, remote], body
+
+
+def remote_copy(
+    host: str, local: str, remote_path: str, direction: str = "up", timeout_s: float = 600
+) -> dict:
+    """Copy a file or folder between this machine and `host` with scp, using this machine's ssh
+    config and keys (aliases, ProxyJump), the same way remote_run reaches it."""
+    if not _HOST.match(host or ""):
+        return {"error": f"host must be an ssh alias or user@host, not {host!r}"}
+    if direction not in ("up", "down"):
+        return {"error": "direction is up (this machine -> host) or down (host -> this machine)"}
+    if not remote_path or remote_path.startswith("-"):
+        return {"error": "give the remote path"}
+    target = f"{host}:{remote_path}"
+    if direction == "up":
+        if not os.path.exists(local):
+            return {"error": f"no such file or folder here: {local}"}
+        pair = [local, target]
+    else:
+        pair = [target, local]
+    recursive = ["-r"] if direction == "down" or os.path.isdir(local) else []
+    result = proc.run("scp", [*SSH_OPTIONS, *recursive, *pair], timeout_s=timeout_s)
+    result.update(host=host, direction=direction)
+    if result.get("exit_code") not in (0, None) and not result.get("still_running"):
+        problem = classify(result.get("stderr", ""))
+        if problem:
+            result["ssh_error"] = problem
+    return result
 
 
 def remote_run(

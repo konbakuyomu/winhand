@@ -122,6 +122,16 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 `fs_upload_url` / `fs_download_url` 发出一次性链接，模型在自己的沙箱里用 `curl -T 文件 链接` 上传、`curl -o 名字 链接` 下载，文件内容不经过对话。这样传 100 KB 的补丁只要几秒，不必再分段写 base64。传上来的补丁可以直接交给 `fs_apply_patch(root, patch_file=...)`：它会自动判断 `-p`，保留每个文件原来的编码和 CRLF，所有 hunk 都对得上才写入。
 
+一次传多个文件：
+
+- **下载文件夹**：`fs_download_url(path=文件夹)` 或 `paths=[...]`，可加 `include=["*.log"]`、`exclude=["node_modules", ".git"]`。内容边打包成一个 zip 边下载，所以没有事先算好的 sha256，用 `unzip -t` 检查。读规则保护的文件不放进去，回复里列出名字；文件夹里的链接和联接点不跟进去。打包途中读不了的文件，记在 zip 里的 `winhand-errors.txt`。
+- **上传后解开**：`fs_upload_url(path=文件夹, extract=true)`，传一个 zip 或 tar（`.tar.gz`、`.tgz` 等）。要么全部解开，要么一个也不写：名字不安全（绝对路径、`..`、盘符、`CON` 这类设备名、末尾带点）、包里有链接、会经文件夹里已有的链接写到外面、写规则保护的文件、已存在的文件（没给 `overwrite=true`），都会让整包拒收。回复里逐个列出解开的文件和 sha256（前 200 个）。
+- **大文件分片**：给 `size=字节数`，超过 `part_mb`（默认 4 MB）就每片一个链接。复盘时发现，一次传 8–10 MB 以上，有的沙箱约 30 秒就报 502（文件其实传到了）；分片后每片都能在这之前传完。分片可以乱序、并行，传坏的片再传一次即可；最后一片的回复就是结果。整个文件最大 2 GB。
+
+`fs_read(paths=[...])` 一次读最多 20 个文本文件或文档，字数上限按文件平分；图片仍要一张张用 `fs_read(path)` 看。
+
+AI 要跨调用留着的文件，放 winhand 自己的暂存目录：默认 `~/.winhand/scratch`，`config.toml` 里 `[scratch] folder = "D:/..."` 可以改。`context()` 会给出这个路径，在电脑上启动的程序可以用 `%WINHAND_SCRATCH%` 找到它。这里的东西不会自动删除；`%TEMP%` 你会手动清理，复盘时有两次暂存在那里的文件因此丢了。
+
 要在 Claude Code 云端会话里用这个功能，得在云环境的网络设置里放行中转域名：打开会话标题栏的云环境菜单 → Edit → Network access 选 Custom，在 Allowed domains 里加上 `mcp.你的域名`，并勾上 Also include default list of common package managers（不勾就只剩你填的域名）。改完约一分钟生效，正在运行的会话也会跟着生效。只靠下面“云端会话开场就带上本机规矩”里的 Network secret 放行时，它的 Path prefixes 要留空：填了 `/hook/` 的话，一次性链接（`/t/…`）会被沙箱的代理拦下，curl 报 403。中转更新后要重新执行 `npx wrangler deploy`。
 
 端到端测试（CI 中自动运行）：`relay/test/e2e.py` 在 `wrangler dev` 上模拟 claude.ai，走完注册 → 授权 → 换 token → 经隧道调用 MCP 工具的整个流程。
@@ -229,8 +239,12 @@ AI 第一次点击、输入或操作某个程序时，电脑上会弹出“WinHa
 `remote_run(host, script)` 用这台电脑的 ssh 配置和密钥（包括别名和 ProxyJump）在另一台机器上执行脚本：
 
 - 以非交互方式运行（BatchMode），带保活；脚本从 stdin 送过去，CRLF 会转成 LF。
-- `env`、`cwd`、`args` 都会正确转义。
+- `env`、`cwd`、`args` 都会正确转义；`shell='python3'` 的脚本也拿得到 `env` 和 `cwd`。
+- `secrets=['NAME']` 把本机密钥库里的值作为环境变量交给远程脚本，模型看不到值。
 - 失败时 `ssh_error` 会说明原因：连不上、主机指纹不对、密钥被拒，还是脚本本身返回了非零退出码。
+- 结果里网址中的 `用户:密码@` 一律遮挡。
+
+`remote_copy(host, local, remote_path, direction='up'|'down')` 用同一套 ssh 配置经 scp 传文件或文件夹。用 `run` 直接调 ssh、scp 时，结果里会提示改用这两个工具。
 
 需要交互登录时用 `session_start(profile="ssh", vars={"host": ...})`。如果要盯日志，加上 `restart_on_exit`，连接断了会自动重新连上。
 
@@ -300,6 +314,11 @@ ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 - **技能列表**：名称、描述、SKILL.md 路径。默认扫 `~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`，以及项目里的 `.agents/skills`、`.claude/skills`，同名时项目优先；
 - 对该目录生效的守卫规则；
 - 本机 MCP 服务。
+
+每次回答都带一个 `digest`。两种省字数的用法：
+
+- `brief=true`：技能只列名字，规矩和守卫照旧给全。复盘时一次回答有 25–45 KB，其中技能清单占 14–17 KB。
+- `since=<上次的 digest>`：内容没变时只回 `unchanged`。只在上次的回答还在对话里时用；压缩上下文以后不要带，回答里也这样提醒。
 
 文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `skill(name)` 取 SKILL.md 正文、技能文件夹和其中的文件清单（SKILL.md 同样先过守卫的 `read` 规则），脚本用 `run` 在这台电脑上执行。
 

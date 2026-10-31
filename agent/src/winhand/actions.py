@@ -210,6 +210,12 @@ def describe(
     if tool == "remote_run":
         text = _join([a.get("script") or "", *(a.get("args") or [])]).strip()
         return one("command", text=text, host=a.get("host"))
+    if tool == "remote_copy":  # scp: judged as that command, and as reading or writing the local side
+        down = (a.get("direction") or "up") == "down"
+        text = _join(["scp", a.get("local") or "", f"{a.get('host')}:{a.get('remote_path')}"]).strip()
+        return one("command", text=text, host=a.get("host")) + one(
+            "write" if down else "read", a.get("local")
+        )
     if tool == "session_start":
         return one("command", text=_session_command(a), cwd=_abs(a.get("cwd")))
     if tool in ("session_send", "session_stop", "session_prompt_user"):
@@ -224,13 +230,18 @@ def describe(
         env, _, name = str(a["harmonia"]).rpartition("/")
         return [Action("command", tool, text=f"harmonia var set {env} {name}")]
     if tool == "fs_edit":  # editing needs the content: a read rule covers it too
-        return one("edit", a.get("path")) + one("read", a.get("path"))
+        many = [f.get("path") for f in a.get("files") or [] if isinstance(f, dict)]
+        if a.get("dry_run"):  # only shows the diff
+            return one("read", a.get("path"), *many)
+        return one("edit", a.get("path"), *many) + one("read", a.get("path"), *many)
     if tool == "fs_apply_patch":
         return _patch_actions(tool, a)
     if tool in ("fs_read", "fs_send"):
-        return one("read", a.get("path"))
-    if tool == "fs_download_url":
-        return one("read", a.get("path"), expand_vars=True)
+        extra = a.get("paths") or []
+        return one("read", a.get("path"), *(extra if isinstance(extra, list) else [extra]))
+    if tool == "fs_download_url":  # a folder: each file in it is judged again as it is listed
+        extra = a.get("paths") or []
+        return one("read", a.get("path"), *(extra if isinstance(extra, list) else [extra]), expand_vars=True)
     if tool == "fs_search":  # reads the files below path
         return one("read", a.get("path") or ".")
     if tool == "job_status" and a.get("files"):  # shows the end of these files

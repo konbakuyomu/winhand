@@ -618,6 +618,47 @@ def _builtin_reaches(rule: Rule, folder: str) -> bool:
     return any(_glob_match(v + "/x", g, None) for v in variants(folder) for g in rule.path)
 
 
+class PathCheck:
+    """Which files the owner's rules keep from one kind of action, judged file by file, for a tool
+    that reaches many files through one call: fs_search on a folder (read), a folder downloaded as
+    a zip (read), an archive unpacked into a folder (write). Nobody can be asked about each file,
+    so `ask` counts as refused, like `deny`. A folder no such rule can reach lets its files
+    through unjudged, and the rule files are looked up once per folder. Writing the desktop
+    approvals file is refused whatever the rules say (touches_approvals)."""
+
+    def __init__(self, kind: str, tool: str) -> None:
+        self.kind, self.tool = kind, tool
+        self._cache: dict = {}
+        self._folders: dict[str, bool] = {}
+        self._verdicts: dict[str, bool] = {}
+
+    def _rules_apply(self, folder: str) -> bool:
+        if folder not in self._folders:
+            found = [builtin_file(), *files_for(variants(folder), self._cache)]
+            self._folders[folder] = any(
+                f.error
+                or any(
+                    self.kind in r.on and (f.path != BUILTIN or _builtin_reaches(r, folder)) for r in f.rules
+                )
+                for f in found
+            )
+        return self._folders[folder]
+
+    def refused(self, full: str) -> bool:
+        if full not in self._verdicts:
+            action = Action(self.kind, self.tool, (full,))
+            folders = [os.path.dirname(full)]
+            if os.path.islink(full):  # a linked file is reached where it really lives
+                folders.append(os.path.dirname(os.path.realpath(full)))
+            if self.kind != "read" and touches_approvals([action]):
+                self._verdicts[full] = True
+            elif any(self._rules_apply(f) for f in folders):
+                self._verdicts[full] = judge([action], self._cache).decision in ("deny", "ask")
+            else:
+                self._verdicts[full] = False
+        return self._verdicts[full]
+
+
 def _filter_search(result, args: dict):
     """fs_search on a folder reads every file below it: drop what the read rules keep from the AI."""
     import json
@@ -630,33 +671,11 @@ def _filter_search(result, args: dict):
     root = data["root"]
     if not os.path.isdir(root):
         return result  # one file: judged as a read before the search ran
-    kept, hidden, verdicts, cache, folders = [], set(), {}, {}, {}
-
-    def read_rules_apply(folder: str) -> bool:
-        # once per folder: a folder no read rule can reach lets its files through unjudged
-        if folder not in folders:
-            found = [builtin_file(), *files_for(variants(folder), cache)]
-            folders[folder] = any(
-                f.error
-                or any("read" in r.on and (f.path != BUILTIN or _builtin_reaches(r, folder)) for r in f.rules)
-                for f in found
-            )
-        return folders[folder]
-
-    def reachable(full: str) -> bool:
-        folders_of = [os.path.dirname(full)]
-        if os.path.islink(full):  # a linked file is read where it really lives
-            folders_of.append(os.path.dirname(os.path.realpath(full)))
-        return any(read_rules_apply(f) for f in folders_of)
+    kept, hidden, check = [], set(), PathCheck("read", "fs_search")
 
     for line in data["matches"]:
         files = _search_files(root, str(line), bool(args.get("files_only")))
-        for full in files:
-            if full not in verdicts:
-                verdicts[full] = (
-                    judge([Action("read", "fs_search", (full,))], cache).decision if reachable(full) else None
-                )
-        refused = [f for f in files if verdicts[f] in ("deny", "ask")]
+        refused = [f for f in files if check.refused(f)]
         if refused:
             hidden.update(os.path.relpath(f, root) for f in refused)
             continue

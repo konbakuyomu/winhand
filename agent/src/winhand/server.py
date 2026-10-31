@@ -4,6 +4,7 @@ processes and the desktop."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import textwrap
@@ -20,6 +21,7 @@ from pydantic import BaseModel, BeforeValidator, Field
 from . import (
     __version__,
     coalesce,
+    config,
     desktop,
     fs,
     local_mcp,
@@ -79,7 +81,11 @@ Quick rules
   call. Never sleep or poll in a loop to wait: job_status(wait_s=..., patterns=[...]) does it.
 - Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
   config and says whether a failure was the connection, host key, key or the script. Prefer it to
-  run('ssh', ...): the script goes in on stdin with LF line ends, nothing to quote.
+  run('ssh', ...): the script goes in on stdin with LF line ends, nothing to quote; secrets=[...]
+  hands it stored tokens as environment variables. Files and folders: remote_copy(host, local,
+  remote_path, direction='up'|'down'). A tunnel that stays open in the background:
+  job_start(command='ssh', args=['-N', '-o', 'ExitOnForwardFailure=yes', '-L',
+  '127.0.0.1:8080:localhost:80', host]); job_stop(id) closes it.
   An interactive login: session_start(profile='ssh', vars={'host': ...}).
 - Anything interactive, long-running or stateful (shells, REPLs, debuggers, gdbserver, installers,
   serial/telnet consoles, full-screen TUIs) -> a session:
@@ -124,7 +130,12 @@ Quick rules
   fs_pick lets the person choose files in a dialog (their way to "upload" to you).
   Moving more than a few KB between your own sandbox/shell and this machine: fs_upload_url /
   fs_download_url give a one-time link for curl, so the bytes never pass through the conversation
-  (never paste base64 in parts).
+  (never paste base64 in parts). Several files at once: fs_download_url(folder, or paths=[...],
+  include/exclude) gives one zip; fs_upload_url(folder, extract=true) unpacks a zip or tar you send
+  (all or nothing). Over about 8 MB pass size=<bytes>: one link per part, so no single request
+  runs into a sandbox's 30 s limit. fs_read(paths=[...]) reads up to 20 files in one call.
+  Keep files you need later in winhand's scratch folder (context() names it; programs see
+  %WINHAND_SCRATCH%), not in %TEMP%, which the owner clears.
 - The desktop like a person: screenshot (desktop, monitor, region or a window) -> input
   (click/type/keys/scroll/drag in the screenshot's pixels) or, more reliably, ui (inspect a
   window's controls, then invoke/set_value/toggle/expand/select by name: buttons, fields, lists,
@@ -289,6 +300,48 @@ def _refresh_instructions() -> None:
 secret_store.listeners.append(_refresh_instructions)
 
 
+READ_SEVERAL_MAX = 20
+
+
+def _read_several(paths: list[str], max_chars: int, encoding: str | None) -> dict:
+    """fs_read(paths=[...]): text files and documents in one answer, the size budget shared out.
+    Pictures need fs_read(path) one at a time: they come back as images."""
+    paths = list(dict.fromkeys(paths))[:READ_SEVERAL_MAX]
+    share = max(2000, max_chars // max(1, len(paths)))
+    files: list[dict] = []
+    for one in paths:
+        kind = media.kind_of(one)
+        try:
+            if kind == "image":
+                files.append({"path": one, "note": "a picture: read it with fs_read(path) to see it"})
+            elif kind == "document":
+                full = winenv.long_path(one)
+                if not os.path.isfile(full):
+                    files.append({"path": one, "error": f"no such file: {one}"})
+                    continue
+                result = media.read_document(full, None, False, max_chars=share)
+                files.append({**result["facts"], "path": one, "text": result["text"] or "(no text found)"})
+            else:
+                files.append(fs.fs_read(one, max_chars=share, encoding=encoding))
+        except (fs.FsError, media.MediaError, OSError, ValueError) as exc:
+            files.append({"path": one, "error": str(exc)})
+    return {"files": files, "each_up_to": share}
+
+
+SSH_HINT = (
+    "remote_run(host, script, secrets=[...]) does this with less to get wrong: the script goes in on "
+    "stdin with LF line ends, stored secrets reach it as environment variables, and a failure says "
+    "whether it was the connection, the host key, the key or the script. Files: remote_copy. A tunnel: "
+    "job_start(command='ssh', args=['-N', '-L', '127.0.0.1:<port>:localhost:<port>', host]), job_stop ends it."
+)
+
+
+def _ssh_program(command: str | None) -> bool:
+    """`run` started ssh or scp itself (run(command='ssh', args=[...]) or a command line)."""
+    first = (command or "").strip().strip('"').split()[:1]
+    return bool(first) and Path(first[0]).stem.lower() in ("ssh", "scp")
+
+
 def _text(value: str) -> TextContent:
     return TextContent(type="text", text=value)
 
@@ -321,6 +374,15 @@ class Edit(BaseModel):
     replace_all: bool = False
 
 
+class FileEdits(BaseModel):
+    path: str
+    old: str | None = None
+    new: str | None = None
+    replace_all: bool = False
+    edits: list[Edit] | None = None
+    expected_sha256: str | None = None
+
+
 def _spec_from_args(transport: str, command: list[str] | str | None, **kw: Any) -> SessionSpec:
     if transport not in TRANSPORTS:
         raise ValueError(f"transport must be one of {TRANSPORTS}")
@@ -332,6 +394,8 @@ def build_server(
     cfg: Config | None = None, manager: SessionManager | None = None, *, local_stdio: bool = False
 ) -> FastMCP:
     cfg = cfg if cfg is not None else load_config()
+    with contextlib.suppress(Exception):  # programs started here find winhand's scratch folder
+        os.environ[config.SCRATCH_ENV] = str(config.scratch_dir(cfg.raw))
     sessions = manager or SessionManager()
     mcp = FastMCP("winhand", instructions=instructions(cfg, local_stdio), version=__version__)
     _live[mcp] = (cfg, local_stdio)
@@ -424,13 +488,33 @@ def build_server(
                 "know where it is checked out on this machine"
             ),
         ] = None,
+        brief: Annotated[
+            bool, Field(description="Skills by name only (skill(name) loads one): a much shorter answer")
+        ] = False,
+        since: Annotated[
+            str | None,
+            Field(
+                description="The digest of an earlier answer that is still in your conversation: if nothing "
+                "changed the answer is just `unchanged`. Never after compaction (you no longer have it)"
+            ),
+        ] = None,
     ) -> dict:
         """This machine's rules and skills for agents, read the way Codex and Claude Code read them:
         the global rule files, AGENTS.md / CLAUDE.md / .claude/rules from the project down to `path`
         (with their @imports), the skills here (read a SKILL.md with fs_read when one fits), the guard
         rules in force and the local MCP servers. Call it before working in a folder and again after
         the conversation is compacted."""
-        return await asyncio.to_thread(workspace.context, cfg, path, repo)
+        full = await asyncio.to_thread(workspace.context, cfg, path, repo)
+        mark = workspace.digest(full)
+        if since and since.strip() == mark:
+            return {
+                "unchanged": True,
+                "digest": mark,
+                **({"path": full["path"]} if full.get("path") else {}),
+                "note": "the same rules, skills and guards as the answer with this digest: keep following "
+                "it. If that answer is no longer in your conversation, call context again without since",
+            }
+        return {**(workspace.briefed(full) if brief else full), "digest": mark}
 
     @mcp.tool
     async def skill(
@@ -570,7 +654,7 @@ def build_server(
         within about 40 s: if it is still going then, the answer has `still_running` and an id, it
         keeps running, and job_status(id, wait_s=1800) waits for the rest.
         Use a session instead for anything interactive or that must keep running."""
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             lambda: proc.run(
                 command,
                 args,
@@ -585,6 +669,9 @@ def build_server(
                 secrets=secrets,
             )  # fmt: skip
         )
+        if script is None and _ssh_program(command) and isinstance(result, dict):
+            result["hint_ssh"] = SSH_HINT
+        return result
 
     @mcp.tool
     async def remote_run(
@@ -597,12 +684,39 @@ def build_server(
         env: Annotated[dict[str, str] | None, Field(description="Exported before the script runs")] = None,
         cwd: Annotated[str | None, Field(description="Remote folder to run in")] = None,
         timeout_s: float = 120,
+        secrets: Annotated[
+            list[str] | None,
+            Field(
+                description="Names in this machine's secret store: exported to the script on the other "
+                "machine (sent over ssh's stdin, never on a command line); you never see the values"
+            ),
+        ] = None,
     ) -> dict:
         """Run a script on another machine over SSH from this one, with this machine's keys and ssh
         config (aliases, ProxyJump). Non-interactive (BatchMode), with keep-alives. Answers like `run`
         (still_running + job_status for long ones); on failure `ssh_error` says whether it was the
-        connection, the host key, the key, or the script itself."""
+        connection, the host key, the key, or the script itself. Files: remote_copy."""
+        if secrets:
+            try:
+                env = {**(env or {}), **secret_store.load(list(secrets))}
+            except secret_store.SecretError as exc:
+                return {"error": str(exc)}
         return await asyncio.to_thread(remote.remote_run, host, script, shell, args, env, cwd, timeout_s)
+
+    @mcp.tool
+    async def remote_copy(
+        host: Annotated[str, Field(description="An alias from this machine's ~/.ssh/config, or user@host")],
+        local: Annotated[str, Field(description="File or folder on this machine")],
+        remote_path: Annotated[str, Field(description="File or folder on the other machine")],
+        direction: Annotated[
+            str, Field(description="up: this machine -> host (default); down: host -> this machine")
+        ] = "up",
+        timeout_s: float = 600,
+    ) -> dict:
+        """Copy a file or a folder between this machine and another one over scp, with this machine's
+        ssh config and keys (the way remote_run reaches it). Answers like `run` (still_running +
+        job_status for big copies)."""
+        return await asyncio.to_thread(remote.remote_copy, host, local, remote_path, direction, timeout_s)
 
     @mcp.tool
     async def proc_list(
@@ -1034,7 +1148,11 @@ def build_server(
 
     @mcp.tool
     async def fs_read(
-        path: str,
+        path: Annotated[str | None, Field(description="The file (or give several as paths)")] = None,
+        paths: Annotated[
+            list[str] | None,
+            Field(description="Several text files or documents in one call, each with its share of the size"),
+        ] = None,
         offset: Annotated[int, Field(description="Text: 1-based first line")] = 1,
         limit: Annotated[int, Field(description="Text: number of lines")] = 2000,
         pages: Annotated[str | None, Field(description="PDF/PowerPoint: pages such as '1-3,5'")] = None,
@@ -1060,6 +1178,12 @@ def build_server(
         also logs another program is still writing. Images: returned as a picture you can see.
         PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx): extracted text; PDF pages without
         text (scans) come back as page images. Other binaries: use fs_send."""
+        if paths:
+            return await asyncio.to_thread(
+                _read_several, [*([path] if path else []), *paths], max_chars, encoding
+            )
+        if not path:
+            return {"error": "give path (or paths=[...] for several files)"}
         kind = media.kind_of(path)
         full = winenv.long_path(path)
         if kind in ("image", "document") and not os.path.isfile(full):
@@ -1117,7 +1241,9 @@ def build_server(
 
     @mcp.tool
     async def fs_edit(
-        path: str,
+        path: Annotated[
+            str | None, Field(description="The file to edit (or files=[...] for several)")
+        ] = None,
         old: Annotated[
             str | None, Field(description="Exact text to replace (must be unique unless replace_all)")
         ] = None,
@@ -1140,10 +1266,33 @@ def build_server(
                 "to edit without that check"
             ),
         ] = "",
+        files: Annotated[
+            list[FileEdits] | None,
+            Field(
+                description="Several files at once, each {path, old, new} or {path, edits: [...]}: every "
+                "edit is checked first and if one fails nothing is written"
+            ),
+        ] = None,
+        dry_run: Annotated[
+            bool, Field(description="Show the diff of what would change; write nothing")
+        ] = False,
     ) -> dict:
-        """Replace exact snippets in a file; keeps the file's encoding and CRLF/LF line endings."""
+        """Replace exact snippets in a file, or in several files at once (all or nothing); keeps each
+        file's encoding and CRLF/LF line endings. dry_run=true shows the diff first."""
+        if files:
+            entries = [f.model_dump() for f in files]
+            if path:
+                ops = [e.model_dump() for e in edits] if edits else None
+                entries.insert(
+                    0, {"path": path, "old": old, "new": new, "replace_all": replace_all, "edits": ops}
+                )
+            return await asyncio.to_thread(_fs, fs.fs_edit_files, entries, dry_run)
+        if not path:
+            return {"error": "give path (or files=[...] for several files)"}
         ops = [e.model_dump() for e in edits] if edits else None
-        return await asyncio.to_thread(_fs, fs.fs_edit, path, old, new, replace_all, ops, expected_sha256)
+        return await asyncio.to_thread(
+            _fs, fs.fs_edit, path, old, new, replace_all, ops, expected_sha256, dry_run
+        )
 
     @mcp.tool
     async def fs_list(
