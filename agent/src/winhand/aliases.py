@@ -71,7 +71,13 @@ PER_TOOL: dict[str, dict[str, str]] = {
         "dir": "path",
         "folder": "path",
     },
-    "fs_read": {"start_line": "offset", "lines": "limit", "num_lines": "limit", "max_lines": "limit"},
+    "fs_read": {
+        "start_line": "offset",
+        "lines": "limit",
+        "num_lines": "limit",
+        "max_lines": "limit",
+        "area": "region",
+    },
     "fs_write": {"text": "content", "contents": "content", "data": "content"},
     "fs_op": {
         "op": "action",
@@ -137,8 +143,8 @@ PER_TOOL: dict[str, dict[str, str]] = {
         "hwnd": "window",
         "process": "window",
     },
-    "ocr": {"query": "text", "find": "text", "title": "window", "target": "window"},
-    "screenshot": {"title": "window", "target": "window", "hwnd": "window"},
+    "ocr": {"query": "text", "find": "text", "title": "window", "target": "window", "area": "region"},
+    "screenshot": {"title": "window", "target": "window", "hwnd": "window", "area": "region"},
     "input": {"key": "keys", "hotkey": "keys", "shortcut": "keys", "string": "text"},
     "mcp_call": {
         "tool_name": "tool",

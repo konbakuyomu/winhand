@@ -312,9 +312,10 @@ def fs_edit(
     """Replace exact snippets. Fails loudly when one is missing or ambiguous; with several
     `edits` either all apply or the file is left untouched."""
     if edits:
-        if old is not None or new is not None:
-            raise FsError("give either old/new or edits, not both")
         ops = [(e.get("old") or "", e.get("new") or "", bool(e.get("replace_all"))) for e in edits]
+        # old/new repeating one of the edits is harmless; anything else is ambiguous
+        if (old is not None or new is not None) and not any((o, nw) == (old, new) for o, nw, _ in ops):
+            raise FsError("give either old/new or edits, not both")
     else:
         if old is None or new is None:
             raise FsError("give old and new (or edits=[{old, new}, ...])")
@@ -330,9 +331,20 @@ def fs_edit(
     ):
         raise FsError(f"{path} changed since you read it; read it again before editing")
     results = []
+    skipped = []
     for n, (o, nw, ra) in enumerate(ops, 1):
+        if o == nw and o:
+            skipped.append(n)  # an edit that changes nothing: skipped, not a reason to drop the rest
+            continue
         text, info = _apply_edit(text, path, o, nw, ra, f"edit {n}: " if len(ops) > 1 else "")
         results.append(info)
+    if not results:
+        return {
+            "path": path,
+            "replacements": 0,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "note": "nothing to change: old and new are identical; the file was not written",
+        }
     write_enc, note = write_text_like(path, text, encoding)
     out = {
         "path": path,
@@ -341,6 +353,8 @@ def fs_edit(
         "encoding": write_enc,
         "sha256": sha256_of(path),
     }
+    if skipped:
+        out["skipped"] = f"edit {', '.join(map(str, skipped))}: old and new are identical, nothing to do"
     if len(results) > 1:
         out["edits"] = results
     if note:
@@ -730,6 +744,8 @@ def fs_search(
     budget_s: float = SEARCH_BUDGET_S,
 ) -> dict:
     root = _p(path)
+    if not os.path.exists(root):
+        raise FsError(f"no such file or folder: {path}")
     rg = shutil.which("rg")
     timed_out = False
     warnings = ""

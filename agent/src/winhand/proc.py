@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import getpass
-import itertools
 import locale
 import os
 import platform
@@ -557,7 +556,45 @@ class _Running:
 
 
 _running: dict[str, _Running] = {}
-_run_ids = itertools.count(1)
+_run_ids_lock = threading.Lock()
+_first_ids: dict[str, int] = {}  # counter file -> the first number this winhand handed out
+
+
+def _next_run_id() -> str:
+    """run-N, numbered on across winhand restarts: the last number is kept in ~/.winhand/run-counter,
+    so an id from before a restart never names another command (run-92 once stood for commands
+    five days apart). Without a writable home the numbers start over, as they used to."""
+    path = config.home() / "run-counter"
+    with _run_ids_lock:
+        try:
+            last = int(path.read_text(encoding="ascii").strip() or 0)
+        except (OSError, ValueError):
+            last = 0
+        number = last + 1
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_name(f"run-counter.{os.getpid()}.tmp")
+            temp.write_text(str(number), encoding="ascii")
+            os.replace(temp, path)
+        except OSError:
+            pass
+        _first_ids.setdefault(str(path), number)
+    return f"run-{number}"
+
+
+def _forget_finished() -> None:
+    """Keep the last _KEEP_FINISHED finished commands, so job_status can still answer for them."""
+    finished = [j for j in list(_running.values()) if j.proc.poll() is not None]
+    for old in finished[:-_KEEP_FINISHED]:
+        _running.pop(old.id, None)
+
+
+def _note_run_id(rid: str) -> None:
+    """Put the id on this call's history entry right away: if the reply never reaches the client,
+    history() shows which run to wait for."""
+    from .history import note_current
+
+    note_current(run_id=rid)
 
 
 def run(
@@ -605,7 +642,10 @@ def run(
             # command + script: the script runs with that interpreter (a project's venv python ...)
             program = winenv.resolve_executable(command, full_env, cwd) if command else None
             if program and shell:
-                return {"error": "give the interpreter as command or as shell, not both"}
+                stem = Path(program).stem.lower()
+                if shell.lower() not in (stem, stem.rstrip("0123456789.")):
+                    return {"error": "give the interpreter as command or as shell, not both"}
+                shell = None  # the same interpreter named twice (command='python', shell='python')
             argv, temp_file, script_stdin = prepare_script(script, shell, full_env, args, program)
             if script_stdin is not None:
                 if stdin is not None:
@@ -648,20 +688,24 @@ def run(
         if temp_file:
             temp_file.unlink(missing_ok=True)
         return {"error": f"cannot start {argv[0]!r}: {exc}", "argv": argv}
-    job = _Running(f"run-{next(_run_ids)}", proc, argv, time.monotonic() + timeout_s)
+    job = _Running(_next_run_id(), proc, argv, time.monotonic() + timeout_s)
     job.raw, job.temp_file, job.notes = raw, temp_file, notes
     job.command, job.nested_direct = command, nested_direct
     if argv and re.search(r"(?i)(pwsh|powershell)(\.exe)?$", argv[0]):
         job.script = script if script is not None else (command if args is None else None)
+    # waitable from the start: a reply lost on the way leaves an id in history() to follow
+    _running[job.id] = job
+    _note_run_id(job.id)
     if stdin is not None:
         threading.Thread(target=_feed, args=(proc, stdin), daemon=True).start()
     if job.wait(min(timeout_s, reply_within_s)):
+        _forget_finished()
         return _result(job, output_limit)
     if timeout_s <= reply_within_s:
         job.timed_out = True
         job.kill()
+        _forget_finished()
         return _result(job, output_limit)
-    _running[job.id] = job
     threading.Thread(target=_expire, args=(job,), daemon=True).start()
     out, err = job.text()
     stdout, _ = clip(out, output_limit, keep="both")
@@ -698,9 +742,7 @@ def _expire(job: _Running) -> None:
     if not job.wait(job.deadline - time.monotonic()):
         job.timed_out = True
         job.kill()
-    finished = [j for j in _running.values() if j.proc.poll() is not None]
-    for old in finished[:-_KEEP_FINISHED]:
-        _running.pop(old.id, None)
+    _forget_finished()
 
 
 def _exit_fields(job: _Running, stderr: str) -> dict:
@@ -744,6 +786,13 @@ def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:
     """The rest of a command `run` handed back while it was still running."""
     job = _running.get(rid)
     if job is None:
+        number = re.fullmatch(r"run-(\d+)", rid)
+        first = _first_ids.get(str(config.home() / "run-counter"))
+        if number and first is not None and int(number.group(1)) < first:
+            raise ValueError(
+                f"no running command {rid!r}: it ran before winhand last restarted (this start began at "
+                f"run-{first}), so its output is gone. history() lists what it did and its exit code"
+            )
         raise ValueError(
             f"no running command {rid!r} (winhand keeps the last {_KEEP_FINISHED} after they finish)"
         )

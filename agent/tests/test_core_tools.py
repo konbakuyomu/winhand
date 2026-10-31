@@ -54,7 +54,8 @@ def test_run_python_script_with_args():
 
 def test_run_script_errors_are_explained():
     assert "is not one" in proc.run("echo hi", script="echo hi")["error"]  # not an interpreter
-    assert "not both" in proc.run(sys.executable, script="print(1)", shell="python")["error"]
+    # two different interpreters; the same one named twice (shell="python") is fine since 0.7.4
+    assert "not both" in proc.run(sys.executable, script="print(1)", shell="pwsh")["error"]
     assert "shell must be" in proc.run(script="x", shell="fish")["error"]
     assert "give command" in proc.run()["error"]
 
@@ -312,8 +313,8 @@ def test_fs_edit_applies_several_edits_or_none(tmp_path):
     assert p.read_bytes() == "a=10\r\nb=20\r\n# 中文\r\n".encode("gbk")
     with pytest.raises(fs.FsError, match="changed since"):
         fs.fs_edit(str(p), "a=10", "a=11", expected_sha256="0" * 64)
-    with pytest.raises(fs.FsError, match="not both"):
-        fs.fs_edit(str(p), "a", "b", edits=[{"old": "a", "new": "b"}])
+    with pytest.raises(fs.FsError, match="not both"):  # old/new that repeat an edit are accepted
+        fs.fs_edit(str(p), "x", "y", edits=[{"old": "a", "new": "b"}])
 
 
 async def test_fs_edit_tool_takes_edit_objects(tmp_path):

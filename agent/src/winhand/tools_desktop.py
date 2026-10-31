@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -66,6 +67,68 @@ async def wait_job(fetch, wait_s: float, regexes: list[re.Pattern[str]]) -> dict
 
 
 MULTI_JOB_CHARS = 6_000  # output per job when several are waited on together
+
+# What callers were already shown, per job and output cursor: the stderr size when that cursor was
+# handed out. A poll that continues from such a cursor gets only what is new (see trim_repeat).
+_shown: dict[str, dict[int, int | None]] = {}
+_shown_lock = threading.Lock()
+_SHOWN_PER_JOB = 64
+_REPEATED = ("command", "log_file", "started", "elevated")
+_UNSEEN = object()
+
+
+def trim_repeat(job_id: str, since: int, status: dict, whole_stderr: bool = False) -> dict:
+    """A poll used to repeat what the caller already had: the command line (often a whole script),
+    the log path, and for programs run directly the last 6 KB of stderr, about half of every
+    answer while a long job ran. When the caller continues from a cursor this job already handed
+    out, leave those out and keep only the stderr written since. A job that has ended answers in
+    full; `whole_stderr` (an explicit tail) keeps the stderr tail too."""
+    if status.get("error") or "state" not in status:
+        return status
+    running = status["state"] == "running"
+    size = status.get("stderr_size")
+    with _shown_lock:
+        marks = _shown.setdefault(job_id, {})
+        seen = marks.get(since, _UNSEEN)
+        if running:
+            # the latest size: a job writing only stderr (Codex) keeps its output cursor, and each
+            # poll must move on from the last one. Two callers polling one job at the same cursor
+            # may each miss what the other was shown; tail= shows the end of stderr again.
+            marks.pop(status.get("cursor", since), None)
+            marks[status.get("cursor", since)] = size
+            while len(marks) > _SHOWN_PER_JOB:
+                marks.pop(next(iter(marks)))
+        else:
+            _shown.pop(job_id, None)
+    if seen is _UNSEEN or not running:
+        return status
+    out = {k: v for k, v in status.items() if k not in _REPEATED}
+    if not whole_stderr and "stderr" in out and size is not None and isinstance(seen, int):
+        new = size - seen
+        if new <= 0:
+            out.pop("stderr")
+            out.pop("stderr_note", None)
+        elif new < len(out["stderr"]):
+            out["stderr"] = out["stderr"][-new:]
+            out.pop("stderr_note", None)
+    return out
+
+
+def _job_ids(value: Any) -> Any:
+    """job_status(id=...) as models send it: a list, a JSON list written as a string, or several ids
+    separated by commas or spaces (no job or run id contains either)."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(i) for i in parsed]
+    parts = [p for p in re.split(r"[,\s]+", text.strip("[]")) if p]
+    return parts if len(parts) > 1 else text
 
 
 def _is_run(job_id: str) -> bool:
@@ -128,14 +191,18 @@ def _facts(data: dict) -> TextContent:
     return TextContent(type="text", text=json.dumps(data, ensure_ascii=False))
 
 
-def media_result(facts: dict, *blocks) -> ToolResult:
+def media_result(facts: dict, *blocks, structured_extra: dict | None = None) -> ToolResult:
     """A result carrying pictures (or files): the facts as text and as structured content, then
     the blocks. The structured copy matters: a client that cached an older definition of the
-    tool (with an output schema) rejects results without one."""
+    tool (with an output schema) rejects results without one.
+
+    Claude Code hands the model the structured content in place of the result's text blocks
+    (pictures still come through), so anything the model must read goes into structured_extra
+    too: it is added to the structured copy only, and clients that show the blocks see it once."""
     content = [_facts(facts)]
     for block in blocks:
         content.append(block.to_image_content() if isinstance(block, Image) else block)
-    return ToolResult(content=content, structured_content=facts)
+    return ToolResult(content=content, structured_content={**facts, **(structured_extra or {})})
 
 
 _UI_ACTIONS = (
@@ -1041,6 +1108,7 @@ def register(mcp: FastMCP) -> None:
         whichever job finishes or matches first, and answer with every job's state and new output."""
         if id is None:
             return await asyncio.to_thread(_errors, lambda: {"jobs": jobs.list_jobs()})
+        id = _job_ids(id)
         if isinstance(id, list):
             ids = list(dict.fromkeys(str(i) for i in id))
             if len(ids) == 1:
@@ -1054,7 +1122,7 @@ def register(mcp: FastMCP) -> None:
             return _job_fetch(id, start, limit)
 
         if wait_s <= 0:
-            return await asyncio.to_thread(fetch)
+            return trim_repeat(id, start, await asyncio.to_thread(fetch), tail is not None)
         try:
             regexes = [re.compile(p, re.MULTILINE) for p in patterns or []]
         except re.error as exc:
@@ -1067,7 +1135,8 @@ def register(mcp: FastMCP) -> None:
             coalesce.freeze(patterns),
             limit,
         )
-        return await coalesce.shared(key, lambda: wait_job(fetch, wait_s, regexes))
+        status = await coalesce.shared(key, lambda: wait_job(fetch, wait_s, regexes))
+        return trim_repeat(id, start, status, tail is not None)
 
     async def _job_statuses(ids, since, wait_s, patterns, tail) -> dict:
         cursors = {i: (since.get(i, 0) if isinstance(since, dict) else since) for i in ids}
@@ -1084,7 +1153,13 @@ def register(mcp: FastMCP) -> None:
             coalesce.freeze(patterns),
             limit,
         )
-        return await coalesce.shared(key, lambda: wait_jobs(ids, cursors, limit, wait_s, regexes))
+        out = await coalesce.shared(key, lambda: wait_jobs(ids, cursors, limit, wait_s, regexes))
+        if not isinstance(out.get("jobs"), dict):
+            return out
+        trimmed = {
+            i: trim_repeat(i, cursors.get(i, 0), st, tail is not None) for i, st in out["jobs"].items()
+        }
+        return {**out, "jobs": trimmed}
 
     @mcp.tool
     async def job_stop(id: str) -> dict:

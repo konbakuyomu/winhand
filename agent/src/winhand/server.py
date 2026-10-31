@@ -58,6 +58,9 @@ Quick rules
   empty value): the call can fail before it reaches winhand ("could not be parsed as JSON").
 - One-shot command that finishes by itself -> `run`:
     run(command='git', args=['log', '-3'])        program + args, no shell, no quoting problems
+    run(command='git', args=['commit', '-F', '-'], stdin=msg)
+                                                   text such as a commit message goes in on stdin,
+                                                   never inside a command line or a here-string
     run(script='...', shell='pwsh')                a multi-line script (pwsh | powershell | cmd |
                                                    python | bash | wsl), written to a file, so $vars,
                                                    quotes and Chinese text arrive exactly as written
@@ -71,7 +74,8 @@ Quick rules
   it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code.
   Never sleep or poll in a loop to wait: job_status(wait_s=40, patterns=[...]) does it.
 - Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
-  config and says whether a failure was the connection, host key, key or the script.
+  config and says whether a failure was the connection, host key, key or the script. Prefer it to
+  run('ssh', ...): the script goes in on stdin with LF line ends, nothing to quote.
   An interactive login: session_start(profile='ssh', vars={'host': ...}).
 - Anything interactive, long-running or stateful (shells, REPLs, debuggers, gdbserver, installers,
   serial/telnet consoles, full-screen TUIs) -> a session:
@@ -111,7 +115,8 @@ Quick rules
   to fs_write/fs_edit when someone else may change the file meanwhile. fs_write(overwrite=false)
   only creates a file that is not there yet.
   fs_read also shows images and reads PDF (scans as page images), Word, PowerPoint and Excel.
-  fs_send hands any file to you as-is; fs_write_bytes writes binary content here;
+  fs_send hands any file (<= 20 MB) to you as-is in one call (Claude Code saves it in your sandbox);
+  fs_write_bytes writes binary content here;
   fs_pick lets the person choose files in a dialog (their way to "upload" to you).
   Moving more than a few KB between your own sandbox/shell and this machine: fs_upload_url /
   fs_download_url give a one-time link for curl, so the bytes never pass through the conversation
@@ -177,25 +182,24 @@ GUIDE = """\
 winhand drives the Windows machine it runs on. help() has the full guide: read it once.
 
 - One-shot command that finishes by itself -> `run`:
-    run(command='git', args=['log', '-3'])   program + args, no shell, no quoting problems
+    run(command='git', args=['commit', '-F', '-'], stdin=msg)   program + args (+ text on stdin): no
+                                              shell, no quoting problems
     run(script='...', shell='pwsh')           multi-line script (pwsh | powershell | cmd | python | bash
                                               | wsl) written to a file: $vars, quotes, Chinese arrive as is
     run(command='...')                        one command line for PowerShell
   Never nest `powershell -Command "..."` in a command line; use script= or args=. `run` answers within
   ~40 s; if still going you get `still_running` + an id, and job_status(id, since=cursor, wait_s=40)
   waits for the rest. Never sleep or poll in a loop.
-- Interactive, long-running or stateful programs (shells, REPLs, gdb, gdbserver, installers, serial or
-  telnet consoles, full-screen TUIs) -> a session: session_start -> session_send / session_wait ->
-  session_read / session_screen -> session_stop. profile_list knows common tools (gdb, pyocd, serial ...).
-- Session results carry `state` + `next`: running | awaiting_input | needs_user | idle | blocked | exited.
-  `needs_user` (a password, code or sign-in): never invent it; tell the person or call session_prompt_user.
-  session_wait waits on several sessions at once; a timeout is not a failure, call it again.
+- Another machine over SSH -> remote_run(host, script): this machine's ssh config and keys, script on
+  stdin, says whether a failure was the connection or the script. Not run('ssh', ...).
+- Interactive or stateful programs (shells, REPLs, gdb, serial/telnet consoles, TUIs, installers) -> a
+  session: session_start -> session_send / session_wait -> session_read / session_screen -> session_stop
+  (profile_list: gdb, pyocd, serial ...). Results carry `state` + `next`; `needs_user` (a password, code
+  or sign-in): never invent it, tell the person or call session_prompt_user. A wait timeout is no failure.
 {secrets}
 - Files: fs_read / fs_edit / fs_write / fs_search / fs_find / fs_list / fs_stat / fs_op / fs_apply_patch;
-  prefer them to shell commands. Moving more than a few KB between your sandbox and this machine:
-  fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
-- Full-screen programs (menuconfig, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
-  then session_screen (`highlighted` is the selected row).
+  prefer them to shell commands. A file from here into your sandbox: fs_send(path) (<= 20 MB, one call).
+  Uploads and bigger files: fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
 - The desktop: take a screenshot yourself instead of asking the person for one. To operate a program
   prefer its own CLI/API, then ui (controls and menus by name), then keys; without controls (canvases,
   self-drawn apps) ocr(action='click', text=...) finds text on screen; input pixel clicks come last.
@@ -205,8 +209,8 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
 - job_start runs in the background, independent of winhand (long work, anything that restarts winhand,
   elevated=true for admin tasks); args= runs a program directly, stdin= feeds it text (Codex:
   command='codex', args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
-- Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the
-  usual suspects with fixes. A tool missing from your list: call(tool, arguments) reaches it.
+- Odd behaviour (garbled text, a failing shim)? sys_info(checks=true). A tool missing from your list:
+  call(tool, arguments) reaches it.
 - Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
   tools, mcp_call(server, tool, arguments) calls one.
 - After a connection error, call history() before resending anything.
@@ -1057,11 +1061,15 @@ def build_server(
             if kind == "document":
                 result = await asyncio.to_thread(media.read_document, full, pages, render_pages)
                 result["facts"]["path"] = path
-                # explicit content blocks: a list of plain strings would be merged into one JSON string
+                text = result["text"] or "(no text found)"
+                # explicit content blocks: a list of plain strings would be merged into one JSON string.
+                # The text goes into the structured copy as well: Claude Code shows the model that copy
+                # instead of the text blocks, and without it the model saw only the page count.
                 return media_result(
                     result["facts"],
-                    _text(result["text"] or "(no text found)"),
+                    _text(text),
                     *[Image(data=data, format=fmt) for data, fmt, _ in result["images"]],
+                    structured_extra={"text": text},
                 )
         except (media.MediaError, ImportError, OSError, ValueError) as exc:
             return {"error": str(exc)}
