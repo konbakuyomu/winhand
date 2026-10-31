@@ -699,6 +699,9 @@ def run(
     # waitable from the start: a reply lost on the way leaves an id in history() to follow
     _running[job.id] = job
     _note_run_id(job.id)
+    from . import jobwatch
+
+    jobwatch.remember_windows(job.id)  # a sign-in or signing prompt that shows up later stands out
     power.keeper.hold(job.id)  # no sleep while it runs; released when it ends (_Running.wait)
     if stdin is not None:
         threading.Thread(target=_feed, args=(proc, stdin), daemon=True).start()
@@ -730,6 +733,12 @@ def run(
     }
     if notes:
         result["notes"] = notes
+    if time.monotonic() - job.last_output >= jobwatch.PROMPT_QUIET_S:  # quiet: is a prompt holding it?
+        prompts = jobwatch.prompts_since(job.id, {p.pid for p in jobwatch.tree(proc.pid)})
+        if prompts:
+            result["prompts"], result["prompts_note"] = prompts, jobwatch.PROMPTS_NOTE
+        if jobwatch.secure_screen():
+            result["secure_screen_note"] = jobwatch.SECURE_NOTE
     return result
 
 

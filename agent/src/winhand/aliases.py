@@ -145,7 +145,17 @@ PER_TOOL: dict[str, dict[str, str]] = {
     },
     "ocr": {"query": "text", "find": "text", "title": "window", "target": "window", "area": "region"},
     "screenshot": {"title": "window", "target": "window", "hwnd": "window", "area": "region"},
-    "input": {"key": "keys", "hotkey": "keys", "shortcut": "keys", "string": "text"},
+    "input": {
+        "key": "keys",
+        "hotkey": "keys",
+        "shortcut": "keys",
+        "string": "text",
+        "modifier": "modifiers",
+        "duration": "duration_s",
+        "times": "repeat",
+        "hwnd": "window",
+        "title": "window",
+    },
     "mcp_call": {
         "tool_name": "tool",
         "name": "tool",

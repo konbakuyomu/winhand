@@ -21,7 +21,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, TextResourceContents
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from . import (
     approvals,
@@ -31,6 +31,7 @@ from . import (
     jobs,
     jobwatch,
     media,
+    presence,
     proc,
     secret_store,
     transfer,
@@ -40,6 +41,18 @@ from . import (
 )
 from . import ocr as screen_text
 from .secret_prompt import PromptUnavailable, ask_pick
+
+
+class UiStep(BaseModel):
+    action: str
+    name: str | None = None
+    automation_id: str | None = None
+    control_type: str | None = None
+    ref: str | None = None
+    index: int | None = None
+    value: str | None = None
+    timeout_s: float | None = None
+
 
 UIA_SCRIPT = Path(__file__).parent / "scripts" / "uia.ps1"
 SEND_LIMIT = 20 * 1024 * 1024
@@ -99,6 +112,21 @@ async def wait_job(
                     }
                 if activity.get("stalled") and not first.get("stalled"):
                     return {**status, "matched": "stalled", "activity": activity}
+                seen = {p["hwnd"] for p in first.get("prompts", [])}
+                if any(p["hwnd"] not in seen for p in activity.get("prompts", [])):
+                    return {
+                        **status,
+                        "matched": "prompt",
+                        "activity": activity,
+                        "note": jobwatch.PROMPTS_NOTE,
+                    }
+                if activity.get("secure_screen") and not first.get("secure_screen"):
+                    return {
+                        **status,
+                        "matched": "secure_screen",
+                        "activity": activity,
+                        "note": jobwatch.SECURE_NOTE,
+                    }
         if time.monotonic() >= deadline:
             out = {
                 **status,
@@ -114,7 +142,7 @@ async def wait_job(
 def _activity(job_id: str) -> dict:
     """processes, CPU, memory, quiet_s, stalled and windows of a running job or `run` command."""
     info = proc.watch_info(job_id) if _is_run(job_id) else jobs.watch_info(job_id)
-    return jobwatch.snapshot(*info) if info else {}
+    return jobwatch.snapshot(*info, key=job_id) if info else {}
 
 
 def _file_tails(paths: list[str], lines: int = 20, max_bytes: int = 8192) -> dict:
@@ -544,6 +572,413 @@ def wait_window(target, state: str, timeout_s: float, find=None) -> dict:
         time.sleep(WAIT_POLL_S)
 
 
+REFS_KEPT = 8  # windows whose latest inspect keeps its refs
+NEW_WINDOW_SETTLE_S = 0.6  # a dialog a button opens takes a moment to appear
+UI_STEPS_MAX = 20
+_refs: dict[int, list[dict]] = {}
+_refs_lock = threading.Lock()
+
+
+def _inspect_retrying(hwnd: int, *, timeout_s: float = 60) -> dict:
+    """_inspect_controls, read again when the window changed while it was being read: a page
+    redrawing made inspect itself fail with "the control is gone" (2026-11-01 review)."""
+    for attempt in range(3):
+        try:
+            return _inspect_controls(hwnd, timeout_s=timeout_s)
+        except uia.Gone:
+            if attempt == 2:
+                raise
+            time.sleep(0.3)
+    raise AssertionError("unreachable")
+
+
+def _haystack(element: dict) -> str:
+    return " ".join(
+        str(element.get(k) or "") for k in ("name", "automation_id", "type", "value", "class")
+    ).lower()
+
+
+def _keep_refs(hwnd: int, elements: list[dict]) -> None:
+    with _refs_lock:
+        _refs.pop(hwnd, None)
+        _refs[hwnd] = elements
+        while len(_refs) > REFS_KEPT:
+            del _refs[next(iter(_refs))]
+
+
+def _by_ref(hwnd: int, ref: str) -> dict:
+    """The control a ref of this window's latest inspect names (e12), as it is now. A live UI
+    Automation element is read again; otherwise the control is found again in a new reading by
+    its runtime id, its own window or its automation id."""
+    with _refs_lock:
+        elements = _refs.get(hwnd)
+    if elements is None:
+        raise desktop.DesktopError(f"no inspect of this window to take ref {ref!r} from: inspect it first")
+    m = re.fullmatch(r"e?(\d+)", str(ref).strip(), re.IGNORECASE)
+    if not m or not 1 <= int(m.group(1)) <= len(elements):
+        raise desktop.DesktopError(
+            f"ref {ref!r} is not in this window's latest inspect (e1 to e{len(elements)})"
+        )
+    stored = elements[int(m.group(1)) - 1]
+    gone = f"ref {ref} is gone (the window changed): inspect it again"
+    if stored.get("_element") is not None:
+        fresh = uia.refresh(stored["_element"])
+        if fresh is None:
+            raise uia.Gone(gone)
+        return {**stored, **fresh}
+    candidates = _inspect_retrying(hwnd)["elements"]
+    for key in ("_runtime_id", "hwnd"):
+        if stored.get(key):
+            hits = [e for e in candidates if e.get(key) == stored[key]]
+            if len(hits) == 1:
+                return hits[0]
+    if stored.get("automation_id"):
+        hits = [
+            e for e in candidates if all(e.get(k) == stored.get(k) for k in ("automation_id", "type", "name"))
+        ]
+        if len(hits) == 1:
+            return hits[0]
+    raise uia.Gone(gone)
+
+
+def _window_handles() -> set[int]:
+    try:
+        return {w["hwnd"] for w in desktop.windows()}
+    except (desktop.DesktopError, OSError):
+        return set()
+
+
+def _brief(w: dict) -> dict:
+    return {
+        "hwnd": w["hwnd"],
+        "title": w.get("title"),
+        "process": w.get("process"),
+        **({"dialog": True} if w.get("class") == "#32770" or w.get("owned") else {}),
+    }
+
+
+def _new_windows(before: set[int], settle_s: float = 0.0) -> list[dict]:
+    """Top-level windows that were not there before (up to 5), waiting up to settle_s for one."""
+    if not before:
+        return []
+    deadline = time.monotonic() + settle_s
+    while True:
+        try:
+            new = [_brief(w) for w in desktop.windows() if w["hwnd"] not in before]
+        except (desktop.DesktopError, OSError):
+            return []
+        if new or time.monotonic() >= deadline:
+            return new[:5]
+        time.sleep(0.15)
+
+
+def _ui_inspect(
+    w: dict, filter: str | None, name: str | None, automation_id: str | None, control_type: str | None
+) -> dict:
+    """A window's controls, each with a ref for the actions that follow. `filter` is plain text
+    (case ignored) in a control's name, automation id, type, value or class; `a|b` takes either:
+    filters written that way found nothing before (2026-11-01 review). name, automation_id and
+    control_type narrow the list the way they pick a control for an action."""
+    hwnd = w["hwnd"]
+    snapshot = _inspect_retrying(hwnd)
+    elements = snapshot["elements"]
+    _keep_refs(hwnd, elements)
+    refs = {id(e): f"e{i}" for i, e in enumerate(elements, 1)}
+    picked = (
+        match_controls(elements, name, automation_id, control_type)
+        if (name or automation_id or control_type)
+        else elements
+    )
+    terms = [t.strip().lower() for t in (filter or "").split("|") if t.strip()]
+    shown = [
+        {"ref": refs[id(e)], **_public(e)}
+        for e in picked
+        if not terms or any(t in _haystack(e) for t in terms)
+    ]
+    listed = {
+        "window": w["title"],
+        "count": len(elements),
+        "shown": len(shown[:250]),
+        "elements": shown[:250],
+        "backend": snapshot.get("backend"),
+        "refs": "act on a control by its ref: ui(window, action, ref='e12'); refs last until the next inspect",
+    }
+    if snapshot.get("backend_note"):
+        listed["backend_note"] = snapshot["backend_note"]
+    if not shown and (terms or name or automation_id or control_type):
+        listed["note"] = "nothing matched; inspect without filter to see every control"
+    return listed
+
+
+def _ui_act(
+    w: dict,
+    action: str,
+    *,
+    name: str | None = None,
+    automation_id: str | None = None,
+    control_type: str | None = None,
+    index: int | None = None,
+    value: str | None = None,
+    verify_wait_s: float = 3,
+    ref: str | None = None,
+) -> dict:
+    """One action on one control (found by ref, or by name / automation_id / type), then its state
+    read back, and any window that opened because of it."""
+    hwnd = w["hwnd"]
+    desktop.refuse_own(hwnd)  # WinHand's own dialogs: no need to look for the control first
+    if ref is not None:
+        found = [_by_ref(hwnd, ref)]
+        snapshot = {"backend": "native" if found[0].get("_element") is not None else "powershell"}
+    else:
+        snapshot = _inspect_retrying(hwnd)
+        found = match_controls(snapshot["elements"], name, automation_id, control_type)
+    if not found:
+        raise desktop.DesktopError(
+            f"no control matches name={name!r} automation_id={automation_id!r} "
+            f"type={control_type!r}; use action='inspect' to see the controls"
+        )
+    if index is None and len(found) > 1:
+        return {
+            "error": f"{len(found)} controls match; nothing was done. Pass index (the place in "
+            "this list, from 0), automation_id or control_type",
+            "matches": [
+                {"index": i, **{k: e.get(k) for k in _CANDIDATE if e.get(k) not in (None, "")}}
+                for i, e in enumerate(found[:20])
+            ],
+        }
+    chosen = index or 0
+    if chosen >= len(found):
+        raise desktop.DesktopError(f"only {len(found)} controls match; index {chosen} is out of range")
+    target = found[chosen]
+    if target.get("enabled") is False:
+        raise desktop.DesktopError(f"the control is disabled right now: {_public(target)}")
+    # operating the program: the person's approval first (approvals.py), once the control is known
+    which = target.get("name") or name or automation_id or control_type or ""
+    desktop.require_operable(hwnd, f"控件操作：{action}「{which}」" if which else f"控件操作：{action}")
+    before = _window_handles()
+    done = None
+    if action != "click":
+        patterns = set(target.get("patterns") or ())
+        can = action == "focus" or patterns & _VERB_PATTERNS.get(action, set())
+        if (
+            target.get("native")
+            and action in ("invoke", "toggle", "select")
+            and target.get("type") in ("Button", "CheckBox", "RadioButton")
+        ):
+            # a posted click: UI Automation's Invoke waits while the button's handler runs,
+            # all the time a modal dialog it opens stays open
+            done = desktop.native_act(target, action, value)
+        if not done and target.get("_element") is not None and can:
+            handler = action in ("invoke", "toggle", "select", "expand")
+            try:
+                done = uia.act(
+                    target["_element"],
+                    action,
+                    value,
+                    timeout=INVOKE_WAIT_S if handler else uia.TIMEOUT_S,
+                )
+            except uia.NoAnswer:
+                if not handler:
+                    raise
+                # the program is still in the control's handler, typically a dialog it opened
+                done = "sent; the program has not finished handling it (a dialog it opened may be waiting)"
+        elif not done and target.get("uia_index") is not None and can:
+            done = _run_uia(
+                hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
+                ExpectId=",".join(map(str, target.get("_runtime_id", []))),
+                Do=action, Value=value,
+            )["done"]  # fmt: skip
+        if not done and target.get("native"):
+            done = desktop.native_act(target, action, value)
+    rect = target.get("rect")
+    if (
+        not done
+        and action in ("click", "invoke", "toggle", "select")
+        and target.get("offscreen")
+        and target.get("_element") is not None
+        and "ScrollItem" in (target.get("patterns") or ())
+    ):
+        rect = uia.scroll_into_view(target["_element"]) or rect  # a list row out of sight
+    if not done and action in ("click", "invoke", "toggle", "select") and rect:
+        left, top, width, height = rect
+        cx, cy = left + width // 2, top + height // 2
+        try:
+            desktop.window_action(hwnd, "focus")
+        except approvals.NotOperable:
+            raise
+        except desktop.DesktopError:
+            pass  # the control may be visible anyway (topmost, or already in front)
+        if w.get("pid") and desktop.pid_at(cx, cy) != w["pid"]:
+            # a real click lands on whatever is there: another program, or what the
+            # control scrolled away from
+            hidden = " (UI Automation reports it out of sight)" if target.get("offscreen") else ""
+            raise desktop.DesktopError(
+                f"another window is at ({cx}, {cy}), where the control is{hidden}; nothing was "
+                "clicked. Bring the window to the front or scroll to the control, then try again"
+            )
+        desktop.input_action("click", cx, cy, coordinates="screen")
+        done = f"clicked at ({cx}, {cy})"
+    if not done:
+        raise desktop.DesktopError(f"the control does not support {action}: {_public(target)}")
+
+    expected = {}
+    if action == "set_value" and target.get("value") != "(hidden)":
+        expected = {"value": value or ""}
+    elif (action == "toggle" or done == "toggled") and target.get("toggle") in ("On", "Off"):
+        expected = {"toggle": "Off" if target["toggle"] == "On" else "On"}
+    elif action == "select" or done == "selected":
+        expected = {"selected": True} if "selected" in target else {"toggle": "On"}
+    elif action in ("expand", "collapse") or done == "expanded":
+        expected = {"expanded": "Collapsed" if action == "collapse" else "Expanded"}
+    elif action == "focus":
+        expected = {"focused": True}
+
+    deadline = time.monotonic() + verify_wait_s
+    after = None
+    verified = None
+    title = w["title"]
+    reason = "Action sent; inspect its outcome before repeating it."
+    while True:
+        try:
+            if target.get("_element") is not None:
+                after = _read_back(hwnd, target)
+                try:
+                    title = desktop.find_window(hwnd)["title"]
+                except desktop.DesktopError:
+                    pass  # the window closed: the element read-back says the rest
+            else:
+                snapshot = _inspect_controls(hwnd, timeout_s=max(1, min(3, deadline - time.monotonic())))
+                title = snapshot["window"]
+                candidates = snapshot["elements"]
+                if target.get("_runtime_id"):
+                    candidates = [e for e in candidates if e.get("_runtime_id") == target["_runtime_id"]]
+                elif target.get("hwnd"):
+                    candidates = [e for e in candidates if e.get("hwnd") == target["hwnd"]]
+                elif target.get("automation_id"):
+                    candidates = [
+                        e
+                        for e in candidates
+                        if e.get("automation_id") == target["automation_id"]
+                        and e.get("type") == target.get("type")
+                    ]
+                else:
+                    candidates = []  # an old list index cannot identify a control after redraw
+                after = candidates[0] if len(candidates) == 1 else None
+            if after is not None and expected and all(after.get(key) is not None for key in expected):
+                verified = all(after[key] == val for key, val in expected.items())
+                reason = (
+                    "Read-back matches the requested state." if verified else "Read-back does not match yet."
+                )
+            else:
+                verified = None
+                reason = "Cannot confirm the control state; inspect the resulting window before repeating."
+        except (desktop.DesktopError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            reason = f"Action sent, but read-back failed: {exc}. Inspect before repeating."
+            after, verified = None, None
+            break
+        if verified is True or not expected or time.monotonic() >= deadline:
+            break
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+    out = {
+        "done": done,
+        "matches": len(found),
+        "window": title,
+        "element": _public(after) if after is not None else None,
+        "verified": verified,
+        "verification": reason,
+        "backend": snapshot.get("backend"),
+    }
+    if snapshot.get("backend_note"):
+        out["backend_note"] = snapshot["backend_note"]
+    if ref is not None:
+        out["ref"] = ref
+    # a dialog the action opened (a confirmation, an error, a file picker) is what to look at next
+    new = _new_windows(before, settle_s=0 if expected else NEW_WINDOW_SETTLE_S)
+    if new:
+        out["new_windows"] = new
+        out["new_windows_note"] = (
+            "a window opened after this: read it (screenshot or ui inspect) before going on"
+        )
+    return out
+
+
+def _ui_steps(w: dict, steps: list[dict], verify_wait_s: float) -> dict:
+    """Several actions on one window in order, stopping at the first that fails or does not take;
+    then a picture of where it ended (FlaUI-MCP's windows_batch, computer use's action lists)."""
+    hwnd = w["hwnd"]
+    if not steps:
+        raise desktop.DesktopError("give steps=[{action, name | ref | automation_id ..., value}, ...]")
+    if len(steps) > UI_STEPS_MAX:
+        raise desktop.DesktopError(f"at most {UI_STEPS_MAX} steps in one call")
+    results: list[dict] = []
+    stopped = None
+    shot_of = hwnd
+    for n, step in enumerate(steps, 1):
+        action = (step.get("action") or "").strip()
+        try:
+            with presence.acting(f"ui step {n} {action}"):  # the stop keys end the steps here
+                if action in ("keys", "type"):
+                    text = step.get("value") or ""
+                    desktop.require_operable(hwnd, f"按键：{text[:40]}" if action == "keys" else "输入文字")
+                    try:
+                        desktop.window_action(hwnd, "focus")
+                    except (desktop.DesktopUnavailable, approvals.NotOperable):
+                        raise
+                    except desktop.DesktopError:
+                        pass  # it may be in front anyway
+                    if action == "keys":
+                        done = desktop.input_action("keys", keys=text)
+                    else:
+                        done = desktop.input_action("type", text=text)
+                    result = {"done": action, "foreground": done.get("foreground")}
+                elif action == "wait":
+                    result = wait_control(
+                        hwnd,
+                        step.get("name"),
+                        step.get("automation_id"),
+                        step.get("control_type"),
+                        step.get("value") or "exists",
+                        min(float(step.get("timeout_s") or 10), 20),
+                    )
+                elif action in _UI_ACTIONS and action not in ("inspect", "wait"):
+                    result = _ui_act(
+                        w,
+                        action,
+                        name=step.get("name"),
+                        automation_id=step.get("automation_id"),
+                        control_type=step.get("control_type"),
+                        index=step.get("index"),
+                        value=step.get("value"),
+                        verify_wait_s=min(verify_wait_s, 2),
+                        ref=step.get("ref"),
+                    )
+                else:
+                    result = {
+                        "error": f"step action is one of {', '.join(a for a in _UI_ACTIONS if a != 'inspect')}, keys, type"
+                    }
+        except (desktop.DesktopError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            result = {"error": str(exc)}
+        results.append({"step": n, "action": action, **result})
+        if result.get("error"):
+            stopped = f"step {n} failed; the steps after it were not done"
+        elif result.get("matched") is False:
+            stopped = f"step {n}: the wait ran out; the steps after it were not done"
+        elif result.get("verified") is False:
+            stopped = f"step {n}: the control does not show the change; the steps after it were not done"
+        if result.get("new_windows"):
+            shot_of = result["new_windows"][0]["hwnd"]
+        if stopped:
+            break
+    out: dict = {
+        "window": w["title"],
+        "done": sum(1 for r in results if not r.get("error")),
+        "steps": results,
+    }
+    if stopped:
+        out["stopped"] = stopped
+    return {"out": out, "shot_of": shot_of}
+
+
 def register(mcp: FastMCP) -> None:
     # ------------------------------------------------------------ hand-over
 
@@ -742,16 +1177,21 @@ def register(mcp: FastMCP) -> None:
         stable_ms: Annotated[
             int, Field(ge=200, le=10_000, description="For wait='stable': how long unchanged")
         ] = 1000,
+        path: Annotated[
+            str | None,
+            Field(description="Also save the full-resolution picture to this file here (.png, or .jpg)"),
+        ] = None,
     ):
         """Look at the screen: the whole desktop (default), one monitor, a region or one window
-        (also when it is covered). Use it whenever you need to see what the person sees or check
-        a program's state, instead of asking them for a screenshot. After this, input()
-        coordinates are pixels of this image. wait='change'/'stable' waits (up to 40 s) for the
-        picture to change or settle (a click's effect, loading, an animation) before returning it."""
+        (also when it is covered or minimized). Use it whenever you need to see what the person
+        sees or check a program's state, instead of asking them for a screenshot. After this,
+        input() coordinates are pixels of this image. wait='change'/'stable' waits (up to 40 s) for
+        the picture to change or settle (a click's effect, loading, an animation) before returning
+        it; without a window, 'stable' looks at the window in front."""
 
         def work():
             data, fmt, facts = desktop.screenshot(
-                window, monitor, region, max_side, wait, timeout_s, stable_ms
+                window, monitor, region, max_side, wait, timeout_s, stable_ms, path
             )
             return media_result(facts, Image(data=data, format=fmt))
 
@@ -793,7 +1233,8 @@ def register(mcp: FastMCP) -> None:
         action: Annotated[
             str,
             Field(
-                description="click | double_click | right_click | move | drag | scroll | hscroll | type | keys"
+                description="click | double_click | triple_click | right_click | move | drag | scroll | hscroll "
+                "| mouse_down | mouse_up | type | keys | hold_key | cursor_position"
             ),
         ],
         x: float | None = None,
@@ -812,12 +1253,45 @@ def register(mcp: FastMCP) -> None:
         screenshot_after: Annotated[
             bool, Field(description="Return a fresh screenshot of the result")
         ] = False,
+        modifiers: Annotated[
+            list[str] | str | None,
+            Field(
+                description="Held during a mouse action: ['ctrl'], 'shift', 'ctrl+alt' (ctrl+click, shift+scroll)"
+            ),
+        ] = None,
+        window: Annotated[
+            str | int | None,
+            Field(
+                description="x, y are pixels of this window (as in a screenshot of it); it is brought to the "
+                "front first, and keys and text go to it"
+            ),
+        ] = None,
+        duration_s: Annotated[float, Field(ge=0.05, le=10, description="For hold_key: how long")] = 1.0,
+        repeat: Annotated[
+            int, Field(ge=1, le=50, description="For keys: press the sequence this many times")
+        ] = 1,
     ):
         """Mouse and keyboard on the real desktop, like a person. Take a screenshot first and use
-        its pixel coordinates. Input cannot reach UAC prompts, the lock screen or admin windows."""
+        its pixel coordinates (or window= and that window's pixels). cursor_position tells where the
+        pointer is. Input cannot reach UAC prompts, the lock screen or admin windows."""
 
         def work():
-            done = desktop.input_action(action, x, y, to_x, to_y, button, text, keys, amount, coordinates)
+            done = desktop.input_action(
+                action,
+                x,
+                y,
+                to_x,
+                to_y,
+                button,
+                text,
+                keys,
+                amount,
+                coordinates,
+                modifiers,
+                duration_s,
+                repeat,
+                window,
+            )
             if not screenshot_after:
                 return done
             data, fmt, facts = desktop.screenshot()
@@ -846,7 +1320,11 @@ def register(mcp: FastMCP) -> None:
         ] = None,
         value: Annotated[str | None, Field(description="For set_value")] = None,
         filter: Annotated[
-            str | None, Field(description="For inspect: only controls containing this text")
+            str | None,
+            Field(
+                description="For inspect: only controls with this text in name, automation id, type, value "
+                "or class; 'a|b' for either (name/automation_id/control_type narrow it too)"
+            ),
         ] = None,
         verify_wait_s: Annotated[
             float,
@@ -859,220 +1337,65 @@ def register(mcp: FastMCP) -> None:
             Field(description="For wait: exists | gone | enabled | value:<text> | toggle:On | toggle:Off"),
         ] = "exists",
         timeout_s: Annotated[float, Field(ge=0, le=40, description="For wait: how long at most")] = 20,
-    ) -> dict:
+        ref: Annotated[
+            str | None,
+            Field(
+                description="A control's ref from the latest inspect of this window (e12): exactly that control"
+            ),
+        ] = None,
+        steps: Annotated[
+            list[UiStep] | None,
+            Field(
+                description="Several actions on this window in order, each {action, name | ref | automation_id "
+                "| control_type, index, value}; also keys / type (value = the keys or text) and wait (value = "
+                "the state). Stops at the first that fails; ends with a picture"
+            ),
+        ] = None,
+    ):
         """Read and operate a window's controls (buttons, fields, checkboxes, lists, trees, menus,
         open menus too) by name instead of pixels, also in classic Win32/WinForms/Delphi programs
         and installers. A program that draws its own interface (no controls): use ocr.
-        inspect lists them; invoke/toggle/select/set_value/... find one by name/automation_id/
-        type and use it without moving the mouse; click is a real mouse click on it.
+        inspect lists them, each with a ref; invoke/toggle/select/set_value/... find one by ref or
+        name/automation_id/type and use it without moving the mouse; click is a real mouse click on it.
         Actions run once, then read back the control. verified=true means its observable state
-        matches; false means a mismatch; null means the outcome cannot be confirmed. For invoke/
-        click on a button, inspect the resulting window before deciding whether to repeat it.
+        matches; false means a mismatch; null means the outcome cannot be confirmed. A window the
+        action opened is listed in new_windows. For invoke/click on a button, inspect the resulting
+        window before deciding whether to repeat it. steps=[...] does several actions in one call.
         wait polls (up to 40 s) until the control exists, is gone, is enabled or shows a value,
         e.g. an installer's Next button becoming enabled."""
 
         def work():
-            if action not in _UI_ACTIONS:
+            if not steps and action not in _UI_ACTIONS:
                 raise desktop.DesktopError("action is one of " + ", ".join(_UI_ACTIONS))
-            if action == "wait":
+            if not steps and action == "wait":
                 return wait_control(window, name, automation_id, control_type, state, timeout_s)
             w = desktop.find_window(window)
             if w.get("admin"):
                 raise desktop.admin_error(w)
-            hwnd = w["hwnd"]
-            if action != "inspect":
-                desktop.refuse_own(hwnd)  # WinHand's own dialogs: no need to look for the control first
-            snapshot = _inspect_controls(hwnd)
-            elements = snapshot["elements"]
+            if steps:
+                done = _ui_steps(w, [step.model_dump() for step in steps], verify_wait_s)
+                out = done["out"]
+                try:
+                    data, fmt, facts = desktop.screenshot(done["shot_of"])
+                except desktop.DesktopError as exc:
+                    out["screenshot"] = f"no picture: {exc}"
+                    return out
+                return media_result({**out, "screenshot": facts}, Image(data=data, format=fmt))
             if action == "inspect":
-                shown = [
-                    _public(e)
-                    for e in elements
-                    if not filter
-                    or filter.lower()
-                    in f"{e.get('name')} {e.get('automation_id')} {e.get('type')} {e.get('value')}".lower()
-                ]
-                listed = {
-                    "window": w["title"],
-                    "count": len(elements),
-                    "shown": len(shown[:250]),
-                    "elements": shown[:250],
-                    "backend": snapshot.get("backend"),
-                }
-                if snapshot.get("backend_note"):
-                    listed["backend_note"] = snapshot["backend_note"]
-                return listed
-            found = match_controls(elements, name, automation_id, control_type)
-            if not found:
-                raise desktop.DesktopError(
-                    f"no control matches name={name!r} automation_id={automation_id!r} "
-                    f"type={control_type!r}; use action='inspect' to see the controls"
+                return _ui_inspect(w, filter, name, automation_id, control_type)
+            with presence.acting(f"ui {action}") as said:  # waits while the person uses the machine
+                out = _ui_act(
+                    w,
+                    action,
+                    name=name,
+                    automation_id=automation_id,
+                    control_type=control_type,
+                    index=index,
+                    value=value,
+                    verify_wait_s=verify_wait_s,
+                    ref=ref,
                 )
-            if index is None and len(found) > 1:
-                return {
-                    "error": f"{len(found)} controls match; nothing was done. Pass index (the place in "
-                    "this list, from 0), automation_id or control_type",
-                    "matches": [
-                        {"index": i, **{k: e.get(k) for k in _CANDIDATE if e.get(k) not in (None, "")}}
-                        for i, e in enumerate(found[:20])
-                    ],
-                }
-            chosen = index or 0
-            if chosen >= len(found):
-                raise desktop.DesktopError(
-                    f"only {len(found)} controls match; index {chosen} is out of range"
-                )
-            target = found[chosen]
-            if target.get("enabled") is False:
-                raise desktop.DesktopError(f"the control is disabled right now: {_public(target)}")
-            # operating the program: the person's approval first (approvals.py), once the control is known
-            which = target.get("name") or name or automation_id or control_type or ""
-            desktop.require_operable(
-                hwnd, f"控件操作：{action}「{which}」" if which else f"控件操作：{action}"
-            )
-            done = None
-            if action != "click":
-                patterns = set(target.get("patterns") or ())
-                can = action == "focus" or patterns & _VERB_PATTERNS.get(action, set())
-                if (
-                    target.get("native")
-                    and action in ("invoke", "toggle", "select")
-                    and target.get("type") in ("Button", "CheckBox", "RadioButton")
-                ):
-                    # a posted click: UI Automation's Invoke waits while the button's handler runs,
-                    # all the time a modal dialog it opens stays open
-                    done = desktop.native_act(target, action, value)
-                if not done and target.get("_element") is not None and can:
-                    handler = action in ("invoke", "toggle", "select", "expand")
-                    try:
-                        done = uia.act(
-                            target["_element"],
-                            action,
-                            value,
-                            timeout=INVOKE_WAIT_S if handler else uia.TIMEOUT_S,
-                        )
-                    except uia.NoAnswer:
-                        if not handler:
-                            raise
-                        # the program is still in the control's handler, typically a dialog it opened
-                        done = "sent; the program has not finished handling it (a dialog it opened may be waiting)"
-                elif not done and target.get("uia_index") is not None and can:
-                    done = _run_uia(
-                        hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
-                        ExpectId=",".join(map(str, target.get("_runtime_id", []))),
-                        Do=action, Value=value,
-                    )["done"]  # fmt: skip
-                if not done and target.get("native"):
-                    done = desktop.native_act(target, action, value)
-            rect = target.get("rect")
-            if (
-                not done
-                and action in ("click", "invoke", "toggle", "select")
-                and target.get("offscreen")
-                and target.get("_element") is not None
-                and "ScrollItem" in (target.get("patterns") or ())
-            ):
-                rect = uia.scroll_into_view(target["_element"]) or rect  # a list row out of sight
-            if not done and action in ("click", "invoke", "toggle", "select") and rect:
-                left, top, width, height = rect
-                cx, cy = left + width // 2, top + height // 2
-                try:
-                    desktop.window_action(hwnd, "focus")
-                except approvals.NotOperable:
-                    raise
-                except desktop.DesktopError:
-                    pass  # the control may be visible anyway (topmost, or already in front)
-                if w.get("pid") and desktop.pid_at(cx, cy) != w["pid"]:
-                    # a real click lands on whatever is there: another program, or what the
-                    # control scrolled away from
-                    hidden = " (UI Automation reports it out of sight)" if target.get("offscreen") else ""
-                    raise desktop.DesktopError(
-                        f"another window is at ({cx}, {cy}), where the control is{hidden}; nothing was "
-                        "clicked. Bring the window to the front or scroll to the control, then try again"
-                    )
-                desktop.input_action("click", cx, cy, coordinates="screen")
-                done = f"clicked at ({cx}, {cy})"
-            if not done:
-                raise desktop.DesktopError(f"the control does not support {action}: {_public(target)}")
-
-            expected = {}
-            if action == "set_value" and target.get("value") != "(hidden)":
-                expected = {"value": value or ""}
-            elif (action == "toggle" or done == "toggled") and target.get("toggle") in ("On", "Off"):
-                expected = {"toggle": "Off" if target["toggle"] == "On" else "On"}
-            elif action == "select" or done == "selected":
-                expected = {"selected": True} if "selected" in target else {"toggle": "On"}
-            elif action in ("expand", "collapse") or done == "expanded":
-                expected = {"expanded": "Collapsed" if action == "collapse" else "Expanded"}
-            elif action == "focus":
-                expected = {"focused": True}
-
-            deadline = time.monotonic() + verify_wait_s
-            after = None
-            verified = None
-            title = w["title"]
-            reason = "Action sent; inspect its outcome before repeating it."
-            while True:
-                try:
-                    if target.get("_element") is not None:
-                        after = _read_back(hwnd, target)
-                        try:
-                            title = desktop.find_window(hwnd)["title"]
-                        except desktop.DesktopError:
-                            pass  # the window closed: the element read-back says the rest
-                    else:
-                        snapshot = _inspect_controls(
-                            hwnd, timeout_s=max(1, min(3, deadline - time.monotonic()))
-                        )
-                        title = snapshot["window"]
-                        candidates = snapshot["elements"]
-                        if target.get("_runtime_id"):
-                            candidates = [
-                                e for e in candidates if e.get("_runtime_id") == target["_runtime_id"]
-                            ]
-                        elif target.get("hwnd"):
-                            candidates = [e for e in candidates if e.get("hwnd") == target["hwnd"]]
-                        elif target.get("automation_id"):
-                            candidates = [
-                                e
-                                for e in candidates
-                                if e.get("automation_id") == target["automation_id"]
-                                and e.get("type") == target.get("type")
-                            ]
-                        else:
-                            candidates = []  # an old list index cannot identify a control after redraw
-                        after = candidates[0] if len(candidates) == 1 else None
-                    if after is not None and expected and all(after.get(key) is not None for key in expected):
-                        verified = all(after[key] == val for key, val in expected.items())
-                        reason = (
-                            "Read-back matches the requested state."
-                            if verified
-                            else "Read-back does not match yet."
-                        )
-                    else:
-                        verified = None
-                        reason = (
-                            "Cannot confirm the control state; inspect the resulting window before repeating."
-                        )
-                except (desktop.DesktopError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-                    reason = f"Action sent, but read-back failed: {exc}. Inspect before repeating."
-                    after, verified = None, None
-                    break
-                if verified is True or not expected or time.monotonic() >= deadline:
-                    break
-                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
-            out = {
-                "done": done,
-                "matches": len(found),
-                "window": title,
-                "element": _public(after) if after is not None else None,
-                "verified": verified,
-                "verification": reason,
-                "backend": snapshot.get("backend"),
-            }
-            if snapshot.get("backend_note"):
-                out["backend_note"] = snapshot["backend_note"]
-            return out
+            return {**out, **said}
 
         return await asyncio.to_thread(_errors, work)
 

@@ -964,3 +964,104 @@ async def test_winhands_own_dialog_cannot_be_operated():
                 pass
         asking.join(15)
     assert approvals.status("notepad.exe") == "ask"
+
+
+# ---------------------------------------------------------------- 0.10.0 desktop
+
+
+async def test_steps_fill_toggle_and_press_in_one_call(test_form):
+    from fastmcp import Client
+
+    from winhand import desktop
+
+    steps = [
+        {"action": "set_value", "control_type": "Edit", "index": 0, "value": "一次做完"},
+        {"action": "toggle", "name": "Remember me"},
+        {"action": "invoke", "name": "Press me"},
+    ]
+    async with Client(build_server(Config())) as client:
+        result = await client.call_tool("ui", {"window": "winhand-ui-test", "steps": steps})
+    out = result.structured_content
+    assert out["done"] == 3 and "stopped" not in out, out
+    assert any(block.type == "image" for block in result.content)
+    time.sleep(0.5)
+    assert desktop.find_window(test_form["hwnd"])["title"] == "winhand-ui-test pressed: 一次做完 / True"
+
+
+async def test_a_ref_from_inspect_names_that_control(test_form):
+    from fastmcp import Client
+
+    async with Client(build_server(Config())) as client:
+        listed = (
+            await client.call_tool("ui", {"window": "winhand-ui-test", "control_type": "Edit"})
+        ).structured_content
+        box = next(e for e in listed["elements"] if e.get("value") != "(hidden)")
+        done = (
+            await client.call_tool(
+                "ui",
+                {"window": "winhand-ui-test", "action": "set_value", "ref": box["ref"], "value": "按编号"},
+            )
+        ).structured_content
+    assert done["verified"] is True and done["element"]["value"] == "按编号", done
+
+
+def test_a_minimized_window_is_shown_for_its_picture_and_put_back(test_form):
+    from winhand import desktop
+
+    hwnd = test_form["hwnd"]
+    desktop.user32.ShowWindow(desktop.wintypes.HWND(hwnd), 6)  # SW_MINIMIZE
+    time.sleep(0.5)
+    assert desktop.find_window(hwnd)["minimized"]
+    data, fmt, facts = desktop.screenshot(window=hwnd)
+    assert facts["width"] > 100 and "minimized" in facts.get("note", ""), facts
+    time.sleep(0.3)
+    assert desktop.find_window(hwnd)["minimized"]
+
+
+def test_input_takes_window_pixels_and_tells_the_cursor_position(test_form):
+    from winhand import desktop
+
+    hwnd = test_form["hwnd"]
+    _, _, facts = desktop.screenshot(window=hwnd)
+    desktop.screenshot()  # a picture of something else since: the window's own scale is kept
+    button = next(e for e in _uia_elements(test_form) if e["name"] == "Press me")
+    left, top, width, height = button["rect"]
+    x = (left + width / 2 - facts["screen_left"]) * facts["scale"]
+    y = (top + height / 2 - facts["screen_top"]) * facts["scale"]
+    desktop.input_action("move", x, y, window=hwnd)
+    where = desktop.input_action("cursor_position")
+    assert (
+        abs(where["screen"][0] - (left + width / 2)) <= 3
+        and abs(where["screen"][1] - (top + height / 2)) <= 3
+    )
+    desktop.input_action("click", x, y, window=hwnd)
+    time.sleep(0.5)
+    assert desktop.find_window(hwnd)["title"].startswith("winhand-ui-test pressed")
+
+
+def test_the_frame_shows_while_acting_and_stays_out_of_screenshots():
+    from winhand import desktop, presence
+
+    desk = presence.start()
+    assert desk is not None and desk.ready.is_set()
+    from PIL import Image
+
+    presence._show_border()
+    for _ in range(60):  # shown by the frame's own thread
+        strips = presence.border_windows()
+        if strips and all(desktop.user32.IsWindowVisible(desktop.wintypes.HWND(h)) for h in strips):
+            break
+        time.sleep(0.05)
+    if not desk.border_ok:
+        pytest.skip(f"this Windows cannot keep windows out of screenshots: {desk.problem}")
+    assert strips, presence.status()
+    try:
+        assert not set(strips) & {w["hwnd"] for w in desktop.windows()}  # never listed as a window
+        m = desktop.monitors()[0]
+        _, _, facts = desktop.screenshot(region=[m["left"], m["top"], 400, presence.BORDER_PX])
+        pixels = Image.open(facts["original_file"]).convert("RGB").getdata()
+        # 90 % opaque orange over anything: red high, green middling, blue low
+        orange = [p for p in pixels if p[0] >= 220 and 95 <= p[1] <= 145 and p[2] <= 35]
+        assert not orange, f"the frame shows in a screenshot ({len(orange)} orange pixels)"
+    finally:
+        presence._post(presence._WM_HIDE)

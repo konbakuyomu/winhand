@@ -152,7 +152,7 @@ def _local(url: str) -> str:
 def _tree(root):
     (root / "src" / "deep").mkdir(parents=True)
     (root / "src" / "app.py").write_text("print('app')\n", encoding="utf-8")
-    (root / "src" / "deep" / "日志.log").write_text("中文日志\n", encoding="utf-8")
+    (root / "src" / "deep" / "日志.log").write_bytes("中文日志\n".encode())  # bytes: no CRLF on Windows
     (root / "node_modules" / "pkg").mkdir(parents=True)
     (root / "node_modules" / "pkg" / "index.js").write_text("x", encoding="utf-8")
     (root / "photo.png").write_bytes(b"\x89PNG" + bytes(200))
@@ -427,8 +427,8 @@ async def test_edits_in_several_files_are_all_or_nothing(tmp_path):
 
 def test_a_failed_write_puts_back_the_files_already_written(tmp_path, monkeypatch):
     a, b = tmp_path / "a.txt", tmp_path / "b.txt"
-    a.write_text("one\r\n", encoding="utf-8")
-    b.write_text("two\n", encoding="utf-8")
+    a.write_bytes(b"one\r\n")  # bytes: write_text would make it one\r\r\n on Windows
+    b.write_bytes(b"two\n")
     real = fs.write_text_like
 
     def flaky(path, text, encoding):

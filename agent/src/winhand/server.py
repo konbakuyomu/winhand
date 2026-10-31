@@ -155,6 +155,19 @@ Quick rules
   control, a window, a text or the picture instead of sleeping.
   ui reads back after an action: verified=true confirms the observed state; false/null requires
   inspecting the result. A button being invoked does not prove its task finished; do not blindly retry.
+  A window the action opened comes back in new_windows. inspect gives each control a ref (e12):
+  ui(window, action, ref='e12') acts on exactly that one; filter='a|b' takes either text.
+  ui(window, steps=[{action, name | ref, value}, ...]) does several actions (also keys, type, wait)
+  in order, stops at the first that fails and ends with a picture.
+  input: modifiers=['ctrl'] with a click or scroll, triple_click, hold_key (keys, duration_s),
+  keys with repeat=N, cursor_position; window=<title> takes that window's pixels and brings it to
+  the front. screenshot(path=...) also saves the picture; a minimized window is shown for it and
+  put back. Without a window, screenshot(wait='stable') looks at the window in front.
+  The person comes first: while they use the mouse or keyboard, desktop actions wait (up to 10 s)
+  and then say so; after they press Ctrl+Alt+Shift+Backspace they are refused for a minute: ask
+  them before going on. A thin frame lines the screen while you operate it (not in screenshots).
+  run and job_status name a sign-in or signing window that appeared while a command went quiet
+  (`prompts`): it is probably what the command waits for; tell the person.
   A locked screen, a UAC prompt or a disconnected session cannot be seen or operated, and Windows
   drops clicks and keys to programs running as administrator (window list: admin=true): the
   error says which; screenshots and ocr can still read admin windows. Tell the person what to do.
@@ -470,6 +483,9 @@ def build_server(
             "names": local_servers,
             "note": "mcp_tools() lists their tools, mcp_call(server, tool, arguments) calls one",
         }
+        from . import presence
+
+        info["desktop_owner"] = presence.status()  # waiting for the person, the stop keys, the frame
         return info
 
     @mcp.tool

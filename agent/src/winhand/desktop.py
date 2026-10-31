@@ -8,6 +8,7 @@ vision model: the conversion back to the screen happens here, not in the model's
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import sys
@@ -35,6 +36,14 @@ DESKTOP_MESSAGES = {
     "out): it has no screen until someone reconnects or signs in at the machine. Commands, files and "
     "sessions keep working.",
 }
+
+
+class OwnerBusy(DesktopError):
+    """The person at the machine is using the mouse or keyboard (presence.py)."""
+
+
+class OwnerStopped(DesktopError):
+    """The person pressed the stop keys (presence.py)."""
 
 
 class DesktopUnavailable(DesktopError):
@@ -79,6 +88,16 @@ if IS_WINDOWS:
             ("top", wintypes.LONG),
             ("right", wintypes.LONG),
             ("bottom", wintypes.LONG),
+        ]
+
+    class WINDOWPLACEMENT(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.UINT),
+            ("flags", wintypes.UINT),
+            ("showCmd", wintypes.UINT),
+            ("ptMinPosition", wintypes.POINT),
+            ("ptMaxPosition", wintypes.POINT),
+            ("rcNormalPosition", RECT),
         ]
 
     class MONITORINFOEXW(ctypes.Structure):
@@ -686,6 +705,37 @@ def shows_window(pids: set[int]) -> bool:
     return found
 
 
+def top_level_handles() -> set[int]:
+    """Handles of the visible top-level windows, without their details (fast enough for every run)."""
+    _require_windows()
+    found: set[int] = set()
+
+    def callback(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            found.add(int(hwnd))
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    return found
+
+
+def flash(hwnd: int) -> None:
+    """Flash a window's taskbar button until it comes to the front, to draw the person's eye."""
+    _require_windows()
+
+    class FLASHWINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.UINT),
+            ("hwnd", wintypes.HWND),
+            ("dwFlags", wintypes.DWORD),
+            ("uCount", wintypes.UINT),
+            ("dwTimeout", wintypes.DWORD),
+        ]
+
+    info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), wintypes.HWND(hwnd), 0x3 | 0xC, 0, 0)  # ALL | TIMERNOFG
+    user32.FlashWindowEx(ctypes.byref(info))
+
+
 def _approval_of(hwnd, pid: int, process: str, kind: str) -> str | None:
     """What operating this window needs: winhand (never), or with approval on always | session |
     denied | terminal | ask."""
@@ -804,6 +854,9 @@ def _force_foreground(hwnd) -> bool:
     try:
         user32.keybd_event(0x12, 0, 0, 0)  # a tapped Alt also counts as recent input
         user32.keybd_event(0x12, 0, 2, 0)
+        from . import presence
+
+        presence.note_sent()
         user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
     finally:
@@ -841,6 +894,13 @@ def window_action(
         if action == "focus":
             require_desktop()
         require_operable(hwnd, _WINDOW_ACTIONS[action])
+    from . import presence
+
+    with presence.acting(f"window {action}"):
+        return _window_act(w, hwnd, action, left, top, width, height)
+
+
+def _window_act(w: dict, hwnd, action: str, left, top, width, height) -> dict:
     if action == "focus":
         ok = _force_foreground(hwnd)
         if not ok:
@@ -1042,7 +1102,38 @@ def native_act(control: dict, verb: str, value: str | None = None) -> str | None
 # ------------------------------------------------------------- screenshots
 
 _last_shot: dict | None = None  # origin + scale of the latest screenshot, for input coordinates
+_window_scale: dict[int, float] = {}  # scale of the latest screenshot of each window, for input(window=)
 _lock = threading.Lock()
+PEEK_S = 0.4  # a minimized window shown again needs a moment to draw itself
+PEEK_NOTE = "the window was minimized: it was shown without taking the focus for this picture, then put back"
+
+
+@contextlib.contextmanager
+def peek(window):
+    """While capturing a minimized window: show it without activating it, then put it back exactly
+    as it was (minimized, and maximized again when it is restored). Screenshots of minimized
+    windows failed 11 times in the 2026-11-01 review, and restoring them first needed an approval."""
+    if window is None or not IS_WINDOWS:
+        yield None
+        return
+    w = find_window(window)
+    if not w.get("minimized"):
+        yield None
+        return
+    hwnd = wintypes.HWND(w["hwnd"])
+    placement = WINDOWPLACEMENT()
+    placement.length = ctypes.sizeof(WINDOWPLACEMENT)
+    saved = bool(user32.GetWindowPlacement(hwnd, ctypes.byref(placement)))
+    user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE: its normal size, the focus stays where it is
+    time.sleep(PEEK_S)
+    try:
+        yield PEEK_NOTE
+    finally:
+        if saved:
+            placement.showCmd = 7  # SW_SHOWMINNOACTIVE, with the flags it had (restore to maximized)
+            user32.SetWindowPlacement(hwnd, ctypes.byref(placement))
+        else:
+            user32.ShowWindow(hwnd, 7)
 
 
 def _print_window(hwnd, width: int, height: int):
@@ -1250,6 +1341,34 @@ LASTING_S = 2.0  # a small change counts once it lasted this long: longer than t
 FORGIVE_S = 2.0  # at most one one-off large picture is overlooked in this time ('stable')
 
 
+def _foreground_box(place: dict, size: tuple[int, int]):
+    """(crop box in the picture, title) of the window in front, or None."""
+    if not IS_WINDOWS:
+        return None
+    hwnd = user32.GetForegroundWindow()
+    rect = RECT()
+    if not hwnd or not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    left, top = max(0, rect.left - place["left"]), max(0, rect.top - place["top"])
+    right, bottom = min(size[0], rect.right - place["left"]), min(size[1], rect.bottom - place["top"])
+    if right - left < 16 or bottom - top < 16:
+        return None
+    return (left, top, right, bottom), _title(hwnd)
+
+
+def _on_screen(box, place: dict, judge) -> dict:
+    """A changed area of a wait's picture in screen pixels, and the window that shows it."""
+    dx, dy = (judge[0][0], judge[0][1]) if judge else (0, 0)
+    left, top = place["left"] + dx + box[0], place["top"] + dy + box[1]
+    out = {"rect": [left, top, box[2] - box[0], box[3] - box[1]]}
+    if IS_WINDOWS:
+        with contextlib.suppress(Exception):
+            out["window"] = _title(
+                root_window_at(left + (box[2] - box[0]) // 2, top + (box[3] - box[1]) // 2)
+            )
+    return out
+
+
 def wait_picture(window, monitor, region, condition: str, timeout_s: float, stable_ms: float):
     """Capture until the picture differs from this target's previous screenshot ('change') or has
     not changed for stable_ms ('stable'). Returns (image, place, facts).
@@ -1265,7 +1384,19 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
     deadline = began + max(0.0, min(timeout_s, 40))
     still_for = max(200, min(stable_ms, 10_000)) / 1000
     image, place = capture(window, monitor, region)
-    grey = _grey(image)
+    # the whole desktop never settles while a video plays somewhere (four waits of 20-30 s in the
+    # 2026-11-01 review): without a target, 'stable' looks at the window in front only
+    judge = (
+        _foreground_box(place, image.size)
+        if condition == "stable" and window is None and monitor is None and region is None
+        else None
+    )
+
+    def view(picture):
+        return _grey(picture.crop(judge[0]) if judge else picture)
+
+    grey = view(image)
+    moving = None  # 'stable': where the latest change was seen, in screen pixels
     reference = _previous(place["key"]) if condition == "change" else None
     if reference is None:
         reference = grey
@@ -1281,10 +1412,14 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
 
     def facts(matched: bool) -> dict:
         out = {"condition": condition, "matched": matched, "waited_s": round(time.monotonic() - began, 1)}
+        if judge:
+            out["judged_on"] = f"the window in front, {judge[1]!r} (pass window= to wait on another one)"
         if not matched:
             out["note"] = (
                 "the picture did not change in time" if condition == "change" else "the picture kept changing"
             ) + "; this is how it looks now (call again to keep waiting)"
+            if moving:
+                out["kept_changing"] = moving
         return out
 
     while True:
@@ -1310,6 +1445,7 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
                 reference, last_change, states, forgiven = grey, earlier, kept, now
                 box = None
         if condition == "stable" and box is not None:
+            moving = _on_screen(box, place, judge)
             if small_change(box, zoom):
                 if not any(changed_box(state, grey) is None for state in states):
                     states = [*states[-3:], grey]  # a new small picture, not a cursor blinking back
@@ -1325,7 +1461,7 @@ def wait_picture(window, monitor, region, condition: str, timeout_s: float, stab
             return image, place, facts(False)
         time.sleep(WAIT_PICTURE_S)
         image, place = capture(window, monitor, region)
-        grey = _grey(image)
+        grey = view(image)
 
 
 def screenshot(
@@ -1336,16 +1472,21 @@ def screenshot(
     wait: str | None = None,
     timeout_s: float = 20,
     stable_ms: float = 1000,
+    save_to: str | None = None,
 ) -> tuple[bytes, str, dict]:
     """Capture the whole desktop, one monitor, a region [left, top, width, height] or a window
-    (even when covered by others), optionally once it changed or settled (wait). Returns the encoded
-    image and how its pixels map to the screen."""
+    (even when covered by others, or minimized), optionally once it changed or settled (wait).
+    Returns the encoded image and how its pixels map to the screen. save_to: the full-resolution
+    picture also goes to that file (PNG, or JPEG for .jpg/.jpeg)."""
     global _last_shot
     waited = None
-    if wait:
-        image, place, waited = wait_picture(window, monitor, region, wait, timeout_s, stable_ms)
-    else:
-        image, place = capture(window, monitor, region)
+    with peek(window) as peeked:
+        if wait:
+            image, place, waited = wait_picture(window, monitor, region, wait, timeout_s, stable_ms)
+        else:
+            image, place = capture(window, monitor, region)
+    if peeked:
+        place["note"] = " ".join(p for p in (place.get("note"), peeked) if p)
     _remember(place["key"], _grey(image))
     left, top = place["left"], place["top"]
     data, fmt, facts = media.encode_image(image, max_side)
@@ -1360,6 +1501,13 @@ def screenshot(
         facts["wait"] = waited
     with _lock:
         _last_shot = {"left": left, "top": top, "scale": facts["scale"]}
+        if place["key"][0] == "window":
+            _window_scale.pop(place["key"][1], None)
+            _window_scale[place["key"][1]] = facts["scale"]
+            while len(_window_scale) > 32:
+                del _window_scale[next(iter(_window_scale))]
+    if save_to:
+        facts["saved"] = _save_picture(image, save_to)
     facts["coordinates"] = (
         "input(x, y) uses this image's pixels; they map to the screen as "
         f"screen = ({left}, {top}) + pixel / {facts['scale']}"
@@ -1368,6 +1516,22 @@ def screenshot(
 
 
 SHOTS_KEPT = 30
+
+
+def _save_picture(image, path: str) -> str:
+    """The full-resolution capture written to `path` (absolute): JPEG for .jpg/.jpeg, else PNG."""
+    from . import winenv
+
+    target = os.path.expandvars(os.path.expanduser(path))
+    if not os.path.isabs(target):
+        raise DesktopError(f"give an absolute path to save the screenshot to, not {path!r}")
+    full = winenv.long_path(target)
+    os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
+    if target.lower().endswith((".jpg", ".jpeg")):
+        image.convert("RGB").save(full, "JPEG", quality=90)
+    else:
+        image.save(full, "PNG", compress_level=1)
+    return target
 
 
 def _keep_original(image) -> str | None:
@@ -1433,8 +1597,11 @@ if IS_WINDOWS:
 
 
 def _send(*events) -> None:
+    from . import presence
+
     array = (INPUT * len(events))(*events)
     sent = user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
+    presence.note_sent()  # the input seen next is winhand's own, not the person's
     if sent != len(events):
         raise DesktopError(
             "Windows blocked the input: the screen may be locked, a UAC prompt may be showing, "
@@ -1524,9 +1691,54 @@ def _uses_windows_key(keys: str) -> bool:
 
 
 _MOUSE_WORDS = {
-    "click": "点击", "double_click": "双击", "right_click": "右键点击", "mouse_down": "按下鼠标",
-    "mouse_up": "松开鼠标", "drag": "拖动", "scroll": "滚动", "hscroll": "横向滚动",
+    "click": "点击", "double_click": "双击", "triple_click": "三击", "right_click": "右键点击",
+    "mouse_down": "按下鼠标", "mouse_up": "松开鼠标", "drag": "拖动", "scroll": "滚动", "hscroll": "横向滚动",
 }  # fmt: skip
+_MODIFIERS = {"ctrl": 0x11, "control": 0x11, "shift": 0x10, "alt": 0x12, "win": 0x5B, "cmd": 0x5B}
+HOLD_MAX_S = 10.0
+REPEAT_MAX = 50
+
+
+def modifier_codes(modifiers) -> list[int]:
+    """'ctrl+shift' or ['ctrl', 'shift'] as virtual-key codes, each once."""
+    if not modifiers:
+        return []
+    items = [modifiers] if isinstance(modifiers, str) else list(modifiers)
+    codes = []
+    for part in (p.strip().lower() for item in items for p in str(item).split("+")):
+        if not part:
+            continue
+        if part not in _MODIFIERS:
+            raise DesktopError(f"modifiers are ctrl, shift, alt and win, not {part!r}")
+        codes.append(_MODIFIERS[part])
+    return list(dict.fromkeys(codes))
+
+
+def cursor_position() -> dict:
+    """Where the mouse pointer is: on the screen, and in the latest screenshot's pixels."""
+    _require_windows()
+    _dpi_aware()
+    here = wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(here)):
+        raise DesktopError("cannot tell where the mouse pointer is right now")
+    out: dict = {"action": "cursor_position", "screen": [here.x, here.y]}
+    with _lock:
+        shot = _last_shot
+    if shot is not None:
+        out["screenshot"] = [
+            round((here.x - shot["left"]) * shot["scale"]),
+            round((here.y - shot["top"]) * shot["scale"]),
+        ]
+    return out
+
+
+def in_window(window, x: float, y: float) -> tuple[int, int]:
+    """Pixels of a window (0, 0 = its top-left corner, as in a screenshot of it) on the screen: with
+    the scale of the latest screenshot of that window, else 1:1."""
+    w = find_window(window)
+    with _lock:
+        scale = _window_scale.get(w["hwnd"], 1.0)
+    return round(w["left"] + x / scale), round(w["top"] + y / scale)
 
 
 def _check_target(
@@ -1548,16 +1760,10 @@ def _check_target(
     if action in ("type", "keys"):  # keys go to the foreground window, wherever x, y point
         check_foreground(f"按键 {keys}" if action == "keys" else typed)
         return
-    if action not in (
-        "click",
-        "double_click",
-        "right_click",
-        "mouse_down",
-        "mouse_up",
-        "drag",
-        "scroll",
-        "hscroll",
-    ):
+    if action == "hold_key":
+        check_foreground(f"按住 {keys}")
+        return
+    if action not in _MOUSE_WORDS:
         return
     if point is None:
         here = wintypes.POINT()
@@ -1571,8 +1777,8 @@ def _check_target(
 
 
 _INPUT_ACTIONS = (
-    "click", "double_click", "right_click", "move", "drag", "scroll", "hscroll", "mouse_down", "mouse_up",
-    "type", "keys",
+    "click", "double_click", "triple_click", "right_click", "move", "drag", "scroll", "hscroll", "mouse_down",
+    "mouse_up", "type", "keys", "hold_key", "cursor_position",
 )  # fmt: skip
 
 
@@ -1580,7 +1786,10 @@ def _check_arguments(action, point, drag_end, button, text, keys) -> None:
     """Wrong arguments fail before anyone is asked to approve the action."""
     if action not in _INPUT_ACTIONS:
         raise DesktopError("action is one of " + ", ".join(_INPUT_ACTIONS))
-    if action in ("click", "double_click", "move", "mouse_down", "mouse_up") and button not in _BUTTONS:
+    if (
+        action in ("click", "double_click", "triple_click", "move", "mouse_down", "mouse_up")
+        and button not in _BUTTONS
+    ):
         raise DesktopError("button is left, right or middle")
     if action == "move" and point is None:
         raise DesktopError("give x and y")
@@ -1588,7 +1797,10 @@ def _check_arguments(action, point, drag_end, button, text, keys) -> None:
         raise DesktopError("drag needs x, y, to_x, to_y")
     if action == "type" and not text:
         raise DesktopError("type needs text")
-    if action == "keys":
+    if action == "hold_key":
+        if not keys or len(keys.split()) != 1:
+            raise DesktopError("hold_key needs one key or combination, e.g. keys='shift' or keys='w'")
+    if action in ("keys", "hold_key"):
         if not keys or not keys.split():
             raise DesktopError("keys needs a combination such as ctrl+s or a sequence like 'tab tab enter'")
         for combo in keys.split():
@@ -1607,32 +1819,87 @@ def input_action(
     keys: str | None = None,
     amount: int = 3,
     coordinates: str = "screenshot",
+    modifiers=None,
+    duration_s: float = 1.0,
+    repeat: int = 1,
+    window=None,
 ) -> dict:
+    """modifiers are held during a mouse action (ctrl+click, shift+scroll); hold_key holds `keys`
+    for duration_s; repeat presses a keys sequence again; window: x/y are pixels of that window
+    (as in a screenshot of it), and it is brought to the front first."""
     _require_windows()
     _dpi_aware()
+    if action == "cursor_position":
+        return cursor_position()
     require_desktop()  # locked, a UAC prompt, disconnected: Windows would drop the input
+    held = modifier_codes(modifiers)
+    if held and action in ("type", "keys", "hold_key", "move"):
+        raise DesktopError("modifiers go with mouse actions; for keys write them in: keys='ctrl+shift+t'")
+    if not 1 <= int(repeat) <= REPEAT_MAX:
+        raise DesktopError(f"repeat is 1 to {REPEAT_MAX}")
     done: dict = {"action": action}
+    target = None
+    if window is not None:
+        target = find_window(window)
+        done["window"] = target["title"]
+
+    def place(px, py):
+        return in_window(target["hwnd"], px, py) if target is not None else to_screen(px, py, coordinates)
+
     point = None
     if x is not None and y is not None:
-        point = to_screen(x, y, coordinates)
+        point = place(x, y)
         done["screen"] = list(point)
     drag_end = None
     if action == "drag" and point and to_x is not None and to_y is not None:
-        drag_end = to_screen(to_x, to_y, coordinates)
+        drag_end = place(to_x, to_y)
     _check_arguments(action, point, drag_end, button, text, keys)
-    _check_target(action, point, drag_end, keys, text)
-    if action in ("click", "double_click", "right_click", "move", "mouse_down", "mouse_up"):
+    from . import presence
+
+    with presence.acting(f"input {action}") as said:  # waits while the person uses the machine
+        done.update(said)
+        if target is not None and action != "move":
+            require_operable(target["hwnd"], f"{_MOUSE_WORDS.get(action, '键盘输入')}（窗口内）")
+            if user32.GetForegroundWindow() != target["hwnd"]:
+                focused = _force_foreground(wintypes.HWND(target["hwnd"]))
+                if point is not None:  # it moved or was restored on the way to the front
+                    point = place(x, y)
+                    done["screen"] = list(point)
+                    if drag_end is not None:
+                        drag_end = place(to_x, to_y)
+                # a click lands where the window shows (topmost, or simply uncovered) even when Windows
+                # keeps another one in front; keys and text need it in front
+                if not focused and (point is None or root_window_at(*point) != target["hwnd"]):
+                    raise DesktopError("Windows refused to bring the window forward; nothing was sent")
+        _check_target(action, point, drag_end, keys, text)
+        if held:
+            _send(*[_key(c) for c in held])
+            done["modifiers"] = "+".join(
+                k for k, v in _MODIFIERS.items() if v in held and k not in ("control", "cmd")
+            )
+        try:
+            _act(action, point, drag_end, button, text, keys, amount, duration_s, repeat, done)
+        finally:
+            if held:
+                _send(*[_key(c, up=True) for c in reversed(held)])
+        time.sleep(0.15)
+        foreground = user32.GetForegroundWindow()
+        done["foreground"] = _title(foreground) if foreground else ""
+        return done
+
+
+def _act(action, point, end, button, text, keys, amount, duration_s, repeat, done) -> None:
+    if action in ("click", "double_click", "triple_click", "right_click", "move", "mouse_down", "mouse_up"):
         if action == "right_click":
             button = "right"
         if button not in _BUTTONS:
             raise DesktopError("button is left, right or middle")
         down, up = _BUTTONS[button]
         events = [_move_event(*point)] if point else []
-        if action == "click" or action == "right_click":
+        presses = {"click": 1, "right_click": 1, "double_click": 2, "triple_click": 3}.get(action, 0)
+        for _ in range(presses):
             events += [_mouse(down), _mouse(up)]
-        elif action == "double_click":
-            events += [_mouse(down), _mouse(up), _mouse(down), _mouse(up)]
-        elif action == "mouse_down":
+        if action == "mouse_down":
             events += [_mouse(down)]
         elif action == "mouse_up":
             events += [_mouse(up)]
@@ -1640,19 +1907,21 @@ def input_action(
             raise DesktopError("give x and y")
         _send(*events)
     elif action == "drag":
-        if point is None or to_x is None or to_y is None:
+        if point is None or end is None:
             raise DesktopError("drag needs x, y, to_x, to_y")
-        end = to_screen(to_x, to_y, coordinates)
         down, up = _BUTTONS.get(button, _BUTTONS["left"])
         _send(_move_event(*point), _mouse(down))
-        for step in range(1, 11):  # a few intermediate points so apps see a real drag
-            time.sleep(0.02)
-            _send(
-                _move_event(
-                    point[0] + (end[0] - point[0]) * step // 10, point[1] + (end[1] - point[1]) * step // 10
+        try:
+            for step in range(1, 11):  # a few intermediate points so apps see a real drag
+                time.sleep(0.02)
+                _send(
+                    _move_event(
+                        point[0] + (end[0] - point[0]) * step // 10,
+                        point[1] + (end[1] - point[1]) * step // 10,
+                    )
                 )
-            )
-        _send(_mouse(up))
+        finally:
+            _send(_mouse(up))
         done["to_screen"] = list(end)
     elif action in ("scroll", "hscroll"):
         events = [_move_event(*point)] if point else []
@@ -1669,18 +1938,23 @@ def input_action(
     elif action == "keys":
         if not keys:
             raise DesktopError("keys needs a combination such as ctrl+s or a sequence like 'tab tab enter'")
-        for combo in keys.split():
-            press(combo)
-            time.sleep(0.05)
+        for _ in range(int(repeat)):
+            for combo in keys.split():
+                press(combo)
+                time.sleep(0.05)
+        if repeat > 1:
+            done["repeat"] = int(repeat)
+    elif action == "hold_key":
+        codes = [_vk(part) for part in keys.split("+") if part.strip()]
+        held_for = max(0.05, min(float(duration_s), HOLD_MAX_S))
+        _send(*[_key(c) for c in codes])
+        try:
+            time.sleep(held_for)
+        finally:
+            _send(*[_key(c, up=True) for c in reversed(codes)])
+        done["held_s"] = round(held_for, 2)
     else:
-        raise DesktopError(
-            "action is one of click, double_click, right_click, move, drag, scroll, hscroll, "
-            "mouse_down, mouse_up, type, keys"
-        )
-    time.sleep(0.15)
-    foreground = user32.GetForegroundWindow()
-    done["foreground"] = _title(foreground) if foreground else ""
-    return done
+        raise DesktopError("action is one of " + ", ".join(_INPUT_ACTIONS))
 
 
 # --------------------------------------------------------------- clipboard

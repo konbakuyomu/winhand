@@ -37,6 +37,10 @@ class NoAnswer(desktop.DesktopError):
     """The program behind the window did not answer in time."""
 
 
+class Gone(desktop.DesktopError):
+    """The control (or part of the tree being read) went away: the window changed meanwhile."""
+
+
 # ------------------------------------------------------------------ worker
 
 
@@ -138,6 +142,8 @@ def explain(exc: Exception) -> desktop.DesktopError:
     code = code & 0xFFFFFFFF if isinstance(code, int) else None
     if code == 0x80131505:  # UIA_E_TIMEOUT: UI Automation's own time limit
         return NoAnswer(NO_ANSWER)
+    if code == 0x80040201:  # UIA_E_ELEMENTNOTAVAILABLE
+        return Gone(f"UI Automation: {_HRESULTS[code]}")
     if code in _HRESULTS:
         return desktop.DesktopError(f"UI Automation: {_HRESULTS[code]}")
     return desktop.DesktopError(f"UI Automation failed: {type(exc).__name__}: {exc}")

@@ -222,6 +222,8 @@ def describe(
         return session_input(a, sessions, typed, tool)[0]
     if tool in ("fs_write", "fs_write_bytes"):
         return one("write", a.get("path"))
+    if tool == "screenshot" and a.get("path"):  # the picture also goes to a file
+        return one("write", a.get("path"), expand_vars=True)
     if tool == "fs_upload_url":
         return one("write", a.get("path"), expand_vars=True)
     if tool == "secret_prompt" and a.get("save_to"):

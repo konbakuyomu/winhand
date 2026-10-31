@@ -242,6 +242,9 @@ def start(
     job_id = f"{slug[:24] or 'job'}-{time.strftime('%m%d%H%M%S')}"
     directory = _root() / job_id
     directory.mkdir()
+    from . import jobwatch
+
+    jobwatch.remember_windows(job_id)  # a sign-in or signing prompt that shows up later stands out
     from . import power
 
     prologue = _prologue(directory, keep_awake and power.enabled(), timeout_s, follows)

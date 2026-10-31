@@ -144,7 +144,7 @@ AI 要跨调用留着的文件，放 winhand 自己的暂存目录：默认 `~/.
 | 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值。只给 `key`（例如 `CLOUDFLARE_API_TOKEN`）时存进本机密钥库 `~/.winhand/secrets.env`，之后 `run`、`job_start` 用 `secrets=['CLOUDFLARE_API_TOKEN']` 把它作为环境变量交给程序，以后的会话也能用，不用再建新密钥。密钥库在结果里一律遮挡（重启后也是），AI 读不到也改不了。AI 一连上就从 winhand 的说明里看到已存的名字（“Stored here: …”，密钥库一变就更新），不用先调 `context()`；对已存的名字再调 `secret_prompt` 时，输入框会提示“已经存在”，点取消即可。电脑前的人在桌面 App 的“设置 → 密钥”里查看名字、添加、修改、改名、删除、显示或复制值（显示期间截图拍不到 App 窗口） |
 | 一次性命令和进程 | `run`（约 40 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`remote_run`（经本机的 ssh 配置在另一台机器上跑脚本）`proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
-| 桌面 | `screenshot`（`wait` 等画面变化或停止变化）`window` `input` `ui` `ocr`（认屏幕上的字）`clipboard` |
+| 桌面 | `screenshot`（`wait` 等画面变化或停止变化，`path` 存文件）`window` `input` `ui`（`ref`、`steps` 一次做几步）`ocr`（认屏幕上的字）`clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
 | 本机规则 | `context`：这台电脑写给 AI 的规矩（按 Codex、Claude Code 的读法：AGENTS.md、CLAUDE.md、`.claude/rules`、`@` 引用）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务；`repo=owner/name` 可按仓库名找到本机目录。见[本机规则与守卫](#本机规则与守卫) |
@@ -184,7 +184,49 @@ AI 要跨调用留着的文件，放 winhand 自己的暂存目录：默认 `~/.
    - 同一段文字出现在好几处、又没给 `index` 时，列出各处位置，不点击；只有一处独占一行（像按钮）时点那一处。`ui` 遇到多个同名控件也一样，列出候选让模型指定 `index` 或 `automation_id`；
 5. **坐标点击**：最后才用，每次点击后截图核对。
 
-`screenshot(wait="change")` 等画面和上一次截图相比有变化再返回；`wait="stable"` 等画面停止变化 `stable_ms` 后再返回。这两种等待都可以代替固定的睡眠，文字光标闪烁不算变化。
+`screenshot(wait="change")` 等画面和上一次截图相比有变化再返回；`wait="stable"` 等画面停止变化 `stable_ms` 后再返回。这两种等待都可以代替固定的睡眠，文字光标闪烁不算变化。没给窗口时，`wait="stable"` 只看最前面的窗口：别处在放视频也不影响。仍然等不到时，回复里的 `kept_changing` 写明一直在变的区域和窗口。
+
+截图和输入的几个补充：
+
+- `screenshot(path=...)` 同时把原尺寸的图存进这个文件（`.png`，或 `.jpg`）。这算一次写文件，守卫按写规则判断。
+- 截最小化的窗口：先不抢焦点地把它显示出来，截完再放回去；原来是最大化的，还原时仍是最大化。截图的说明里会写上这一点。
+- `input` 新增：
+  - `modifiers=['ctrl']`：点击、滚动、拖动时按住修饰键；
+  - `triple_click`；
+  - `hold_key`：按住 `keys` 指定的键 `duration_s` 秒，最多 10 秒；
+  - `keys` 加 `repeat=N`：把整串按键按 N 遍；
+  - `cursor_position`：鼠标现在在哪，同时给出屏幕坐标和最近一次截图里的坐标；
+  - `window=<标题>`：`x`、`y` 是这个窗口里的像素，和给它单独截的图一致；先把它切到前台，按键和文字也发给它。
+- `ui` 新增：
+  - inspect 给每个控件一个编号 `ref`（如 `e12`），之后用 `ref='e12'` 就能操作这一个控件；编号到下一次 inspect 为止；
+  - `filter='文件名|打开'` 匹配其中任一段文字，也匹配控件的类名；`name`、`automation_id`、`control_type` 同样能缩小列表；
+  - 窗口在读的过程中变了，会自动重读；
+  - 动作打开了新窗口（确认框、报错、文件选择框），回复的 `new_windows` 会列出来；
+  - `steps=[...]`：一次按顺序做几个动作，也可以是 `keys`、`type`、`wait`；遇到出错、等不到或回读对不上就停下，最后截一张图。
+- `ocr` 找不到原样的文字时，再忽略标点找一遍：“COM17 · 115200”里的 “·” 认成 “•”、“-”，或者没认出来，都能找到，结果标上 `loose`。
+
+### 你在用电脑时，AI 让开
+
+- **让路**：你动了鼠标或键盘后，AI 的桌面操作（`input`、`ui` 的动作、`ocr` 的点击、`window` 的操作）先等你停手 5 秒，最多等 10 秒，还在用就告诉 AI “这人正在用电脑”，什么也不做。WinHand 自己发出的输入不算；你在 WinHand 的弹窗里点按钮、输入密钥也不算。
+- **急停**：按 **Ctrl+Alt+Shift+Backspace**，AI 的桌面操作在接下来 1 分钟里一律拒绝，回复里说明是你按的。`ui(steps=[...])` 做到一半时，也从下一步起停下。
+- **边框**：AI 操作桌面时，屏幕四周有一圈细细的橙色边框，最后一个动作之后 2 秒消失。截图里看不到它。Windows 10 2004 以前的系统没法把它排除在截图之外，就不显示。
+- **设置**：`config.toml` 里
+
+  ```toml
+  [desktop]
+  yield_to_owner = true   # false：不等你
+  owner_idle_s = 5        # 停手多久才算不用了
+  stop_keys = true        # false：不注册急停键
+  border = true           # false：不显示边框
+  ```
+
+  `sys_info()` 的 `desktop_owner` 一项显示当前的设置，以及急停键注册成功没有。
+
+### 命令被弹窗卡住时
+
+`run` 还没结束就先回复时，以及 `job_status` 的 `activity` 里：命令已经超过 5 秒没有输出，又在它运行期间冒出了要你回应的窗口，就会在 `prompts` 里列出它的标题和程序，并让它的任务栏按钮闪烁，直到你切过去。这类窗口包括对话框、Windows 安全中心的登录框、1Password、KeePassXC、Bitwarden、GPG 的 pinentry、Git Credential Manager。复盘里，一次 `git commit` 就卡在 1Password 的签名窗口上，没人去点。
+
+出现 UAC 这类安全桌面时，回复里也会写明：命令可能在等它，只有你能回答。长等待（`job_status(wait_s=...)`）碰到这两种情况会提前返回，`matched` 是 `prompt` 或 `secure_screen`。
 
 以下情况不能操作：
 
