@@ -258,7 +258,13 @@ def describe(
         if op == "mkdir":
             return one("write", a.get("path"))
         if op == "delete":
-            return one("delete", a.get("path"))
+            out = one("delete", a.get("path"))
+            target = _abs(a.get("path"))
+            if a.get("recursive") and target:
+                # a whole folder: also judged as the command it amounts to, so the owner's rules
+                # against batch deletes (written for commands) cover it too, Recycle Bin or not
+                out.append(Action("command", tool, text=f"Remove-Item -Recurse -LiteralPath '{target}'"))
+            return out
         if op == "move":  # moving a file creates it at the destination and hands out its content
             dest = _destination(a.get("path"), a.get("to"))
             return one("move", a.get("path"), dest) + one("read", a.get("path")) + one("write", dest)

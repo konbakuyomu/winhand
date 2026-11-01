@@ -405,7 +405,7 @@ Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructio
 | `input` | shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里真正被执行的每一行，见下文。gdb、串口等会话不检查 |
 | `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`secret_prompt` 的 `save_to`、`fs_op` 的 copy/move 目标（目标是已有文件夹时，按放进去的那个文件判断）和 mkdir |
 | `edit` | `fs_edit`、`fs_apply_patch`（补丁涉及的每个文件）。编辑需要看到内容，所以它们同时算对这些文件的 `read`；补丁文件本身也算 `read` |
-| `delete` / `move` | `fs_op` |
+| `delete` / `move` | `fs_op`；delete 带 `recursive=true`（整个文件夹）时，还按 `command` 判断，看成 `Remove-Item -Recurse -LiteralPath '<路径>'`，所以禁止批量删除的命令规则也管得到它 |
 | `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_search`、`fs_op` 的 copy 和 move 来源，以及上面 `edit` 的目标 |
 
 `fs_search` 搜索文件夹时，读取规则拒绝或要求确认的文件不会出现在结果里，结果中的 `guard_hidden` 写明略去了几个文件。

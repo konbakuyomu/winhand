@@ -415,3 +415,38 @@ async def test_a_long_wait_ends_when_a_prompt_or_a_secure_screen_appears(monkeyp
 
     out = await td.wait_job(lambda: {"state": "running"}, 30, [], watch=secure)
     assert out["matched"] == "secure_screen" and "UAC" in out["note"]
+
+
+# ------------------------------------------------------------------ deleting a whole folder
+
+
+async def test_deleting_a_whole_folder_is_judged_like_remove_item_recurse(tmp_path, winhand_home):
+    from winhand import actions
+
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    (winhand_home / "guards.toml").write_text(
+        "[[guard]]\n"
+        'on = ["command", "input"]\n'
+        "match = '(?i)Remove-Item\\b.*-Recurse'\n"
+        'decision = "deny"\n'
+        'reason = "no batch deletes"\n',
+        encoding="utf-8",
+    )
+    folder = tmp_path / "build"
+    folder.mkdir()
+    (folder / "a.o").write_bytes(b"x")
+    (tmp_path / "one.txt").write_bytes(b"x")
+    kinds = [
+        a.kind
+        for a in actions.describe("fs_op", {"action": "delete", "path": str(folder), "recursive": True})
+    ]
+    assert kinds == ["delete", "command"]
+    async with Client(build_server(Config())) as client:
+        whole = await client.call_tool(
+            "fs_op", {"action": "delete", "path": str(folder), "recursive": True}, raise_on_error=False
+        )
+        single = await client.call_tool(
+            "fs_op", {"action": "delete", "path": str(tmp_path / "one.txt"), "permanent": True}
+        )
+    assert whole.is_error and "no batch deletes" in whole.content[0].text and (folder / "a.o").exists()
+    assert not single.is_error and not (tmp_path / "one.txt").exists()
