@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 import pytest
@@ -196,7 +197,9 @@ def test_many_names_still_fit_in_what_claude_code_keeps(winhand_home):
     text = server.instructions(Config())
     assert len(text) <= server.INSTRUCTIONS_MAX and text.endswith(server.GUIDE_CONTEXT)
     flat = " ".join(text.split())  # the line is wrapped
-    assert names[0] in flat and "37 more (context() lists them)" in flat and names[-1] not in flat
+    more = re.search(r"(\d+) more \(context\(\) lists them\)", flat)
+    assert names[0] in flat and more and names[-1] not in flat
+    assert 0 < int(more.group(1)) <= 37  # 0.7.4's shorter guide leaves room for at least as many names
 
 
 async def test_asked_again_for_a_stored_name_the_person_can_just_cancel(monkeypatch, winhand_home):

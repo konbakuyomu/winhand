@@ -1,0 +1,7 @@
+{
+  "structural": [
+    "agent/src/**",
+    "relay/src/**",
+    "desktop/windows/**"
+  ]
+}

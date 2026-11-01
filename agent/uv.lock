@@ -1686,7 +1686,7 @@ wheels = [
 
 [[package]]
 name = "winhand"
-version = "0.7.3"
+version = "0.10.2"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

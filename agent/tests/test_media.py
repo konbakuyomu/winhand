@@ -94,28 +94,39 @@ def _pdf_with_text(path):
 
 async def test_office_documents_become_text(client, tmp_path):
     _docx(tmp_path / "plan.docx")
-    text = "\n".join(texts(await client.call_tool("fs_read", {"path": str(tmp_path / "plan.docx")})))
+    result = await client.call_tool("fs_read", {"path": str(tmp_path / "plan.docx")})
+    text = "\n".join(texts(result))
     assert "# 项目计划" in text and "第一段\ttabbed" in text and "| A1 | B1 |" in text
+    # Claude Code shows the model the structured copy instead of the text blocks: the text is there
+    assert "# 项目计划" in result.structured_content["text"]
 
     _pptx(tmp_path / "deck.pptx")
-    text = "\n".join(texts(await client.call_tool("fs_read", {"path": str(tmp_path / "deck.pptx")})))
+    result = await client.call_tool("fs_read", {"path": str(tmp_path / "deck.pptx")})
+    text = "\n".join(texts(result))
     assert (
         text.index("封面标题") < text.index("第二页要点") < text.index("last slide")
     )  # slide 10 after slide 2
+    assert "第二页要点" in result.structured_content["text"]
 
     book = openpyxl.Workbook()
     book.active.title = "预算"
     book.active.append(["项目", "金额"])
     book.active.append(["服务器", 1200])
     book.save(tmp_path / "budget.xlsx")
-    text = "\n".join(texts(await client.call_tool("fs_read", {"path": str(tmp_path / "budget.xlsx")})))
+    result = await client.call_tool("fs_read", {"path": str(tmp_path / "budget.xlsx")})
+    text = "\n".join(texts(result))
     assert "sheet: 预算" in text and "服务器\t1200" in text
+    assert "服务器\t1200" in result.structured_content["text"]
+    # the facts block stays facts: clients that show the blocks do not get the text twice
+    assert "text" not in json.loads(texts(result)[0])
 
 
 async def test_pdf_text_and_scanned_pages(client, tmp_path):
     _pdf_with_text(tmp_path / "text.pdf")
     result = await client.call_tool("fs_read", {"path": str(tmp_path / "text.pdf")})
     assert "Hello winhand PDF" in "\n".join(texts(result)) and not images(result)
+    assert "Hello winhand PDF" in result.structured_content["text"]
+    assert result.structured_content["pages"] == 1
 
     scan = tmp_path / "scan.pdf"
     Image.new("RGB", (800, 1100), "white").save(scan)  # an image-only page, like a scanner makes

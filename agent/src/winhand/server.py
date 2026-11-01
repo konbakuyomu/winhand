@@ -4,6 +4,7 @@ processes and the desktop."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import textwrap
@@ -20,6 +21,7 @@ from pydantic import BaseModel, BeforeValidator, Field
 from . import (
     __version__,
     coalesce,
+    config,
     desktop,
     fs,
     local_mcp,
@@ -32,6 +34,7 @@ from . import (
     tools_desktop,
     transfer,
     venv_repair,
+    waiting,
     winenv,
     workspace,
 )
@@ -48,6 +51,7 @@ from .secret_prompt import PromptUnavailable, ask_secret
 from .session import SessionManager, SessionSpec, TransportError, wait_for
 from .session.session import TRANSPORTS
 from .session.wait import MAX_WAIT_S
+from .tool_hints import ToolHints
 from .tools_desktop import media_result
 
 GUIDE_FULL = """\
@@ -58,6 +62,9 @@ Quick rules
   empty value): the call can fail before it reaches winhand ("could not be parsed as JSON").
 - One-shot command that finishes by itself -> `run`:
     run(command='git', args=['log', '-3'])        program + args, no shell, no quoting problems
+    run(command='git', args=['commit', '-F', '-'], stdin=msg)
+                                                   text such as a commit message goes in on stdin,
+                                                   never inside a command line or a here-string
     run(script='...', shell='pwsh')                a multi-line script (pwsh | powershell | cmd |
                                                    python | bash | wsl), written to a file, so $vars,
                                                    quotes and Chinese text arrive exactly as written
@@ -68,10 +75,18 @@ Quick rules
   Never put `powershell -Command "..."` inside a command line: the outer PowerShell expands its
   $variables first. Use script= or args= instead. Output comes back as clean UTF-8 text.
   `run` answers within ~40 s; a command still going then comes back with `still_running` and an id:
-  it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code.
-  Never sleep or poll in a loop to wait: job_status(wait_s=40, patterns=[...]) does it.
+  it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code;
+  call it again with the new cursor until the job ends. Through the relay (claude.ai connectors)
+  every call stops at 40 s: a connector ends a call at 60 s. A client on this machine (stdio) that
+  shows progress may wait up to 1800 s per call. Never sleep or poll in a loop to wait:
+  job_status(wait_s=..., patterns=[...]) does it.
 - Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
-  config and says whether a failure was the connection, host key, key or the script.
+  config and says whether a failure was the connection, host key, key or the script. Prefer it to
+  run('ssh', ...): the script goes in on stdin with LF line ends, nothing to quote; secrets=[...]
+  hands it stored tokens as environment variables. Files and folders: remote_copy(host, local,
+  remote_path, direction='up'|'down'). A tunnel that stays open in the background:
+  job_start(command='ssh', args=['-N', '-o', 'ExitOnForwardFailure=yes', '-L',
+  '127.0.0.1:8080:localhost:80', host]); job_stop(id) closes it.
   An interactive login: session_start(profile='ssh', vars={'host': ...}).
 - Anything interactive, long-running or stateful (shells, REPLs, debuggers, gdbserver, installers,
   serial/telnet consoles, full-screen TUIs) -> a session:
@@ -111,11 +126,17 @@ Quick rules
   to fs_write/fs_edit when someone else may change the file meanwhile. fs_write(overwrite=false)
   only creates a file that is not there yet.
   fs_read also shows images and reads PDF (scans as page images), Word, PowerPoint and Excel.
-  fs_send hands any file to you as-is; fs_write_bytes writes binary content here;
+  fs_send hands any file (<= 20 MB) to you as-is in one call (Claude Code saves it in your sandbox);
+  fs_write_bytes writes binary content here;
   fs_pick lets the person choose files in a dialog (their way to "upload" to you).
   Moving more than a few KB between your own sandbox/shell and this machine: fs_upload_url /
   fs_download_url give a one-time link for curl, so the bytes never pass through the conversation
-  (never paste base64 in parts).
+  (never paste base64 in parts). Several files at once: fs_download_url(folder, or paths=[...],
+  include/exclude) gives one zip; fs_upload_url(folder, extract=true) unpacks a zip or tar you send
+  (all or nothing). Over about 8 MB pass size=<bytes>: one link per part, so no single request
+  runs into a sandbox's 30 s limit. fs_read(paths=[...]) reads up to 20 files in one call.
+  Keep files you need later in winhand's scratch folder (context() names it; programs see
+  %WINHAND_SCRATCH%), not in %TEMP%, which the owner clears.
 - The desktop like a person: screenshot (desktop, monitor, region or a window) -> input
   (click/type/keys/scroll/drag in the screenshot's pixels) or, more reliably, ui (inspect a
   window's controls, then invoke/set_value/toggle/expand/select by name: buttons, fields, lists,
@@ -135,6 +156,19 @@ Quick rules
   control, a window, a text or the picture instead of sleeping.
   ui reads back after an action: verified=true confirms the observed state; false/null requires
   inspecting the result. A button being invoked does not prove its task finished; do not blindly retry.
+  A window the action opened comes back in new_windows. inspect gives each control a ref (e12):
+  ui(window, action, ref='e12') acts on exactly that one; filter='a|b' takes either text.
+  ui(window, steps=[{action, name | ref, value}, ...]) does several actions (also keys, type, wait)
+  in order, stops at the first that fails and ends with a picture.
+  input: modifiers=['ctrl'] with a click or scroll, triple_click, hold_key (keys, duration_s),
+  keys with repeat=N, cursor_position; window=<title> takes that window's pixels and brings it to
+  the front. screenshot(path=...) also saves the picture; a minimized window is shown for it and
+  put back. Without a window, screenshot(wait='stable') looks at the window in front.
+  The person comes first: while they use the mouse or keyboard, desktop actions wait (up to 10 s)
+  and then say so; after they press Ctrl+Alt+Shift+Backspace they are refused for a minute: ask
+  them before going on. A thin frame lines the screen while you operate it (not in screenshots).
+  run and job_status name a sign-in or signing window that appeared while a command went quiet
+  (`prompts`): it is probably what the command waits for; tell the person.
   A locked screen, a UAC prompt or a disconnected session cannot be seen or operated, and Windows
   drops clicks and keys to programs running as administrator (window list: admin=true): the
   error says which; screenshots and ocr can still read admin windows. Tell the person what to do.
@@ -177,36 +211,36 @@ GUIDE = """\
 winhand drives the Windows machine it runs on. help() has the full guide: read it once.
 
 - One-shot command that finishes by itself -> `run`:
-    run(command='git', args=['log', '-3'])   program + args, no shell, no quoting problems
+    run(command='git', args=['commit', '-F', '-'], stdin=msg)   program + args (+ text on stdin): no
+                                              shell, no quoting problems
     run(script='...', shell='pwsh')           multi-line script (pwsh | powershell | cmd | python | bash
                                               | wsl) written to a file: $vars, quotes, Chinese arrive as is
     run(command='...')                        one command line for PowerShell
   Never nest `powershell -Command "..."` in a command line; use script= or args=. `run` answers within
-  ~40 s; if still going you get `still_running` + an id, and job_status(id, since=cursor, wait_s=40)
-  waits for the rest. Never sleep or poll in a loop.
-- Interactive, long-running or stateful programs (shells, REPLs, gdb, gdbserver, installers, serial or
-  telnet consoles, full-screen TUIs) -> a session: session_start -> session_send / session_wait ->
-  session_read / session_screen -> session_stop. profile_list knows common tools (gdb, pyocd, serial ...).
-- Session results carry `state` + `next`: running | awaiting_input | needs_user | idle | blocked | exited.
-  `needs_user` (a password, code or sign-in): never invent it; tell the person or call session_prompt_user.
-  session_wait waits on several sessions at once; a timeout is not a failure, call it again.
+  ~40 s; if still going you get `still_running` + an id: job_status(id, since=cursor, wait_s=40)
+  waits for the rest in one call (Claude Code backgrounds it after 2 min and tells you when it ends;
+  other clients: 40 s per call). Never sleep or poll in a loop.
+- Another machine over SSH -> remote_run(host, script): this machine's ssh config and keys, script on
+  stdin, says whether a failure was the connection or the script. Not run('ssh', ...).
+- Interactive or stateful programs (shells, REPLs, gdb, serial/telnet consoles, TUIs, installers) -> a
+  session: session_start -> session_send / session_wait -> session_read / session_screen -> session_stop
+  (profile_list: gdb, pyocd, serial ...). Results carry `state` + `next`; `needs_user` (a password, code
+  or sign-in): never invent it, tell the person or call session_prompt_user. A wait timeout is no failure.
 {secrets}
 - Files: fs_read / fs_edit / fs_write / fs_search / fs_find / fs_list / fs_stat / fs_op / fs_apply_patch;
-  prefer them to shell commands. Moving more than a few KB between your sandbox and this machine:
-  fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
-- Full-screen programs (menuconfig, vim, setup wizards): after keys, session_wait(screen_stable_ms=300)
-  then session_screen (`highlighted` is the selected row).
+  prefer them to shell commands. A file from here into your sandbox: fs_send(path) (<= 20 MB, one call).
+  Uploads and bigger files: fs_upload_url / fs_download_url (one-time curl links), never base64 in parts.
 - The desktop: take a screenshot yourself instead of asking the person for one. To operate a program
   prefer its own CLI/API, then ui (controls and menus by name), then keys; without controls (canvases,
   self-drawn apps) ocr(action='click', text=...) finds text on screen; input pixel clicks come last.
   screenshot(wait='change' | 'stable') waits for the screen instead of sleeping. Locked screens and
   administrator windows cannot be operated (the error says so). The first click, key or ui action on a
   program waits for the person's OK there (window list: `approval`); terminals: use run or a session.
-- job_start runs in the background, independent of winhand (long work, anything that restarts winhand,
-  elevated=true for admin tasks); args= runs a program directly, stdin= feeds it text (Codex:
-  command='codex', args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
-- Something odd here (garbled text, a failing shim, a missing tool)? sys_info(checks=true) lists the
-  usual suspects with fixes. A tool missing from your list: call(tool, arguments) reaches it.
+- job_start runs in the background, independent of winhand (long work, winhand restarts, elevated=true
+  for admin); args= runs a program directly, stdin= feeds it text (Codex: command='codex',
+  args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
+- Odd behaviour (garbled text, a failing shim)? sys_info(checks=true). A tool missing from your list:
+  call(tool, arguments) reaches it.
 - Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
   tools, mcp_call(server, tool, arguments) calls one.
 - After a connection error, call history() before resending anything.
@@ -280,6 +314,48 @@ def _refresh_instructions() -> None:
 secret_store.listeners.append(_refresh_instructions)
 
 
+READ_SEVERAL_MAX = 20
+
+
+def _read_several(paths: list[str], max_chars: int, encoding: str | None) -> dict:
+    """fs_read(paths=[...]): text files and documents in one answer, the size budget shared out.
+    Pictures need fs_read(path) one at a time: they come back as images."""
+    paths = list(dict.fromkeys(paths))[:READ_SEVERAL_MAX]
+    share = max(2000, max_chars // max(1, len(paths)))
+    files: list[dict] = []
+    for one in paths:
+        kind = media.kind_of(one)
+        try:
+            if kind == "image":
+                files.append({"path": one, "note": "a picture: read it with fs_read(path) to see it"})
+            elif kind == "document":
+                full = winenv.long_path(one)
+                if not os.path.isfile(full):
+                    files.append({"path": one, "error": f"no such file: {one}"})
+                    continue
+                result = media.read_document(full, None, False, max_chars=share)
+                files.append({**result["facts"], "path": one, "text": result["text"] or "(no text found)"})
+            else:
+                files.append(fs.fs_read(one, max_chars=share, encoding=encoding))
+        except (fs.FsError, media.MediaError, OSError, ValueError) as exc:
+            files.append({"path": one, "error": str(exc)})
+    return {"files": files, "each_up_to": share}
+
+
+SSH_HINT = (
+    "remote_run(host, script, secrets=[...]) does this with less to get wrong: the script goes in on "
+    "stdin with LF line ends, stored secrets reach it as environment variables, and a failure says "
+    "whether it was the connection, the host key, the key or the script. Files: remote_copy. A tunnel: "
+    "job_start(command='ssh', args=['-N', '-L', '127.0.0.1:<port>:localhost:<port>', host]), job_stop ends it."
+)
+
+
+def _ssh_program(command: str | None) -> bool:
+    """`run` started ssh or scp itself (run(command='ssh', args=[...]) or a command line)."""
+    first = (command or "").strip().strip('"').split()[:1]
+    return bool(first) and Path(first[0]).stem.lower() in ("ssh", "scp")
+
+
 def _text(value: str) -> TextContent:
     return TextContent(type="text", text=value)
 
@@ -312,6 +388,15 @@ class Edit(BaseModel):
     replace_all: bool = False
 
 
+class FileEdits(BaseModel):
+    path: str
+    old: str | None = None
+    new: str | None = None
+    replace_all: bool = False
+    edits: list[Edit] | None = None
+    expected_sha256: str | None = None
+
+
 def _spec_from_args(transport: str, command: list[str] | str | None, **kw: Any) -> SessionSpec:
     if transport not in TRANSPORTS:
         raise ValueError(f"transport must be one of {TRANSPORTS}")
@@ -323,11 +408,19 @@ def build_server(
     cfg: Config | None = None, manager: SessionManager | None = None, *, local_stdio: bool = False
 ) -> FastMCP:
     cfg = cfg if cfg is not None else load_config()
+    with contextlib.suppress(Exception):  # programs started here find winhand's scratch folder
+        os.environ[config.SCRATCH_ENV] = str(config.scratch_dir(cfg.raw))
+    with contextlib.suppress(Exception):  # the stop keys work from the start, not after the first action
+        from . import presence
+
+        if presence.settings()["stop_keys"]:
+            presence.start()
     sessions = manager or SessionManager()
     mcp = FastMCP("winhand", instructions=instructions(cfg, local_stdio), version=__version__)
     _live[mcp] = (cfg, local_stdio)
     local_servers = [s.name for s in cfg.servers if s.enabled]
     recent = RecentCalls()
+    mcp.add_middleware(ToolHints())  # read-only / idempotent / always-load hints on tools/list
     mcp.add_middleware(recent)
     mcp.add_middleware(RedactOutput())  # inside RecentCalls: history only ever sees masked results
     # Claude Code-style names (file_path, old_string, -A ...) become winhand's before anything is judged
@@ -396,6 +489,9 @@ def build_server(
             "names": local_servers,
             "note": "mcp_tools() lists their tools, mcp_call(server, tool, arguments) calls one",
         }
+        from . import presence
+
+        info["desktop_owner"] = presence.status()  # waiting for the person, the stop keys, the frame
         return info
 
     @mcp.tool
@@ -414,13 +510,33 @@ def build_server(
                 "know where it is checked out on this machine"
             ),
         ] = None,
+        brief: Annotated[
+            bool, Field(description="Skills by name only (skill(name) loads one): a much shorter answer")
+        ] = False,
+        since: Annotated[
+            str | None,
+            Field(
+                description="The digest of an earlier answer that is still in your conversation: if nothing "
+                "changed the answer is just `unchanged`. Never after compaction (you no longer have it)"
+            ),
+        ] = None,
     ) -> dict:
         """This machine's rules and skills for agents, read the way Codex and Claude Code read them:
         the global rule files, AGENTS.md / CLAUDE.md / .claude/rules from the project down to `path`
         (with their @imports), the skills here (read a SKILL.md with fs_read when one fits), the guard
         rules in force and the local MCP servers. Call it before working in a folder and again after
         the conversation is compacted."""
-        return await asyncio.to_thread(workspace.context, cfg, path, repo)
+        full = await asyncio.to_thread(workspace.context, cfg, path, repo)
+        mark = workspace.digest(full)
+        if since and since.strip() == mark:
+            return {
+                "unchanged": True,
+                "digest": mark,
+                **({"path": full["path"]} if full.get("path") else {}),
+                "note": "the same rules, skills and guards as the answer with this digest: keep following "
+                "it. If that answer is no longer in your conversation, call context again without since",
+            }
+        return {**(workspace.briefed(full) if brief else full), "digest": mark}
 
     @mcp.tool
     async def skill(
@@ -560,7 +676,7 @@ def build_server(
         within about 40 s: if it is still going then, the answer has `still_running` and an id, it
         keeps running, and job_status(id, wait_s=40) waits for the rest.
         Use a session instead for anything interactive or that must keep running."""
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             lambda: proc.run(
                 command,
                 args,
@@ -575,6 +691,9 @@ def build_server(
                 secrets=secrets,
             )  # fmt: skip
         )
+        if script is None and _ssh_program(command) and isinstance(result, dict):
+            result["hint_ssh"] = SSH_HINT
+        return result
 
     @mcp.tool
     async def remote_run(
@@ -587,12 +706,39 @@ def build_server(
         env: Annotated[dict[str, str] | None, Field(description="Exported before the script runs")] = None,
         cwd: Annotated[str | None, Field(description="Remote folder to run in")] = None,
         timeout_s: float = 120,
+        secrets: Annotated[
+            list[str] | None,
+            Field(
+                description="Names in this machine's secret store: exported to the script on the other "
+                "machine (sent over ssh's stdin, never on a command line); you never see the values"
+            ),
+        ] = None,
     ) -> dict:
         """Run a script on another machine over SSH from this one, with this machine's keys and ssh
         config (aliases, ProxyJump). Non-interactive (BatchMode), with keep-alives. Answers like `run`
         (still_running + job_status for long ones); on failure `ssh_error` says whether it was the
-        connection, the host key, the key, or the script itself."""
+        connection, the host key, the key, or the script itself. Files: remote_copy."""
+        if secrets:
+            try:
+                env = {**(env or {}), **secret_store.load(list(secrets))}
+            except secret_store.SecretError as exc:
+                return {"error": str(exc)}
         return await asyncio.to_thread(remote.remote_run, host, script, shell, args, env, cwd, timeout_s)
+
+    @mcp.tool
+    async def remote_copy(
+        host: Annotated[str, Field(description="An alias from this machine's ~/.ssh/config, or user@host")],
+        local: Annotated[str, Field(description="File or folder on this machine")],
+        remote_path: Annotated[str, Field(description="File or folder on the other machine")],
+        direction: Annotated[
+            str, Field(description="up: this machine -> host (default); down: host -> this machine")
+        ] = "up",
+        timeout_s: float = 600,
+    ) -> dict:
+        """Copy a file or a folder between this machine and another one over scp, with this machine's
+        ssh config and keys (the way remote_run reaches it). Answers like `run` (still_running +
+        job_status for big copies)."""
+        return await asyncio.to_thread(remote.remote_copy, host, local, remote_path, direction, timeout_s)
 
     @mcp.tool
     async def proc_list(
@@ -825,7 +971,11 @@ def build_server(
         ] = None,
         min_chars: Annotated[int | None, Field(description="Stop once this much new output arrived")] = None,
         timeout_s: Annotated[
-            float, Field(description="Max wait for this call (capped at 40s; call again to keep waiting)")
+            float,
+            Field(
+                description="Max wait for this call: 40 s (up to 1800 s for a client on this machine "
+                "that shows progress); call again to keep waiting"
+            ),
         ] = 30,
         include_screen: bool = False,
     ) -> dict:
@@ -833,11 +983,11 @@ def build_server(
         with no condition it waits for a prompt, a request for the user, or exit. `needs_user` and exit
         always end the wait. Returns which session/condition fired plus each session's new output and state."""
         id_list = [ids] if isinstance(ids, str) else list(ids)
+        ceiling = waiting.limit(ctx, timeout_s)
         key = coalesce.freeze(
             ("session_wait", id_list, patterns, ignore_case, states, quiet_ms, screen_stable_ms, min_chars)
-            + (timeout_s, include_screen)
+            + (ceiling, include_screen)
         )
-        progress = await _progress(ctx)
 
         async def wait() -> dict:
             try:
@@ -850,14 +1000,15 @@ def build_server(
                     quiet_ms=quiet_ms,
                     screen_stable_ms=screen_stable_ms,
                     min_chars=min_chars,
-                    timeout_s=timeout_s,
+                    timeout_s=ceiling,
                     include_screen=include_screen,
-                    progress=progress,
+                    max_wait_s=max(ceiling, waiting.SHORT_WAIT_S),
                 )
             except (KeyError, ValueError) as exc:
                 return {"error": str(exc)}
 
-        return await coalesce.shared(key, wait)
+        # each caller gets its own progress beat (the wait itself may be shared with identical calls)
+        return await waiting.heartbeat(ctx, coalesce.shared(key, wait), ceiling, "session_wait")
 
     @mcp.tool
     def session_read(
@@ -1019,7 +1170,11 @@ def build_server(
 
     @mcp.tool
     async def fs_read(
-        path: str,
+        path: Annotated[str | None, Field(description="The file (or give several as paths)")] = None,
+        paths: Annotated[
+            list[str] | None,
+            Field(description="Several text files or documents in one call, each with its share of the size"),
+        ] = None,
         offset: Annotated[int, Field(description="Text: 1-based first line")] = 1,
         limit: Annotated[int, Field(description="Text: number of lines")] = 2000,
         pages: Annotated[str | None, Field(description="PDF/PowerPoint: pages such as '1-3,5'")] = None,
@@ -1045,6 +1200,12 @@ def build_server(
         also logs another program is still writing. Images: returned as a picture you can see.
         PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx): extracted text; PDF pages without
         text (scans) come back as page images. Other binaries: use fs_send."""
+        if paths:
+            return await asyncio.to_thread(
+                _read_several, [*([path] if path else []), *paths], max_chars, encoding
+            )
+        if not path:
+            return {"error": "give path (or paths=[...] for several files)"}
         kind = media.kind_of(path)
         full = winenv.long_path(path)
         if kind in ("image", "document") and not os.path.isfile(full):
@@ -1057,11 +1218,15 @@ def build_server(
             if kind == "document":
                 result = await asyncio.to_thread(media.read_document, full, pages, render_pages)
                 result["facts"]["path"] = path
-                # explicit content blocks: a list of plain strings would be merged into one JSON string
+                text = result["text"] or "(no text found)"
+                # explicit content blocks: a list of plain strings would be merged into one JSON string.
+                # The text goes into the structured copy as well: Claude Code shows the model that copy
+                # instead of the text blocks, and without it the model saw only the page count.
                 return media_result(
                     result["facts"],
-                    _text(result["text"] or "(no text found)"),
+                    _text(text),
                     *[Image(data=data, format=fmt) for data, fmt, _ in result["images"]],
+                    structured_extra={"text": text},
                 )
         except (media.MediaError, ImportError, OSError, ValueError) as exc:
             return {"error": str(exc)}
@@ -1098,7 +1263,9 @@ def build_server(
 
     @mcp.tool
     async def fs_edit(
-        path: str,
+        path: Annotated[
+            str | None, Field(description="The file to edit (or files=[...] for several)")
+        ] = None,
         old: Annotated[
             str | None, Field(description="Exact text to replace (must be unique unless replace_all)")
         ] = None,
@@ -1121,10 +1288,33 @@ def build_server(
                 "to edit without that check"
             ),
         ] = "",
+        files: Annotated[
+            list[FileEdits] | None,
+            Field(
+                description="Several files at once, each {path, old, new} or {path, edits: [...]}: every "
+                "edit is checked first and if one fails nothing is written"
+            ),
+        ] = None,
+        dry_run: Annotated[
+            bool, Field(description="Show the diff of what would change; write nothing")
+        ] = False,
     ) -> dict:
-        """Replace exact snippets in a file; keeps the file's encoding and CRLF/LF line endings."""
+        """Replace exact snippets in a file, or in several files at once (all or nothing); keeps each
+        file's encoding and CRLF/LF line endings. dry_run=true shows the diff first."""
+        if files:
+            entries = [f.model_dump() for f in files]
+            if path:
+                ops = [e.model_dump() for e in edits] if edits else None
+                entries.insert(
+                    0, {"path": path, "old": old, "new": new, "replace_all": replace_all, "edits": ops}
+                )
+            return await asyncio.to_thread(_fs, fs.fs_edit_files, entries, dry_run)
+        if not path:
+            return {"error": "give path (or files=[...] for several files)"}
         ops = [e.model_dump() for e in edits] if edits else None
-        return await asyncio.to_thread(_fs, fs.fs_edit, path, old, new, replace_all, ops, expected_sha256)
+        return await asyncio.to_thread(
+            _fs, fs.fs_edit, path, old, new, replace_all, ops, expected_sha256, dry_run
+        )
 
     @mcp.tool
     async def fs_list(

@@ -167,6 +167,26 @@ async function home(request: Request, env: Env, notice?: { text: string; error?:
   return html(statusPage(agent, `${url.origin}/mcp`, { signedIn, notice }), status);
 }
 
+/** Whether the PC is online, for scripts: a cloud session can loop on it until the PC is back.
+ * Like the page, it shows only online/offline and the winhand version, never the computer's name. */
+async function statusJson(env: Env): Promise<Response> {
+  const agent = (await (await bridge(env).fetch("https://bridge/status")).json()) as {
+    online?: boolean;
+    agent?: { version?: unknown } | null;
+    offlineSince?: number | null;
+  };
+  const since = agent.online ? null : (agent.offlineSince ?? null);
+  return Response.json(
+    {
+      online: Boolean(agent.online),
+      version: typeof agent.agent?.version === "string" ? agent.agent.version : null,
+      offline_since: since ? new Date(since).toISOString() : null,
+      offline_for_s: since ? Math.round((Date.now() - since) / 1000) : 0,
+    },
+    { headers: { "cache-control": "no-store", "access-control-allow-origin": "*" } },
+  );
+}
+
 /** The owner signs every client out (a leaked or forgotten sign-in); they sign in again. */
 async function signOutAll(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") return Response.redirect(new URL("/", request.url).href, 303);
@@ -215,6 +235,7 @@ const defaultHandler = {
     if (url.pathname === "/authorize") return authorize(request, env);
     if (url.pathname === "/signout") return signOutAll(request, env);
     if (url.pathname === "/") return home(request, env);
+    if (url.pathname === "/status.json") return statusJson(env);
     return new Response("not found", { status: 404 });
   },
 };

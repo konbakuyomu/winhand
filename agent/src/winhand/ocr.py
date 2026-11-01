@@ -89,6 +89,17 @@ def normalize(text: str) -> str:
     return "".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
+_DOTS = frozenset("∙⋅●◦")  # dot-like symbols outside the punctuation categories
+
+
+def loose(text: str) -> str:
+    """normalize() without punctuation: OCR reads a middle dot (`COM17 · 115200`) as `•`, `-`, `.`
+    or nothing at all, and such labels were not found (2026-11-01 review)."""
+    return "".join(
+        c for c in normalize(text) if not unicodedata.category(c).startswith("P") and c not in _DOTS
+    )
+
+
 def _box(words: list[Word]) -> list[int]:
     left = min(w.rect[0] for w in words)
     top = min(w.rect[1] for w in words)
@@ -102,16 +113,25 @@ def _center(rect: list[int]) -> list[int]:
 
 
 def find_in(lines: list[list[Word]], text: str) -> list[dict]:
-    """Every place the text appears, in reading order (top to bottom, left to right)."""
-    wanted = normalize(text)
-    if not wanted:
+    """Every place the text appears, in reading order (top to bottom, left to right). When the
+    text is nowhere as written, punctuation is ignored on both sides and the places found say
+    `loose`."""
+    if not normalize(text):
         raise OcrError("give the text to find")
+    found = _find_in(lines, text, normalize)
+    if not found and loose(text) and loose(text) != normalize(text):
+        found = [{**m, "loose": True} for m in _find_in(lines, text, loose)]
+    return found
+
+
+def _find_in(lines: list[list[Word]], text: str, fold) -> list[dict]:
+    wanted = fold(text)
     found = []
     for words in lines:
         owner: list[int] = []
         flat = ""
         for i, word in enumerate(words):
-            part = normalize(word.text)
+            part = fold(word.text)
             flat += part
             owner += [i] * len(part)
         start = flat.find(wanted)
@@ -260,12 +280,14 @@ def _search_order(passes: list[Pass], text: str) -> list[Pass]:
 
 
 def _look(window, monitor, region, language):
-    image, place = desktop.capture(window, monitor, region)
+    with desktop.peek(window) as peeked:  # a minimized window is shown
+        image, place = desktop.capture(window, monitor, region)
     passes, languages = recognize(image, place["left"], place["top"], language)
     area = [place["left"], place["top"], image.size[0], image.size[1]]
     facts = {"area": area, **place["target"]}
-    if place.get("note"):
-        facts["note"] = place["note"]
+    note = " ".join(p for p in (place.get("note"), peeked) if p)
+    if note:
+        facts["note"] = note
     return passes, languages, facts
 
 
@@ -302,8 +324,9 @@ def _only(matches: list[dict], text: str) -> int | None:
     whole line by itself (a button's label rather than a sentence that mentions it)."""
     if len(matches) == 1:
         return 0
-    wanted = normalize(text)
-    whole = [i for i, m in enumerate(matches) if normalize(m["text"]) == wanted]
+    fold = loose if matches[0].get("loose") else normalize
+    wanted = fold(text)
+    whole = [i for i, m in enumerate(matches) if fold(m["text"]) == wanted]
     return whole[0] if len(whole) == 1 else None
 
 

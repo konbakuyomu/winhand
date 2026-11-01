@@ -425,3 +425,26 @@ test('a caller giving up on an orphaned call gets it cancelled when the agent is
   assert.deepEqual(second.sent.filter(f => f.type === 'cancel'), [{type: 'cancel', id}]);
   void pending;
 });
+
+test('a PC offline for minutes is reported at once, with where to watch for it', async () => {
+  const h = harness({AGENT_GRACE_S: '20', PUBLIC_ORIGIN: 'https://relay.example/'});
+  h.ctx.stored.set('offlineSince', Date.now() - 10 * 60_000);
+  const answer = await h.object.fetch(rpc(9));
+  assert.equal(h.timers.size, 0); // no grace wait was started
+  const body = await answer.json();
+  assert.equal(body.id, 9);
+  assert.match(body.error.message, /offline since .* did not wait/);
+  assert.match(body.error.message, /https:\/\/relay\.example\/status\.json/);
+});
+
+test('a PC that just went offline still gets the grace period', async () => {
+  const h = harness({AGENT_GRACE_S: '20'});
+  h.ctx.stored.set('offlineSince', Date.now() - 30_000);
+  const response = h.object.fetch(rpc(10));
+  await settle();
+  const grace = [...h.timers.values()][0];
+  assert.equal(grace.ms, 20_000);
+  grace.fn();
+  const body = await (await response).json();
+  assert.match(body.error.message, /waited 20 s/);
+});

@@ -25,6 +25,21 @@ from .activity import _reports_error, preview, summarize
 from .redact import mask
 
 _SKIP = {"history"}
+
+# the entry of the call being served, so a tool can add to it while it runs (run puts its id there
+# the moment the program starts: a reply lost on the way still leaves something to wait for)
+_current: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "winhand-history-current", default=None
+)
+
+
+def note_current(**fields: Any) -> None:
+    """Add fields to the history entry of the call being served (no-op outside a tool call)."""
+    entry = _current.get()
+    if entry is not None:
+        entry.update(fields)
+
+
 EARLIER_BYTES = 512 * 1024  # how much of the end of each day's activity log is read
 
 
@@ -130,6 +145,7 @@ class RecentCalls(Middleware):
         with self._lock:
             self.entries.append(entry)
         token = self._wrapper.set(entry) if message.name == "call" else None
+        current = _current.set(entry)
         try:
             result = await call_next(context)
         except BaseException as exc:
@@ -140,6 +156,7 @@ class RecentCalls(Middleware):
             )
             raise
         finally:
+            _current.reset(current)
             if token is not None:
                 self._wrapper.reset(token)
         data = _structured(result) or {}

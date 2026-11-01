@@ -55,6 +55,8 @@ KNOWN_SECRETS = (
     r"\bhf_[A-Za-z0-9]{30,}\b",
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----",
     r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+    # user:password in a URL (a proxy, a database, a git remote): AIs wrote their own mask() for it
+    r"(?<=://)[^\s/:@'\"<>]{1,64}:[^\s/@'\"<>]{1,256}(?=@)",
 )
 _SECRET_NAME = re.compile(r"(?i)(token|secret|passw|pass_?phrase|api_?key|apikey|auth|credential|private)")
 _SECRET_FILE = re.compile(r"(?i)(passphrase|password|token|secret|credential)")

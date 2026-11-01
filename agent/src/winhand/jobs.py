@@ -48,10 +48,67 @@ def _powershell() -> str:
     )
 
 
-def _script(command: str, directory: Path, cwd: str | None) -> Path:
-    """The job body: run the command, capture every stream as UTF-8, record the exit code."""
+# Holds off sleep while the job's own PowerShell runs (the display may still turn off). The PC sleeps
+# after 15 idle minutes on mains power; long router runs stopped for over an hour in the middle.
+KEEP_AWAKE = """try {
+    Add-Type -Namespace WinhandJob -Name Power -ErrorAction Stop -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
+'@
+    [void][WinhandJob.Power]::SetThreadExecutionState([uint32]2147483649)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+} catch { }
+"""
+
+# Ends a job that runs past its time limit: records the exit first, then kills the whole tree.
+WATCHDOG = """param([int]$Target, [int]$Seconds, [string]$ExitFile)
+Start-Sleep -Seconds $Seconds
+if ((Get-Process -Id $Target -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath $ExitFile)) {
+    [ordered]@{ exit_code = -1; timed_out = $true; finished = (Get-Date).ToString('o'); seconds = $Seconds } |
+        ConvertTo-Json | Set-Content -LiteralPath $ExitFile -Encoding utf8
+    & taskkill.exe /PID $Target /T /F | Out-Null
+}
+"""
+
+
+def _prologue(directory: Path, keep_awake: bool, timeout_s: float | None, after: list[Path]) -> str:
+    """What every job runs first: hold off sleep, wait for the jobs it follows, start its watchdog."""
+    lines: list[str] = []
+    if keep_awake:
+        lines.append(KEEP_AWAKE)
+    log = _quote(str(directory / "output.log"))
+    for dep in after:
+        lines.append(
+            f"""\"waiting for {dep.name} to end\" | Out-File -LiteralPath {log} -Encoding utf8 -Append
+$__wh_meta = $null
+try {{ $__wh_meta = Get-Content -LiteralPath {_quote(str(dep / "job.json"))} -Raw -Encoding utf8 | ConvertFrom-Json }} catch {{ }}
+while (-not (Test-Path -LiteralPath {_quote(str(dep / "exit.json"))})) {{
+    if ($__wh_meta -and $__wh_meta.pid -and -not (Get-Process -Id $__wh_meta.pid -ErrorAction SilentlyContinue)) {{ break }}
+    Start-Sleep -Seconds 3
+}}
+"""
+        )
+    if timeout_s:
+        watchdog = directory / "watchdog.ps1"
+        watchdog.write_text(WATCHDOG, encoding="utf-8-sig")
+        lines.append(
+            "$__wh_watch = Start-Process -FilePath (Get-Process -Id $PID).Path -WindowStyle Hidden -PassThru "
+            "-ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "
+            f"{_quote(str(watchdog))}, '-Target', $PID, '-Seconds', {int(timeout_s)}, '-ExitFile', "
+            f"{_quote(str(directory / 'exit.json'))})\n"
+        )
+    return "".join(lines)
+
+
+EPILOGUE = "if ($__wh_watch) { Stop-Process -Id $__wh_watch.Id -Force -ErrorAction SilentlyContinue }\n"
+
+
+def _script(command: str, directory: Path, cwd: str | None, prologue: str = "") -> Path:
+    """The job body: run the command, capture every stream as UTF-8, record the exit code. The
+    command is a script of its own, so an `exit N` in it ends only the command: the code is still
+    recorded (inline, `exit` ended the wrapper too and the job showed as vanished)."""
     log = directory / "output.log"
     exit_file = directory / "exit.json"
+    user = directory / "command.ps1"
+    user.write_text(command + "\n", encoding="utf-8-sig")  # PowerShell 5.1 needs the BOM for non-ASCII
     location = f"Set-Location -LiteralPath '{cwd.replace(chr(39), chr(39) * 2)}'\n" if cwd else ""
     body = f"""$ErrorActionPreference = 'Continue'
 $__wh = New-Object System.Text.UTF8Encoding $false  # no BOM: see winenv._PWSH_UTF8
@@ -59,12 +116,10 @@ $__wh = New-Object System.Text.UTF8Encoding $false  # no BOM: see winenv._PWSH_U
 [Console]::InputEncoding = $__wh
 $OutputEncoding = $__wh
 Remove-Variable __wh
-{location}$started = Get-Date
+{prologue}{location}$started = Get-Date
 $ok = $true
 try {{
-    & {{
-{command}
-    }} *>&1 | ForEach-Object {{ "$_" }} | Out-File -LiteralPath '{log}' -Encoding utf8 -Append
+    & {_quote(str(user))} *>&1 | ForEach-Object {{ "$_" }} | Out-File -LiteralPath '{log}' -Encoding utf8 -Append
     $code = $LASTEXITCODE
     if ($null -eq $code) {{ $code = if ($?) {{ 0 }} else {{ 1 }} }}
 }} catch {{
@@ -73,7 +128,7 @@ try {{
 }}
 [ordered]@{{ exit_code = $code; finished = (Get-Date).ToString('o'); seconds = [int]((Get-Date) - $started).TotalSeconds }} |
     ConvertTo-Json | Set-Content -LiteralPath '{exit_file}' -Encoding utf8
-"""
+{EPILOGUE}"""
     path = directory / "job.ps1"
     path.write_text(body, encoding="utf-8-sig")  # PowerShell 5.1 needs the BOM for non-ASCII
     return path
@@ -83,7 +138,9 @@ def _quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _program_script(program: str, args: list[str], directory: Path, cwd: str | None, stdin: bool) -> Path:
+def _program_script(
+    program: str, args: list[str], directory: Path, cwd: str | None, stdin: bool, prologue: str = ""
+) -> Path:
     """The job body for a program run directly: no PowerShell parsing of its arguments, stdin fed
     from a UTF-8 file and stdout / stderr written to files as the program writes them, byte for
     byte (a PowerShell pipe would re-encode them: Chinese becomes ? in Windows PowerShell)."""
@@ -102,7 +159,7 @@ def _program_script(program: str, args: list[str], directory: Path, cwd: str | N
     if stdin:
         options.append(f"-RedirectStandardInput {_quote(str(directory / 'stdin.txt'))}")
     body = f"""$ErrorActionPreference = 'Continue'
-$started = Get-Date
+{prologue}$started = Get-Date
 try {{
     $p = Start-Process {" ".join(options)}
     $null = $p.Handle  # keeps ExitCode readable once it has exited (Windows PowerShell)
@@ -114,21 +171,27 @@ try {{
 }}
 [ordered]@{{ exit_code = $code; finished = (Get-Date).ToString('o'); seconds = [int]((Get-Date) - $started).TotalSeconds }} |
     ConvertTo-Json | Set-Content -LiteralPath {_quote(str(exit_file))} -Encoding utf8
-"""
+{EPILOGUE}"""
     path = directory / "job.ps1"
     path.write_text(body, encoding="utf-8-sig")
     return path
 
 
 def _runner(shell: str | None) -> str:
-    if not shell or shell == "powershell":
+    """pwsh (PowerShell 7) when it is installed and no shell was named: UTF-8 throughout, so `*>` and
+    Out-File write UTF-8 instead of Windows PowerShell's UTF-16. shell='powershell' keeps 5.1."""
+    if not shell:
+        return shutil.which("pwsh") or _powershell()
+    if shell == "powershell":
         return _powershell()
     if shell == "pwsh":
         found = shutil.which("pwsh")
         if not found:
             raise JobError("pwsh (PowerShell 7) is not installed; leave shell out for Windows PowerShell")
         return found
-    raise JobError("shell is powershell (Windows PowerShell 5.1, the default) or pwsh (PowerShell 7)")
+    raise JobError(
+        "shell is pwsh (PowerShell 7, the default when installed) or powershell (Windows PowerShell 5.1)"
+    )
 
 
 def start(
@@ -140,12 +203,28 @@ def start(
     stdin: str | None = None,
     shell: str | None = None,
     env: dict[str, str] | None = None,
+    timeout_s: float | None = None,
+    after: list[str] | None = None,
+    keep_awake: bool = True,
 ) -> dict:
     """Start `command` (PowerShell) detached; with `args`, `command` is a program run directly.
     Elevated jobs show a UAC prompt first. `env` is added to its environment (not elevated jobs:
-    Windows starts those with the administrator's own)."""
+    Windows starts those with the administrator's own). `timeout_s` ends the whole process tree after
+    that long; `after` waits for those jobs to end first; `keep_awake` holds off sleep meanwhile."""
     if not IS_WINDOWS:
         raise JobError("background jobs are available on Windows")
+    if timeout_s is not None and timeout_s <= 0:
+        raise JobError("timeout_s must be more than 0 (leave it out for no time limit)")
+    follows = []
+    for dep in after or []:
+        dep = str(dep).strip()
+        if re.fullmatch(r"run-\d+", dep):
+            raise JobError(
+                f"after= takes background jobs (job_start ids), not {dep}: a run lives inside winhand"
+            )
+        if not (_root() / dep / "job.json").exists():
+            raise JobError(f"after=: no job {dep!r}; job_status() lists them")
+        follows.append(_root() / dep)
     if cwd and not os.path.isdir(cwd):
         raise JobError(f"working directory does not exist: {cwd}")
     if stdin is not None and args is None:
@@ -165,12 +244,18 @@ def start(
     job_id = f"{slug[:24] or 'job'}-{time.strftime('%m%d%H%M%S')}"
     directory = _root() / job_id
     directory.mkdir()
+    from . import jobwatch
+
+    jobwatch.remember_windows(job_id)  # a sign-in or signing prompt that shows up later stands out
+    from . import power
+
+    prologue = _prologue(directory, keep_awake and power.enabled(), timeout_s, follows)
     if program is not None:
         if stdin is not None:
             (directory / "stdin.txt").write_bytes(stdin.encode("utf-8"))
-        script = _program_script(program, list(args or []), directory, cwd, stdin is not None)
+        script = _program_script(program, list(args or []), directory, cwd, stdin is not None, prologue)
     else:
-        script = _script(command, directory, cwd)
+        script = _script(command, directory, cwd, prologue)
     shell = runner
     argv = [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)]
     meta = {
@@ -183,6 +268,10 @@ def start(
     }
     if program is not None:
         meta["program"] = True
+    if timeout_s:
+        meta["timeout_s"] = timeout_s
+    if follows:
+        meta["after"] = [d.name for d in follows]
     flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     env = winenv.build_env(env)
     if elevated:
@@ -277,6 +366,20 @@ def _alive(meta: dict) -> bool:
         return abs(psutil.Process(pid).create_time() - created) < 2
     except psutil.Error:
         return False
+
+
+def watch_info(job_id: str) -> tuple[int | None, float | None, float] | None:
+    """(pid, pid_created, seconds since the job last wrote output) of a running job, else None."""
+    directory = _root() / job_id
+    meta = _read_json(directory / "job.json")
+    if not meta or (directory / "exit.json").exists() or not _alive(meta):
+        return None
+    stamps = [p.stat().st_mtime for p in (directory / "output.log", directory / "stderr.log") if p.exists()]
+    try:
+        began = time.mktime(time.strptime(meta["started"], "%Y-%m-%dT%H:%M:%S"))
+    except (KeyError, ValueError):
+        began = time.time()
+    return meta.get("pid"), meta.get("pid_created"), max(0.0, time.time() - max(stamps, default=began))
 
 
 def status(job_id: str, since: int = 0, max_chars: int = 20_000) -> dict:

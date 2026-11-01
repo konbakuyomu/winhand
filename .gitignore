@@ -14,3 +14,5 @@ desktop/windows/bin/
 desktop/windows/obj/
 desktop/out/
 desktop/out-release/
+# CodeStable-Lite 没有许可证：/cs 由 .githooks/ensure-cs.mjs 现取，不提交
+.claude/skills/cs/

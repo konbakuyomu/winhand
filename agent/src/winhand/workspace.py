@@ -1435,6 +1435,13 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         "names": mask([s.name for s in cfg.servers if s.enabled]),
         "note": "mcp_tools() lists their tools, mcp_call(server, tool, arguments) calls one",
     }
+    from . import config as _config
+
+    out["scratch"] = {
+        "folder": mask(str(_config.scratch_dir(cfg.raw))),
+        "note": "keep files you need between calls here, not in %TEMP% (the owner clears it by hand); "
+        f"nothing in it is deleted automatically. Programs started here see it as %{_config.SCRATCH_ENV}%.",
+    }
     from . import harmonia, secret_store
 
     stored = secret_store.stored_names()  # names only: the values go to programs, never here
@@ -1517,6 +1524,32 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         out["redacted"] = masked
         out["redaction_note"] = redact.NOTE
     return _sendable(out)
+
+
+def digest(answer: dict) -> str:
+    """A short fingerprint of a context() answer: the same rules, skills and guards give the same one."""
+    import hashlib
+
+    body = json.dumps(answer, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def briefed(answer: dict) -> dict:
+    """context(brief=true): the same answer with skills by name only (they were 14-17 KB of the
+    25-45 KB of each answer in the 2026-11-01 review). Rules and guards stay whole: they are
+    what the AI must follow."""
+    out = dict(answer)
+    names = [s.get("name") for s in answer.get("skills") or [] if isinstance(s, dict)]
+    more = answer.get("skills_more") or {}
+    names += list(more.get("names") or [])
+    unnamed = int(more.get("count") or 0) - len(more.get("names") or [])
+    out["skills"] = names
+    out.pop("skills_more", None)
+    out["skills_note"] = (
+        "skill(name) loads one (its SKILL.md says when to use it); context() without brief describes each"
+        + (f"; {unnamed} more are not named here" if unnamed > 0 else "")
+    )
+    return out
 
 
 def _sendable(value):

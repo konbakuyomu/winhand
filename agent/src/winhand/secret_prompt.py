@@ -185,6 +185,18 @@ def _run_dialog(
     show_s: float | None = None,
     on_shown: Callable[[], None] | None = None,
 ):
+    from . import presence
+
+    with presence.dialog():  # the person answering it is not them using the machine
+        return _show_dialog(payload, timeout_s, show_s, on_shown)
+
+
+def _show_dialog(
+    payload: str,
+    timeout_s: float,
+    show_s: float | None = None,
+    on_shown: Callable[[], None] | None = None,
+):
     # A dialog nobody can see must not pass for one nobody answered: the AI would wait the full
     # timeout and then tell the person they did not click (0.6.0 did exactly that).
     if (state := _screen_state()) != "ok":

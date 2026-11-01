@@ -914,7 +914,7 @@ def _patch(action: Action, tool: str, args: dict, root: str) -> str:
             lines += ["+" + line for line in content.split("\n")]
         elif tool == "fs_edit" and action.kind == "edit":
             lines.append(f"*** Update File: {name}")
-            for old, new in _edits(args):
+            for old, new in _edits(args, path):
                 lines.append("@@")
                 lines += ["-" + line for line in old.split("\n")]
                 lines += ["+" + line for line in new.split("\n")]
@@ -924,12 +924,30 @@ def _patch(action: Action, tool: str, args: dict, root: str) -> str:
     return "\n".join(lines)
 
 
-def _edits(args: dict) -> list[tuple[str, str]]:
-    if isinstance(args.get("edits"), list):
-        return [
-            (str(e.get("old") or ""), str(e.get("new") or "")) for e in args["edits"] if isinstance(e, dict)
-        ]
-    return [(str(args.get("old") or ""), str(args.get("new") or ""))]
+def _same_file(a, b) -> bool:
+    def norm(p):
+        return os.path.normcase(os.path.abspath(os.path.expanduser(str(p))))
+
+    return bool(a) and bool(b) and norm(a) == norm(b)
+
+
+def _edits(args: dict, path: str | None = None) -> list[tuple[str, str]]:
+    """The (old, new) pairs of an fs_edit call; with files=[...], those for `path`."""
+    entries = [args]
+    if path is not None and isinstance(args.get("files"), list):
+        entries = [args] if _same_file(args.get("path"), path) else []
+        entries += [f for f in args["files"] if isinstance(f, dict) and _same_file(f.get("path"), path)]
+    out: list[tuple[str, str]] = []
+    for entry in entries:
+        if isinstance(entry.get("edits"), list):
+            out += [
+                (str(e.get("old") or ""), str(e.get("new") or ""))
+                for e in entry["edits"]
+                if isinstance(e, dict)
+            ]
+        else:
+            out.append((str(entry.get("old") or ""), str(entry.get("new") or "")))
+    return out
 
 
 def calls(
@@ -964,20 +982,22 @@ def calls(
         if kind == "write":
             content = str(args.get("content") or "") if tool == "fs_write" else ""
             return [("Write", {"file_path": p, "content": content}, ("Write",)) for p in action.paths]
-        old, new = (_edits(args) or [("", "")])[0] if tool == "fs_edit" else ("", "")
-        return [
-            (
-                "Edit",
-                {
-                    "file_path": p,
-                    "old_string": old,
-                    "new_string": new,
-                    "replace_all": bool(args.get("replace_all")),
-                },
-                ("Edit",),
+        out = []
+        for p in action.paths:
+            old, new = (_edits(args, p) or [("", "")])[0] if tool == "fs_edit" else ("", "")
+            out.append(
+                (
+                    "Edit",
+                    {
+                        "file_path": p,
+                        "old_string": old,
+                        "new_string": new,
+                        "replace_all": bool(args.get("replace_all")),
+                    },
+                    ("Edit",),
+                )
             )
-            for p in action.paths
-        ]
+        return out
     return []
 
 

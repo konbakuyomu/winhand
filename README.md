@@ -28,7 +28,7 @@ winhand 把这些都当作**会话**，用同一套模型管理：
 | 真终端 | Windows 用 ConPTY（pywinpty），其他平台用 openpty。程序以为有人在屏幕前，所以提示符、颜色、密码提示、全屏界面都和人工操作时一模一样 |
 | 多种传输 | `pty`（默认）、`pipe`（普通子进程）、`serial`（COM 口，也支持 pyserial 的 URL 写法）、`tcp`（gdbserver 端口、RTT、OpenOCD 4444 端口、QEMU monitor，telnet 协商会自动处理） |
 | 状态推断 | 每次调用都返回 `state`、`reason`（判断依据）和 `next`（下一步建议）。状态分为：<br>`running`：正在输出<br>`awaiting_input`：提示符、确认问题或分页器在等输入<br>`needs_user`：要密码、验证码或浏览器登录，必须由人来处理<br>`idle`：安静但没有提示符<br>`blocked`：长时间无响应<br>`exited`：已退出 |
-| 通用等待 | `session_wait` 可以同时设多个条件（正则、状态、静默、屏幕稳定、输出量），并且能**跨多个会话同时等**。遇到 `needs_user` 或程序退出，一定会立刻返回。单次最多等 40 秒，给中转和客户端返回留出余量；超时不算失败，再调用一次就能接着等 |
+| 通用等待 | `session_wait` 可以同时设多个条件（正则、状态、静默、屏幕稳定、输出量），并且能**跨多个会话同时等**。遇到 `needs_user` 或程序退出，一定会立刻返回。经中转来的调用单次最多等 40 秒，给中转和客户端返回留出余量（本机客户端接收进度时最多 1800 秒，同 `job_status`）；超时不算失败，再调用一次就能接着等 |
 | 虚拟屏幕 | `session_screen` 返回整屏文字、光标位置、反色（选中）行，menuconfig、htop、安装向导都能“看见” |
 | 游标读取 | 输出按绝对位置编号，读过的内容不会重复返回，也不会漏读；大段输出会截断并告诉你怎么翻页；完整日志保存在 `~/.winhand/logs` |
 | 自动应答 | 可以配置“看到某个提示就自动回答”，比如分页器、`Quit anyway? (y or n)`。永远不会自动回答密码 |
@@ -109,7 +109,8 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 - 状态页谁都能打开，所以只显示电脑在不在线和 winhand 版本，不显示电脑名和 Windows 版本。
 - OAuth token 由中转校验，不会转发给电脑。
 - 授权页有防 CSRF 的一次性 handle 和绑定 cookie，并禁止被嵌入 iframe。
-- 电脑短暂掉线（winhand 重启或升级、网络切换）时，请求会先等它重连，默认最多 20 秒（变量 `AGENT_GRACE_S`），之后才报错。报错是带同一请求 id 的 JSON-RPC 错误，写明离线多久和可能原因，客户端会原样交给模型。
+- 电脑短暂掉线（winhand 重启或升级、网络切换）时，请求会先等它重连，默认最多 20 秒（变量 `AGENT_GRACE_S`），之后才报错。离线超过 2 分钟（睡着了、关机了）就不再等，立刻报错。报错是带同一请求 id 的 JSON-RPC 错误，写明离线多久和可能原因，客户端会原样交给模型。
+- `https://mcp.你的域名/status.json` 给脚本用：`online`、`version`、`offline_since`、`offline_for_s`，同样不含电脑名。云端会话可以在后台循环查它，电脑一回来就接着干活，不用等人提醒。
 - 电脑和中转之间的连接断一下（winhand 没重启）时，正在执行的调用不会丢：中转按帧记着已经收到多少，电脑重连后从断开处接着发，客户端那边看到的是一次完整的回复。电脑最多替断开的调用保留 60 秒、单个调用 8 MB 的回复。
 - 一次性文件链接 `https://mcp.你的域名/t/<令牌>` 不走 OAuth，靠令牌本身授权：
   - 令牌是 256 位随机数，只能用一次，默认 10 分钟内有效，最长 30 分钟；
@@ -120,6 +121,16 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 ### 一次性文件链接（大文件、补丁）
 
 `fs_upload_url` / `fs_download_url` 发出一次性链接，模型在自己的沙箱里用 `curl -T 文件 链接` 上传、`curl -o 名字 链接` 下载，文件内容不经过对话。这样传 100 KB 的补丁只要几秒，不必再分段写 base64。传上来的补丁可以直接交给 `fs_apply_patch(root, patch_file=...)`：它会自动判断 `-p`，保留每个文件原来的编码和 CRLF，所有 hunk 都对得上才写入。
+
+一次传多个文件：
+
+- **下载文件夹**：`fs_download_url(path=文件夹)` 或 `paths=[...]`，可加 `include=["*.log"]`、`exclude=["node_modules", ".git"]`。内容边打包成一个 zip 边下载，所以没有事先算好的 sha256，用 `unzip -t` 检查。读规则保护的文件不放进去，回复里列出名字；文件夹里的链接和联接点不跟进去。打包途中读不了的文件，记在 zip 里的 `winhand-errors.txt`。
+- **上传后解开**：`fs_upload_url(path=文件夹, extract=true)`，传一个 zip 或 tar（`.tar.gz`、`.tgz` 等）。要么全部解开，要么一个也不写：名字不安全（绝对路径、`..`、盘符、`CON` 这类设备名、末尾带点）、包里有链接、会经文件夹里已有的链接写到外面、写规则保护的文件、已存在的文件（没给 `overwrite=true`），都会让整包拒收。回复里逐个列出解开的文件和 sha256（前 200 个）。
+- **大文件分片**：给 `size=字节数`，超过 `part_mb`（默认 4 MB）就每片一个链接。复盘时发现，一次传 8–10 MB 以上，有的沙箱约 30 秒就报 502（文件其实传到了）；分片后每片都能在这之前传完。分片可以乱序、并行，传坏的片再传一次即可；最后一片的回复就是结果。整个文件最大 2 GB。
+
+`fs_read(paths=[...])` 一次读最多 20 个文本文件或文档，字数上限按文件平分；图片仍要一张张用 `fs_read(path)` 看。
+
+AI 要跨调用留着的文件，放 winhand 自己的暂存目录：默认 `~/.winhand/scratch`，`config.toml` 里 `[scratch] folder = "D:/..."` 可以改。`context()` 会给出这个路径，在电脑上启动的程序可以用 `%WINHAND_SCRATCH%` 找到它。这里的东西不会自动删除；`%TEMP%` 你会手动清理，复盘时有两次暂存在那里的文件因此丢了。
 
 要在 Claude Code 云端会话里用这个功能，得在云环境的网络设置里放行中转域名：打开会话标题栏的云环境菜单 → Edit → Network access 选 Custom，在 Allowed domains 里加上 `mcp.你的域名`，并勾上 Also include default list of common package managers（不勾就只剩你填的域名）。改完约一分钟生效，正在运行的会话也会跟着生效。只靠下面“云端会话开场就带上本机规矩”里的 Network secret 放行时，它的 Path prefixes 要留空：填了 `/hook/` 的话，一次性链接（`/t/…`）会被沙箱的代理拦下，curl 报 403。中转更新后要重新执行 `npx wrangler deploy`。
 
@@ -133,7 +144,7 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 | 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值。只给 `key`（例如 `CLOUDFLARE_API_TOKEN`）时存进本机密钥库 `~/.winhand/secrets.env`，之后 `run`、`job_start` 用 `secrets=['CLOUDFLARE_API_TOKEN']` 把它作为环境变量交给程序，以后的会话也能用，不用再建新密钥。密钥库在结果里一律遮挡（重启后也是），AI 读不到也改不了。AI 一连上就从 winhand 的说明里看到已存的名字（“Stored here: …”，密钥库一变就更新），不用先调 `context()`；对已存的名字再调 `secret_prompt` 时，输入框会提示“已经存在”，点取消即可。电脑前的人在桌面 App 的“设置 → 密钥”里查看名字、添加、修改、改名、删除、显示或复制值（显示期间截图拍不到 App 窗口） |
 | 一次性命令和进程 | `run`（约 40 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`remote_run`（经本机的 ssh 配置在另一台机器上跑脚本）`proc_list` `proc_kill` `sys_info` |
 | 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
-| 桌面 | `screenshot`（`wait` 等画面变化或停止变化）`window` `input` `ui` `ocr`（认屏幕上的字）`clipboard` |
+| 桌面 | `screenshot`（`wait` 等画面变化或停止变化，`path` 存文件）`window` `input` `ui`（`ref`、`steps` 一次做几步）`ocr`（认屏幕上的字）`clipboard` |
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
 | 本机规则 | `context`：这台电脑写给 AI 的规矩（按 Codex、Claude Code 的读法：AGENTS.md、CLAUDE.md、`.claude/rules`、`@` 引用）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务；`repo=owner/name` 可按仓库名找到本机目录。见[本机规则与守卫](#本机规则与守卫) |
@@ -142,9 +153,13 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 `run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义（解释器不在这几种里时，把它写在 `command`，例如 `run(command=r'.venv\Scripts\python.exe', script=...)`、`command='node'`）；只给 `command` 时整行交给 PowerShell 执行。PowerShell 的输出和管道统一是不带 BOM 的 UTF-8，Windows PowerShell 5.1 也一样，中文不会变成问号，传给原生程序的文本开头也不会多出 BOM。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
 
-`job_status` 的 `wait_s`（最多 40 秒）和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容（不检查就别写这个参数，空值也当作没写）；`fs_write` 加 `overwrite=false` 表示只新建、文件已存在就拒绝。可选参数不要写成“有名字没有值”：这样的调用在到达 winhand 之前就会被客户端当作无法解析的 JSON 拒绝。`fs_op` 删除默认进回收站。
+`job_status` 的 `wait_s` 和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。经中转来的调用（claude.ai 连接器、云端会话）一次最多等 40 秒，等不完就带着游标再问：2026-11-01 实测，云端会话经连接器的调用到 60 秒就被切断，即使请求了进度、进度也发出去了。只有这台电脑上的客户端（stdio，或不经中转的 HTTP）、并且接收进度通知时，一次最多等 1800 秒：开始时立刻发一次进度，之后每 15 秒一次。等待中途，任务弹出新窗口（常常是等人点的对话框）或者长时间没有输出也不占 CPU 时，会提前返回，`matched` 分别是 `window` 和 `stalled`。还在跑的任务带 `activity`：进程数、CPU、内存、多久没输出、是否卡住、弹出的窗口；`files=[…]` 顺便给出其他文件（比如布线器自己的日志）的末尾。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。从同一个游标接着问时只回新的东西：启动命令和日志路径只在第一次回，stderr 只回上次之后新写的部分（给了 `tail` 时照常回末尾）。`run-N` 的编号记在 `~/.winhand/run-counter`，winhand 重启后接着编，不会重复；每个 `run` 一开始就有 id，回复在路上丢了时，`history()` 里能看到它，`job_status` 也能接着等。任务命令里写了 `exit N` 也照常记下退出码 N（命令单独存成 `command.ps1` 运行；以前 `exit` 会把外层的包装脚本一起结束，任务显示为 vanished）。`job_start` 的 `timeout_s` 到时结束整棵进程树（退出码 -1，`timed_out`）；`after=[任务 id]` 让它等前面的任务结束再开始，用来把几步串起来；不写 `shell` 时，装了 PowerShell 7 就用它（`*>`、Out-File 写出的是 UTF-8，不再是 UTF-16）。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容（不检查就别写这个参数，空值也当作没写）；`fs_write` 加 `overwrite=false` 表示只新建、文件已存在就拒绝。可选参数不要写成“有名字没有值”：这样的调用在到达 winhand 之前就会被客户端当作无法解析的 JSON 拒绝。`fs_edit` 的多处修改里，新旧文本一样的那处会跳过并注明，不再连累其他修改；同时给了 `old/new` 和 `edits`、而 `old/new` 正好是其中一处时照常执行。`fs_op` 删除默认进回收站。
 
 模型常按 Claude Code 内置工具的习惯传参（`file_path`、`old_string`/`new_string`、`-A`/`-B`/`-C`、`head_limit`、按毫秒给的 `timeout` 等）。winhand 把这些换成自己的参数名再执行，结果里用 `args_note` 说明换了什么；认不出的参数，报错时列出这个工具真正的参数。路径里的 `%USERPROFILE%`、`$env:LOCALAPPDATA`、开头的 `~` 都会展开。
+
+任务和命令运行期间电脑不会睡眠（只是不睡，显示器照常可以关）：`run` 由 winhand 自己向系统声明，后台任务由它自己的包装脚本声明，所以 winhand 重启也不影响；做完就撤销，之后照常按空闲时间睡眠。`config.toml` 里写 `[power] keep_awake = false` 可以关掉，单个后台任务可以用 `job_start(keep_awake=false)`。
+
+工具在列表里带着客户端认得的提示：读类工具标 `readOnlyHint`（Claude Code 会把它们并行执行，连接断了还会在新连接上自动补发一次），停止类工具标 `idempotentHint`；`run`、`job_start`、`job_status`、`remote_run`、`fs_*` 等常用工具带 `anthropic/alwaysLoad`，会话开始就加载，不用先搜索工具。
 
 单次结果有大小上限，按 UTF-8 字节计，约 4 万字节（一个中文字算 3 字节，接近它的 token 成本）。`fs_read`、`fs_list`、`fs_search`、`run`、`job_status` 和会话输出到上限就停，并说明从哪里接着读。以前一次能返回 6 万字左右，中文或密集代码会超过 Claude Code 单个结果 2.5 万 token 的上限，整条结果作废。
 
@@ -169,7 +184,49 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
    - 同一段文字出现在好几处、又没给 `index` 时，列出各处位置，不点击；只有一处独占一行（像按钮）时点那一处。`ui` 遇到多个同名控件也一样，列出候选让模型指定 `index` 或 `automation_id`；
 5. **坐标点击**：最后才用，每次点击后截图核对。
 
-`screenshot(wait="change")` 等画面和上一次截图相比有变化再返回；`wait="stable"` 等画面停止变化 `stable_ms` 后再返回。这两种等待都可以代替固定的睡眠，文字光标闪烁不算变化。
+`screenshot(wait="change")` 等画面和上一次截图相比有变化再返回；`wait="stable"` 等画面停止变化 `stable_ms` 后再返回。这两种等待都可以代替固定的睡眠，文字光标闪烁不算变化。没给窗口时，`wait="stable"` 只看最前面的窗口：别处在放视频也不影响。仍然等不到时，回复里的 `kept_changing` 写明一直在变的区域和窗口。
+
+截图和输入的几个补充：
+
+- `screenshot(path=...)` 同时把原尺寸的图存进这个文件（`.png`，或 `.jpg`）。这算一次写文件，守卫按写规则判断。
+- 截最小化的窗口：先不抢焦点地把它显示出来，截完再放回去；原来是最大化的，还原时仍是最大化。截图的说明里会写上这一点。
+- `input` 新增：
+  - `modifiers=['ctrl']`：点击、滚动、拖动时按住修饰键；
+  - `triple_click`；
+  - `hold_key`：按住 `keys` 指定的键 `duration_s` 秒，最多 10 秒；
+  - `keys` 加 `repeat=N`：把整串按键按 N 遍；
+  - `cursor_position`：鼠标现在在哪，同时给出屏幕坐标和最近一次截图里的坐标；
+  - `window=<标题>`：`x`、`y` 是这个窗口里的像素，和给它单独截的图一致；先把它切到前台，按键和文字也发给它。
+- `ui` 新增：
+  - inspect 给每个控件一个编号 `ref`（如 `e12`），之后用 `ref='e12'` 就能操作这一个控件；编号到下一次 inspect 为止；
+  - `filter='文件名|打开'` 匹配其中任一段文字，也匹配控件的类名；`name`、`automation_id`、`control_type` 同样能缩小列表；
+  - 窗口在读的过程中变了，会自动重读；
+  - 动作打开了新窗口（确认框、报错、文件选择框），回复的 `new_windows` 会列出来；
+  - `steps=[...]`：一次按顺序做几个动作，也可以是 `keys`、`type`、`wait`；遇到出错、等不到或回读对不上就停下，最后截一张图。
+- `ocr` 找不到原样的文字时，再忽略标点找一遍：“COM17 · 115200”里的 “·” 认成 “•”、“-”，或者没认出来，都能找到，结果标上 `loose`。
+
+### 你在用电脑时，AI 让开
+
+- **让路**：你动了鼠标或键盘后，AI 的桌面操作（`input`、`ui` 的动作、`ocr` 的点击、`window` 的操作）先等你停手 5 秒，最多等 10 秒，还在用就告诉 AI “这人正在用电脑”，什么也不做。WinHand 自己发出的输入不算；你在 WinHand 的弹窗里点按钮、输入密钥也不算。
+- **急停**：按 **Ctrl+Alt+Shift+Backspace**，AI 的桌面操作在接下来 1 分钟里一律拒绝，回复里说明是你按的。`ui(steps=[...])` 做到一半时，也从下一步起停下。急停键在 WinHand 启动时就注册好；按下的时间记在 `~/.winhand/desktop-stopped`，所以电脑上同时跑着的几个 WinHand 进程（比如本机 Claude Code 用的 stdio）都会停。
+- **边框**：AI 操作桌面时，屏幕四周有一圈细细的橙色边框，最后一个动作之后 2 秒消失。截图里看不到它。Windows 10 2004 以前的系统没法把它排除在截图之外，就不显示。
+- **设置**：`config.toml` 里
+
+  ```toml
+  [desktop]
+  yield_to_owner = true   # false：不等你
+  owner_idle_s = 5        # 停手多久才算不用了
+  stop_keys = true        # false：不注册急停键
+  border = true           # false：不显示边框
+  ```
+
+  `sys_info()` 的 `desktop_owner` 一项显示当前的设置，以及急停键注册成功没有。
+
+### 命令被弹窗卡住时
+
+`run` 还没结束就先回复时，以及 `job_status` 的 `activity` 里：命令已经超过 5 秒没有输出，又在它运行期间冒出了要你回应的窗口，就会在 `prompts` 里列出它的标题和程序，并让它的任务栏按钮闪烁，直到你切过去。这类窗口包括对话框、Windows 安全中心的登录框、1Password、KeePassXC、Bitwarden、GPG 的 pinentry、Git Credential Manager。复盘里，一次 `git commit` 就卡在 1Password 的签名窗口上，没人去点。
+
+出现 UAC 这类安全桌面时，回复里也会写明：命令可能在等它，只有你能回答。长等待（`job_status(wait_s=...)`）碰到这两种情况会提前返回，`matched` 是 `prompt` 或 `secure_screen`。
 
 以下情况不能操作：
 
@@ -224,8 +281,12 @@ AI 第一次点击、输入或操作某个程序时，电脑上会弹出“WinHa
 `remote_run(host, script)` 用这台电脑的 ssh 配置和密钥（包括别名和 ProxyJump）在另一台机器上执行脚本：
 
 - 以非交互方式运行（BatchMode），带保活；脚本从 stdin 送过去，CRLF 会转成 LF。
-- `env`、`cwd`、`args` 都会正确转义。
+- `env`、`cwd`、`args` 都会正确转义；`shell='python3'` 的脚本也拿得到 `env` 和 `cwd`。
+- `secrets=['NAME']` 把本机密钥库里的值作为环境变量交给远程脚本，模型看不到值。
 - 失败时 `ssh_error` 会说明原因：连不上、主机指纹不对、密钥被拒，还是脚本本身返回了非零退出码。
+- 结果里网址中的 `用户:密码@` 一律遮挡。
+
+`remote_copy(host, local, remote_path, direction='up'|'down')` 用同一套 ssh 配置经 scp 传文件或文件夹。用 `run` 直接调 ssh、scp 时，结果里会提示改用这两个工具。
 
 需要交互登录时用 `session_start(profile="ssh", vars={"host": ...})`。如果要盯日志，加上 `restart_on_exit`，连接断了会自动重新连上。
 
@@ -296,6 +357,11 @@ ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 - 对该目录生效的守卫规则；
 - 本机 MCP 服务。
 
+每次回答都带一个 `digest`。两种省字数的用法：
+
+- `brief=true`：技能只列名字，规矩和守卫照旧给全。复盘时一次回答有 25–45 KB，其中技能清单占 14–17 KB。
+- `since=<上次的 digest>`：内容没变时只回 `unchanged`。只在上次的回答还在对话里时用；压缩上下文以后不要带，回答里也这样提醒。
+
 文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `skill(name)` 取 SKILL.md 正文、技能文件夹和其中的文件清单（SKILL.md 同样先过守卫的 `read` 规则），脚本用 `run` 在这台电脑上执行。
 
 输出经过脱敏，按脱敏后的长度控制在约 6 万字符以内：
@@ -339,7 +405,7 @@ Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructio
 | `input` | shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里真正被执行的每一行，见下文。gdb、串口等会话不检查 |
 | `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`secret_prompt` 的 `save_to`、`fs_op` 的 copy/move 目标（目标是已有文件夹时，按放进去的那个文件判断）和 mkdir |
 | `edit` | `fs_edit`、`fs_apply_patch`（补丁涉及的每个文件）。编辑需要看到内容，所以它们同时算对这些文件的 `read`；补丁文件本身也算 `read` |
-| `delete` / `move` | `fs_op` |
+| `delete` / `move` | `fs_op`；delete 带 `recursive=true`（整个文件夹）时，还按 `command` 判断，看成 `Remove-Item -Recurse -LiteralPath '<路径>'`，所以禁止批量删除的命令规则也管得到它 |
 | `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_search`、`fs_op` 的 copy 和 move 来源，以及上面 `edit` 的目标 |
 
 `fs_search` 搜索文件夹时，读取规则拒绝或要求确认的文件不会出现在结果里，结果中的 `guard_hidden` 写明略去了几个文件。

@@ -210,12 +210,20 @@ def describe(
     if tool == "remote_run":
         text = _join([a.get("script") or "", *(a.get("args") or [])]).strip()
         return one("command", text=text, host=a.get("host"))
+    if tool == "remote_copy":  # scp: judged as that command, and as reading or writing the local side
+        down = (a.get("direction") or "up") == "down"
+        text = _join(["scp", a.get("local") or "", f"{a.get('host')}:{a.get('remote_path')}"]).strip()
+        return one("command", text=text, host=a.get("host")) + one(
+            "write" if down else "read", a.get("local")
+        )
     if tool == "session_start":
         return one("command", text=_session_command(a), cwd=_abs(a.get("cwd")))
     if tool in ("session_send", "session_stop", "session_prompt_user"):
         return session_input(a, sessions, typed, tool)[0]
     if tool in ("fs_write", "fs_write_bytes"):
         return one("write", a.get("path"))
+    if tool == "screenshot" and a.get("path"):  # the picture also goes to a file
+        return one("write", a.get("path"), expand_vars=True)
     if tool == "fs_upload_url":
         return one("write", a.get("path"), expand_vars=True)
     if tool == "secret_prompt" and a.get("save_to"):
@@ -224,15 +232,23 @@ def describe(
         env, _, name = str(a["harmonia"]).rpartition("/")
         return [Action("command", tool, text=f"harmonia var set {env} {name}")]
     if tool == "fs_edit":  # editing needs the content: a read rule covers it too
-        return one("edit", a.get("path")) + one("read", a.get("path"))
+        many = [f.get("path") for f in a.get("files") or [] if isinstance(f, dict)]
+        if a.get("dry_run"):  # only shows the diff
+            return one("read", a.get("path"), *many)
+        return one("edit", a.get("path"), *many) + one("read", a.get("path"), *many)
     if tool == "fs_apply_patch":
         return _patch_actions(tool, a)
     if tool in ("fs_read", "fs_send"):
-        return one("read", a.get("path"))
-    if tool == "fs_download_url":
-        return one("read", a.get("path"), expand_vars=True)
+        extra = a.get("paths") or []
+        return one("read", a.get("path"), *(extra if isinstance(extra, list) else [extra]))
+    if tool == "fs_download_url":  # a folder: each file in it is judged again as it is listed
+        extra = a.get("paths") or []
+        return one("read", a.get("path"), *(extra if isinstance(extra, list) else [extra]), expand_vars=True)
     if tool == "fs_search":  # reads the files below path
         return one("read", a.get("path") or ".")
+    if tool == "job_status" and a.get("files"):  # shows the end of these files
+        files = a["files"] if isinstance(a["files"], list) else [a["files"]]
+        return one("read", *[str(f) for f in files])
     if tool == "mcp_call" and not a.get("call_id"):  # waiting for an earlier call runs nothing new
         return [Action("mcp", tool, text=mcp_text(a.get("server"), a.get("tool"), a.get("arguments")))]
     if tool == "fs_op":
@@ -242,7 +258,13 @@ def describe(
         if op == "mkdir":
             return one("write", a.get("path"))
         if op == "delete":
-            return one("delete", a.get("path"))
+            out = one("delete", a.get("path"))
+            target = _abs(a.get("path"))
+            if a.get("recursive") and target:
+                # a whole folder: also judged as the command it amounts to, so the owner's rules
+                # against batch deletes (written for commands) cover it too, Recycle Bin or not
+                out.append(Action("command", tool, text=f"Remove-Item -Recurse -LiteralPath '{target}'"))
+            return out
         if op == "move":  # moving a file creates it at the destination and hands out its content
             dest = _destination(a.get("path"), a.get("to"))
             return one("move", a.get("path"), dest) + one("read", a.get("path")) + one("write", dest)
