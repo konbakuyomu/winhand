@@ -14,4 +14,5 @@ created: 2026-11-01
 - 验证：
   - `agent/tests/test_review_round4.py::test_a_job_command_runs_as_its_own_script`：命令写进了 `command.ps1`，`job.ps1` 里没有命令原文。
   - `agent/tests/test_windows_scenarios.py::test_exit_in_a_job_command_still_records_its_code`（只在 Windows 上跑）：命令以 `exit 4` 结尾，任务是 finished、退出码 4、输出完整。
+  - 0.10.1 装上后在用户电脑上实测：`Write-Output 'before exit'; exit 4` 的任务是 finished、退出码 4、输出完整。
 - codestable：无影响（README 写明了）。
