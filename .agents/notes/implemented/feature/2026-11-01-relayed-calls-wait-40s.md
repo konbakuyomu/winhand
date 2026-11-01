@@ -41,4 +41,4 @@ Status: implemented
 
 - `agent/tests/test_review_round4.py::test_calls_through_the_relay_keep_the_40_s_wait`
 - `agent/tests/test_review_round4.py::test_relayed_reads_the_header_the_relay_adds`
-- 实测记录：`codestable/epics/001-o-使用复盘四轮强化/issues/002-o-第2轮长任务不用守着.md` 的「实测」一节。
+- 实测记录：`codestable/epics/001-x-使用复盘四轮强化/issues/002-x-第2轮长任务不用守着.md` 的「实测」一节。
