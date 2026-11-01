@@ -727,7 +727,7 @@ def run(
         "duration_ms": int((time.monotonic() - job.started) * 1000),
         "next": (
             f"Still running after {reply_within_s:.0f}s, so this is its output so far; it keeps running "
-            f"(killed after timeout_s={timeout_s:.0f}s). job_status(id='{job.id}', since=cursor, wait_s=1800) "
+            f"(killed after timeout_s={timeout_s:.0f}s). job_status(id='{job.id}', since=cursor, wait_s=40) "
             f"waits for the rest and the exit code; job_stop(id='{job.id}') ends it."
         ),
     }

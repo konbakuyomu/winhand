@@ -836,6 +836,20 @@ def test_background_job_reports_output_and_exit_code():
     assert "你好 job" in status["output"]
 
 
+def test_exit_in_a_job_command_still_records_its_code():
+    from winhand import jobs
+
+    started = jobs.start("Write-Output 'before exit'; exit 4", name="winhand-exit-test")
+    for _ in range(80):
+        status = jobs.status(started["id"])
+        if status["state"] != "running":
+            break
+        time.sleep(0.25)
+    # `exit` used to end the wrapper script too: no exit.json, and the job showed as vanished
+    assert status["state"] == "finished" and status["exit_code"] == 4, status
+    assert "before exit" in status["output"]
+
+
 # ------------------------------------------------------------------ program approval
 
 

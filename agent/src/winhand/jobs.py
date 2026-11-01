@@ -102,9 +102,13 @@ EPILOGUE = "if ($__wh_watch) { Stop-Process -Id $__wh_watch.Id -Force -ErrorActi
 
 
 def _script(command: str, directory: Path, cwd: str | None, prologue: str = "") -> Path:
-    """The job body: run the command, capture every stream as UTF-8, record the exit code."""
+    """The job body: run the command, capture every stream as UTF-8, record the exit code. The
+    command is a script of its own, so an `exit N` in it ends only the command: the code is still
+    recorded (inline, `exit` ended the wrapper too and the job showed as vanished)."""
     log = directory / "output.log"
     exit_file = directory / "exit.json"
+    user = directory / "command.ps1"
+    user.write_text(command + "\n", encoding="utf-8-sig")  # PowerShell 5.1 needs the BOM for non-ASCII
     location = f"Set-Location -LiteralPath '{cwd.replace(chr(39), chr(39) * 2)}'\n" if cwd else ""
     body = f"""$ErrorActionPreference = 'Continue'
 $__wh = New-Object System.Text.UTF8Encoding $false  # no BOM: see winenv._PWSH_UTF8
@@ -115,9 +119,7 @@ Remove-Variable __wh
 {prologue}{location}$started = Get-Date
 $ok = $true
 try {{
-    & {{
-{command}
-    }} *>&1 | ForEach-Object {{ "$_" }} | Out-File -LiteralPath '{log}' -Encoding utf8 -Append
+    & {_quote(str(user))} *>&1 | ForEach-Object {{ "$_" }} | Out-File -LiteralPath '{log}' -Encoding utf8 -Append
     $code = $LASTEXITCODE
     if ($null -eq $code) {{ $code = if ($?) {{ 0 }} else {{ 1 }} }}
 }} catch {{

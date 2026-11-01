@@ -1554,10 +1554,9 @@ def register(mcp: FastMCP) -> None:
             float,
             Field(
                 ge=0,
-                description="Wait up to this long for the job to finish or a pattern to appear: up to "
-                "1800 s when your client shows progress (Claude Code: past 2 min the call goes to the "
-                "background and you are told when it ends), else 40 s; 0 answers at once. One long "
-                "wait instead of sleeping or polling",
+                description="Wait up to this long for the job to finish or a pattern to appear: 40 s per "
+                "call (up to 1800 s for a client on this machine that shows progress); 0 answers at once. "
+                "Call again with since=cursor instead of sleeping or polling",
             ),
         ] = 0,
         patterns: Annotated[

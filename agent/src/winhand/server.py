@@ -75,10 +75,11 @@ Quick rules
   Never put `powershell -Command "..."` inside a command line: the outer PowerShell expands its
   $variables first. Use script= or args= instead. Output comes back as clean UTF-8 text.
   `run` answers within ~40 s; a command still going then comes back with `still_running` and an id:
-  it keeps running; job_status(id, since=cursor, wait_s=1800) waits for the rest and the exit code
-  in one call. A client that shows progress (Claude Code) can wait up to 1800 s per call: past two
-  minutes the call moves to the background and you are told when it ends. Other clients: 40 s per
-  call. Never sleep or poll in a loop to wait: job_status(wait_s=..., patterns=[...]) does it.
+  it keeps running; job_status(id, since=cursor, wait_s=40) waits for the rest and the exit code;
+  call it again with the new cursor until the job ends. Through the relay (claude.ai connectors)
+  every call stops at 40 s: a connector ends a call at 60 s. A client on this machine (stdio) that
+  shows progress may wait up to 1800 s per call. Never sleep or poll in a loop to wait:
+  job_status(wait_s=..., patterns=[...]) does it.
 - Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
   config and says whether a failure was the connection, host key, key or the script. Prefer it to
   run('ssh', ...): the script goes in on stdin with LF line ends, nothing to quote; secrets=[...]
@@ -183,7 +184,7 @@ Quick rules
   never asked about.
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
-  follow it with job_status(id, wait_s=1800). With args it starts the program directly and stdin= gives
+  follow it with job_status(id, wait_s=40). With args it starts the program directly and stdin= gives
   it text as UTF-8, never through a PowerShell pipe (Codex: command='codex', args=['exec', '-'],
   stdin=brief); job_status shows its stdout and stderr while it runs. job_status(id=[a, b])
   waits on several jobs, or `run` ids, at once: it answers when the first finishes or matches.
@@ -216,7 +217,7 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
                                               | wsl) written to a file: $vars, quotes, Chinese arrive as is
     run(command='...')                        one command line for PowerShell
   Never nest `powershell -Command "..."` in a command line; use script= or args=. `run` answers within
-  ~40 s; if still going you get `still_running` + an id: job_status(id, since=cursor, wait_s=1800)
+  ~40 s; if still going you get `still_running` + an id: job_status(id, since=cursor, wait_s=40)
   waits for the rest in one call (Claude Code backgrounds it after 2 min and tells you when it ends;
   other clients: 40 s per call). Never sleep or poll in a loop.
 - Another machine over SSH -> remote_run(host, script): this machine's ssh config and keys, script on
@@ -237,7 +238,7 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   program waits for the person's OK there (window list: `approval`); terminals: use run or a session.
 - job_start runs in the background, independent of winhand (long work, winhand restarts, elevated=true
   for admin); args= runs a program directly, stdin= feeds it text (Codex: command='codex',
-  args=['exec', '-'], stdin=brief). job_status(id, wait_s=1800) follows one or several.
+  args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
 - Odd behaviour (garbled text, a failing shim)? sys_info(checks=true). A tool missing from your list:
   call(tool, arguments) reaches it.
 - Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
@@ -668,7 +669,7 @@ def build_server(
     ) -> dict:
         """Run a command or script to completion and return exit code, stdout and stderr. Answers
         within about 40 s: if it is still going then, the answer has `still_running` and an id, it
-        keeps running, and job_status(id, wait_s=1800) waits for the rest.
+        keeps running, and job_status(id, wait_s=40) waits for the rest.
         Use a session instead for anything interactive or that must keep running."""
         result = await asyncio.to_thread(
             lambda: proc.run(
@@ -967,8 +968,8 @@ def build_server(
         timeout_s: Annotated[
             float,
             Field(
-                description="Max wait for this call: up to 1800 s when your client shows progress "
-                "(Claude Code), else 40 s; call again to keep waiting"
+                description="Max wait for this call: 40 s (up to 1800 s for a client on this machine "
+                "that shows progress); call again to keep waiting"
             ),
         ] = 30,
         include_screen: bool = False,

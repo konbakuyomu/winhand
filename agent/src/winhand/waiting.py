@@ -10,6 +10,11 @@ every HEARTBEAT_S. A client that did not ask keeps the 40 s that fits inside a p
 
 The beat is per caller: identical waits share one task (coalesce), but each caller needs its own
 notifications, or the ones sharing a task would get no first byte and time out.
+
+Calls that come through the relay keep the 40 s: tried live on 2026-11-01, a cloud Claude Code
+session reaching winhand through its claude.ai connector cut a call off at 60 s although it had
+asked for progress and the notifications went out. Only clients on this machine (stdio, or HTTP not
+through the relay) get the long wait.
 """
 
 from __future__ import annotations
@@ -39,19 +44,35 @@ def takes_progress(ctx: Any) -> bool:
     return False
 
 
+def relayed() -> bool:
+    """Did this call come through the relay (which marks every request it forwards)?"""
+    from fastmcp.server.dependencies import get_http_headers
+
+    with contextlib.suppress(Exception):
+        return "x-winhand-user" in {k.lower() for k in get_http_headers()}
+    return False
+
+
+def long_waits(ctx: Any) -> bool:
+    """A long wait for this caller: it takes progress and is on this machine, not behind the relay."""
+    return takes_progress(ctx) and not relayed()
+
+
 def limit(ctx: Any, wanted: float) -> float:
-    """The wait this caller gets: up to LONG_WAIT_S with progress, SHORT_WAIT_S without."""
-    ceiling = LONG_WAIT_S if takes_progress(ctx) else SHORT_WAIT_S
+    """The wait this caller gets: up to LONG_WAIT_S for long_waits, else SHORT_WAIT_S."""
+    ceiling = LONG_WAIT_S if long_waits(ctx) else SHORT_WAIT_S
     return max(0.0, min(float(wanted), ceiling))
 
 
 def capped_note(ctx: Any, wanted: float) -> str | None:
     """Say so when a long wait was asked for and this client cannot have it."""
-    if wanted > SHORT_WAIT_S and not takes_progress(ctx):
-        return (
-            f"waits stop at {int(SHORT_WAIT_S)} s for this client (it does not take progress "
-            "notifications): call again to keep waiting"
+    if wanted > SHORT_WAIT_S and not long_waits(ctx):
+        why = (
+            "it reaches winhand through the relay, and connectors end a call at 60 s"
+            if takes_progress(ctx)
+            else "it does not take progress notifications"
         )
+        return f"waits stop at {int(SHORT_WAIT_S)} s for this client ({why}): call again with since=cursor to keep waiting"
     return None
 
 

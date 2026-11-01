@@ -450,3 +450,47 @@ async def test_deleting_a_whole_folder_is_judged_like_remove_item_recurse(tmp_pa
         )
     assert whole.is_error and "no batch deletes" in whole.content[0].text and (folder / "a.o").exists()
     assert not single.is_error and not (tmp_path / "one.txt").exists()
+
+
+# ------------------------------------------------------------------ 0.10.1: what the live test found
+
+
+def test_calls_through_the_relay_keep_the_40_s_wait(monkeypatch):
+    from winhand import waiting
+
+    class Meta:
+        progressToken = 7
+
+    class RequestContext:
+        meta = Meta()
+
+    class Ctx:
+        request_context = RequestContext()
+
+    ctx = Ctx()
+    assert waiting.takes_progress(ctx)
+    monkeypatch.setattr(waiting, "relayed", lambda: False)
+    assert waiting.limit(ctx, 600) == 600 and waiting.capped_note(ctx, 600) is None  # on this machine
+    monkeypatch.setattr(waiting, "relayed", lambda: True)
+    assert waiting.limit(ctx, 600) == waiting.SHORT_WAIT_S  # a connector ends a call at 60 s
+    assert "relay" in waiting.capped_note(ctx, 600)
+
+
+def test_relayed_reads_the_header_the_relay_adds(monkeypatch):
+    from fastmcp.server import dependencies
+
+    from winhand import waiting
+
+    monkeypatch.setattr(dependencies, "get_http_headers", lambda **kw: {"x-winhand-user": "owner"})
+    assert waiting.relayed()
+    monkeypatch.setattr(dependencies, "get_http_headers", lambda **kw: {})
+    assert not waiting.relayed()
+
+
+def test_a_job_command_runs_as_its_own_script(tmp_path):
+    from winhand import jobs
+
+    script = jobs._script("Write-Output hi\nexit 4", tmp_path, None)
+    assert (tmp_path / "command.ps1").read_text(encoding="utf-8-sig") == "Write-Output hi\nexit 4\n"
+    body = script.read_text(encoding="utf-8-sig")
+    assert f"& '{tmp_path / 'command.ps1'}'" in body and "exit 4" not in body
