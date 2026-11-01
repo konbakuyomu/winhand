@@ -275,6 +275,7 @@ def clock(monkeypatch):
     now = [1000.0]
     fake = types.SimpleNamespace(monotonic=lambda: now[0], sleep=lambda s: now.__setitem__(0, now[0] + s))
     monkeypatch.setattr(presence, "time", fake)
+    monkeypatch.setattr(presence, "_wall", lambda: now[0])
     monkeypatch.setattr(presence, "_tick", lambda: int(now[0] * 1000) & 0xFFFFFFFF)
     monkeypatch.setattr(presence, "_ours", None)
     monkeypatch.setattr(presence, "_dialogs", [])
@@ -494,3 +495,22 @@ def test_a_job_command_runs_as_its_own_script(tmp_path):
     assert (tmp_path / "command.ps1").read_text(encoding="utf-8-sig") == "Write-Output hi\nexit 4\n"
     body = script.read_text(encoding="utf-8-sig")
     assert f"& '{tmp_path / 'command.ps1'}'" in body and "exit 4" not in body
+
+
+def test_a_stop_pressed_in_another_winhand_process_stops_this_one(monkeypatch, clock, winhand_home):
+    # live test 2026-11-01: the keys belong to one process; the press is shared through a file
+    winhand_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(presence, "_last_input_tick", lambda: None)
+    stop_file = winhand_home / "desktop-stopped"
+    stop_file.write_text(f"{clock[0] - 10:.3f}\n", encoding="utf-8")  # pressed 10 s ago, elsewhere
+    assert presence.stopped_left() == pytest.approx(presence.STOP_S - 10, abs=0.5)
+    with pytest.raises(desktop.OwnerStopped):
+        presence.before("ui invoke")
+    stop_file.write_text(f"{clock[0] - presence.STOP_S - 5:.3f}\n", encoding="utf-8")  # long over
+    assert presence.stopped_left() == 0 and presence.before("ui invoke") == {}
+    stop_file.write_text(f"{clock[0] + 3600:.3f}\n", encoding="utf-8")  # the clock was set back an hour
+    assert presence.stopped_left() == presence.STOP_S
+    presence.stop_pressed()  # pressed here: written for the others
+    assert float(stop_file.read_text(encoding="utf-8")) == pytest.approx(clock[0])
+    presence.resume()
+    assert presence.stopped_left() == 0

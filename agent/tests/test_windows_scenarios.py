@@ -1080,3 +1080,11 @@ def test_the_frame_shows_while_acting_and_stays_out_of_screenshots():
         assert not orange, f"the frame shows in a screenshot ({len(orange)} orange pixels)"
     finally:
         presence._post(presence._WM_HIDE)
+
+
+def test_the_stop_keys_are_ready_as_soon_as_winhand_starts():
+    from winhand import presence
+
+    build_server(Config())  # no desktop action yet
+    desk = presence._thread
+    assert desk is not None and desk.ready.is_set() and desk.tid, presence.status()

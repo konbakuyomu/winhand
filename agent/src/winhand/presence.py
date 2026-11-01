@@ -8,7 +8,10 @@ the middle of whatever the person at the machine is doing. Now:
   that the person is using the machine. Input winhand sent itself does not count, nor does the
   person answering one of winhand's own dialogs (an approval, a secret, a file picker).
 - Ctrl+Alt+Shift+Backspace stops the AI's desktop actions: they are refused for STOP_S after it,
-  and the answer says the person stopped them.
+  and the answer says the person stopped them. The keys are registered when winhand starts (live test
+  2026-11-01: registered only at the first desktop action, a press right after an update was missed),
+  and the press is kept in ~/.winhand/desktop-stopped so every winhand process on the machine stops,
+  not only the one holding the keys.
 - While an AI operates the desktop a thin frame lines the screens, and goes BORDER_LINGER_S after the
   last action. Screenshots do not show it (it is excluded from capture); without that exclusion
   (Windows before 10 2004) there is no frame at all.
@@ -26,6 +29,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from time import time as _wall  # the stop file holds wall time: other processes read it
 
 IDLE_S = 5.0  # the owner counts as using the machine for this long after their last input
 WAIT_S = 10.0  # a desktop action waits at most this long for them (an approval may still take ~40 s)
@@ -143,23 +147,38 @@ def owner_input_ago(idle_s: float = IDLE_S) -> float | None:
 # ------------------------------------------------------------------ stop keys
 
 
+def _stop_file():
+    from . import config
+
+    return config.home() / "desktop-stopped"
+
+
 def stop_pressed() -> None:
     global _stopped
     _stopped = time.monotonic()
+    with contextlib.suppress(OSError):  # other winhand processes on this machine stop too
+        _stop_file().write_text(f"{_wall():.3f}\n", encoding="utf-8")
     _post(_WM_HIDE)
 
 
 def stopped_left() -> float:
-    """Seconds the stop keys still hold the AI off (0: not stopped)."""
-    if _stopped is None:
-        return 0.0
-    return max(0.0, STOP_S - (time.monotonic() - _stopped))
+    """Seconds the stop keys still hold the AI off (0: not stopped): pressed here, or in another
+    winhand process on this machine (the stop file)."""
+    left = 0.0
+    if _stopped is not None:
+        left = STOP_S - (time.monotonic() - _stopped)
+    with contextlib.suppress(OSError, ValueError):
+        pressed = float(_stop_file().read_text(encoding="utf-8").strip() or 0)
+        left = max(left, STOP_S - max(0.0, _wall() - pressed))  # a clock set back: still only STOP_S
+    return max(0.0, min(left, STOP_S))
 
 
 def resume() -> None:
     """Let desktop actions go on before STOP_S is over (the desktop app, tests)."""
     global _stopped
     _stopped = None
+    with contextlib.suppress(OSError):
+        _stop_file().write_text("0\n", encoding="utf-8")
 
 
 # ------------------------------------------------------------------ before an action
@@ -223,6 +242,7 @@ def acting(what: str) -> Iterator[dict]:
 _WM_APP = 0x8000
 _WM_SHOW = _WM_APP + 1
 _WM_HIDE = _WM_APP + 2
+_WM_REGISTER = _WM_APP + 3
 _WM_HOTKEY = 0x0312
 _thread: _Desk | None = None
 _started = threading.Lock()
@@ -242,7 +262,11 @@ def _show_border() -> None:
     if not (conf["border"] or conf["stop_keys"]):
         return
     desk = start()
-    if desk is not None and conf["border"]:
+    if desk is None:
+        return
+    if conf["stop_keys"] and not desk.hotkey:
+        _post(_WM_REGISTER)  # another process held the keys at start; it may have let go
+    if conf["border"]:
         _post(_WM_SHOW)
 
 
@@ -296,9 +320,7 @@ class _Desk(threading.Thread):
 
             desktop._dpi_aware()
             self.tid = kernel32.GetCurrentThreadId()
-            if settings()["stop_keys"]:
-                mods = 0x0002 | 0x0001 | 0x0004 | 0x4000  # CONTROL | ALT | SHIFT | NOREPEAT
-                self.hotkey = bool(user32.RegisterHotKey(None, 1, mods, 0x08))  # VK_BACK
+            self._register()
         except Exception as exc:  # noqa: BLE001 - never take winhand down for this
             self.problem = f"{type(exc).__name__}: {exc}"
         finally:
@@ -312,12 +334,22 @@ class _Desk(threading.Thread):
                     self._show()
                 elif msg.message == _WM_HIDE:
                     self._hide()
+                elif msg.message == _WM_REGISTER:
+                    self._register()
                 else:
                     user32.TranslateMessage(ctypes.byref(msg))
                     user32.DispatchMessageW(ctypes.byref(msg))
             except Exception as exc:  # noqa: BLE001
                 self.problem = f"{type(exc).__name__}: {exc}"
                 self.border_ok = False
+
+    def _register(self) -> None:
+        """The stop keys, on this thread (a hotkey belongs to the thread that registers it). Only one
+        process can hold them: the others still stop through the stop file."""
+        if self.hotkey or not settings()["stop_keys"]:
+            return
+        mods = 0x0002 | 0x0001 | 0x0004 | 0x4000  # CONTROL | ALT | SHIFT | NOREPEAT
+        self.hotkey = bool(self.user32.RegisterHotKey(None, 1, mods, 0x08))  # VK_BACK
 
     # -- the frame: four thin strips per monitor
 

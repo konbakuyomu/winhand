@@ -410,6 +410,11 @@ def build_server(
     cfg = cfg if cfg is not None else load_config()
     with contextlib.suppress(Exception):  # programs started here find winhand's scratch folder
         os.environ[config.SCRATCH_ENV] = str(config.scratch_dir(cfg.raw))
+    with contextlib.suppress(Exception):  # the stop keys work from the start, not after the first action
+        from . import presence
+
+        if presence.settings()["stop_keys"]:
+            presence.start()
     sessions = manager or SessionManager()
     mcp = FastMCP("winhand", instructions=instructions(cfg, local_stdio), version=__version__)
     _live[mcp] = (cfg, local_stdio)
