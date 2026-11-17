@@ -54,6 +54,15 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
   - 超过预算的文件给 `#` 标题目录（最多 60 条）加文件的最后一段；`truncated` 写明给了哪几行，剩下的用哪条 `fs_read` 读。以前截掉的是后面，正好是主人最新追加的授权。取舍见 `.agents/notes/implemented/feature/2026-11-17-context-per-file-delta.md`。
   - 会读写电脑的调用，执行前先被描述成一个动作（`command`、`input`、`write`、`edit`、`delete`、`move`、`read`、`mcp`），按 `~/.winhand/guards.toml`（以及项目目录里的 .winhand/guards.toml）裁决：拒绝、问人或附注。
   - `fs_op` 整个删文件夹时，同时按命令判断，看成 `Remove-Item -Recurse`，所以写给命令的“禁止批量删除”规则也管得到它。
+  - 认命令时，引号里的搜索模式不算数：`Select-String -Pattern '…'`，以及 `rg`、`grep`、`findstr` 的模式参数和 `-e` 后面的引号内容，判断前换成 `x`。这样 `-Pattern '…|rm'` 这类搜索不会被当成删除命令。以下照旧看：
+    - 双引号里带 `$(` 或反引号的，因为会执行；
+    - `rg --pre` 之后的参数，因为 `rg` 会对每个文件跑那个程序。
+
+    这只减少误伤，规则本身一条不改。
+  - 内置第 7 条规则（`winhand (built in)`）：登录信息不交给模型，读、写、改、删、移都拒。
+    - 覆盖：colab-cli 的 token.json 和 sessions.json、gcloud 配置目录、application_default_credentials.json、.git-credentials、.netrc、.docker/config.json、gh 的 hosts.yml、~/.ssh 下的 id_rsa、id_ed25519、id_ecdsa、Chrome、Edge、Firefox 的用户资料目录、1Password 的本地目录。
+    - 规矩文件里 `@` 引用或链接到这些文件，主人批准了外部引用也不读。
+  - 拒绝的第一行写明是哪个文件的第几条规则，以及原因的前 60 字，调用日志里看得到出处。
   - 本机 Codex、Claude Code 的 hooks，经 WinHand 的调用也照样运行。
 - **密钥与脱敏。**
   - 密钥存在电脑上：`secret_prompt` 让人在掩码框里输入，程序用 `run(secrets=[名字])` 拿到值，AI 只知道名字。
