@@ -1,7 +1,7 @@
 ---
 kind: epic
 title: "简单部署与多台电脑"
-status: active
+status: closed
 created: 2026-11-18
 ---
 
@@ -108,11 +108,11 @@ created: 2026-11-18
 
 **Issues：**（均在本目录 `issues/`；编号只在本 Epic 内有效）
 
-- [ ] `issues/001-o-收进自托管中转.md`：电脑主检出里 11-13 起没提交的自托管中转和 CIMD 诊断，去掉个人部署细节后收进仓库。其余几张都要改同一批文件，先做。
-- [ ] `issues/002-o-中转支持多台电脑.md`：`/pc/<名称>/` 地址、每台的令牌和 Bridge、按电脑的 OAuth 资源、旧地址兼容。依赖 001。
-- [ ] `issues/003-o-配对和首页.md`：首页重做、生成安装命令、换取令牌、移除电脑。依赖 002。
-- [ ] `issues/004-o-一行安装.md`：安装脚本、`winhand login`、在 GitHub 的 Windows 机器上跑通。依赖 003。
-- [ ] `issues/005-o-一键部署.md`：Deploy 按钮、CIMD 默认关、文档；自己的服务器一条命令。依赖 002。
+- [x] `issues/001-x-收进自托管中转.md`：电脑主检出里 11-13 起没提交的自托管中转和 CIMD 诊断，去掉个人部署细节后收进仓库。其余几张都要改同一批文件，先做。
+- [x] `issues/002-x-中转支持多台电脑.md`：`/pc/<名称>/` 地址、每台的令牌和 Bridge、按电脑的 OAuth 资源、旧地址兼容。依赖 001。
+- [x] `issues/003-x-配对和首页.md`：首页重做、生成安装命令、换取令牌、移除电脑。依赖 002。
+- [x] `issues/004-x-一行安装.md`：安装脚本、`winhand login`、在 GitHub 的 Windows 机器上跑通。依赖 003。
+- [x] `issues/005-x-一键部署.md`：Deploy 按钮、CIMD 默认关、文档；自己的服务器一条命令。依赖 002。
 
 **穿刺顺序**（按不确定 × 失败代价）：
 1. 授权服务器按电脑清单动态构造，多个资源同时能授权、能调用，旧资源的登录不失效（002）；
@@ -134,3 +134,36 @@ created: 2026-11-18
 - `.agents/notes/implemented/architecture/2026-11-17-stay-on-winhand-not-pi-bridge.md`：为什么不迁到 pi-bridge，以及借鉴的部分。
 - `codestable/notes/001-发版与部署.md`：发版和部署中转的步骤，这条线做完要更新。
 - `docs/relay.md`：中转的安全设计，这条线要改写地址部分。
+
+## 关闭记录（2026-11-18）
+
+主人 11-18 确认以下两步已经做完，并说「3 暂时不做，继续」，按现状关闭：
+- 在 claude.ai 加了 `/pc/default/mcp` 连接器；
+- 电脑更新到 0.12.0。
+
+**关闭条件逐项：**
+
+| 条件 | 结果 |
+| --- | --- |
+| 两台电脑互不通用；旧连接器在迁移期间可用 | 测试里两台电脑互不通用，已验证（真实 workerd、真 Cloudflare）。生产上旧连接器和新的 `/pc/default/mcp` 都能调到这台电脑；首页 2 个登录，电脑是 0.12.0 |
+| 新部署从按钮到 claude.ai 能用，主人走一遍 | 未做：主人暂不做。同一份配置的 Cloudflare 测试 Worker 已用真实 agent 跑通 |
+| 安装命令在干净的 Windows 上一次跑通 | CI 的 windows-latest 上通过：签名安装包、Windows PowerShell 5.1 |
+| LAX 换上新中转，删掉 `AGENT_TOKEN` 仍正常 | 换上了，且旧地址保留。删掉 `AGENT_TOKEN` 要等这台电脑以正式名字重新配对、各会话换到新连接器，主人尚未决定；测试里去掉 `AGENT_TOKEN` 的情形已验证 |
+
+**合并进 Project Spec 的章节：**
+- `codestable/spec/index.md`：
+  - 「这个项目是什么」里经中转的客户端；
+  - 「三个部分怎样连起来」的图和中转一节；
+  - 统一语言：一次性链接、电脑名称、配对、设备令牌、旧地址 / default；
+  - 边界与考量：各台电脑互不牵连、CIMD 默认关、首页公开；
+  - 想深入时。
+- `codestable/spec/files.md`：一次性链接的地址。
+- `codestable/spec/waiting.md`：等待链接的地址、电脑不在线时的 `status.json`。
+
+**Vision**：`codestable/vision/index.md` 还是骨架，没有相关条目，未改。
+
+**遗留（未建新票，主人要时再建）：**
+- 在浏览器里点一次 Deploy 按钮，验证 CIMD 关掉时 claude.ai 是否改走动态注册。
+- 在第二台真机上跑一行安装。
+- 迁移的最后一步：这台电脑以正式名字重新配对，各会话换到新连接器，再删掉 `AGENT_TOKEN`。要注意，这台电脑经 SSH 隧道连 LAX，靠「WinHand LAX」快捷方式启动；一行安装脚本会直接启动托盘，也会写开机自启，两者要先理顺。
+- 原自托管票里的生产定期备份、隧道看门狗。
