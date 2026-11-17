@@ -103,6 +103,27 @@ async def test_reconnects_after_drop_and_serves_requests():
     assert relay.hellos[0]["type"] == "hello"
 
 
+async def test_a_restarted_tunnel_still_answers_whole_sse_responses():
+    """sse_starlette latches AppStatus.should_exit once it sees a uvicorn server stop (an earlier
+    tunnel's local server); the next tunnel in the same process must still answer in full."""
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.should_exit = True  # as an earlier local server's shutdown leaves it
+    relay = FakeRelay(["rpc"])
+    server, url = await _start(relay)
+    stop = asyncio.Event()
+    agent = asyncio.create_task(run_forever(url, "tok", mcp=build_server(Config()), stop=stop))
+    for _ in range(200):
+        if getattr(relay, "rpc_frames", None):
+            break
+        await asyncio.sleep(0.05)
+    stop.set()
+    await asyncio.wait_for(agent, 10)
+    server.close()
+    assert relay.rpc_frames[-1]["type"] == "end", relay.rpc_frames
+    assert AppStatus.should_exit is False  # stopping this tunnel's server did not latch it again
+
+
 async def test_exits_when_replaced_by_another_agent():
     relay = FakeRelay(["replace"])
     server, url = await _start(relay)

@@ -391,7 +391,20 @@ async def _finish_local_server(server: uvicorn.Server) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+def _sse_survives_restarts() -> None:
+    """sse_starlette ends every SSE answer in the process at once, for good, after it has seen one
+    uvicorn server shut down (AppStatus.should_exit latches). A tunnel restart (reconnect, a new
+    relay address) stops one local server and starts the next in this process, so no MCP call
+    through the relay would complete afterwards. Our shutdown closes connections and cancels
+    requests itself (_finish_local_server), so the automatic drain is not needed."""
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.disable_automatic_graceful_drain()
+    AppStatus.should_exit = False
+
+
 async def serve_local(app, port: int) -> tuple[uvicorn.Server, asyncio.Task]:
+    _sse_survives_restarts()
     config = uvicorn.Config(
         app, host="127.0.0.1", port=port, log_level="warning", lifespan="on", timeout_graceful_shutdown=5
     )
