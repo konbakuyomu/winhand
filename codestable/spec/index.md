@@ -1,7 +1,7 @@
 # WinHand
 
 > **读者：** 第一次接手 WinHand 的开发者：它现在是什么、一次典型使用怎样发生、各块能力在哪、边界在哪。
-> 参数和用法的完整说明在 `README.md`，给 AI 的完整指南是 `help()`。这里写的是“为什么这样、改的时候要守住什么”。目标全景在 `vision/`（还是骨架）。
+> 部署和接入在 `README.md`，参数和用法的完整说明在 `docs/guide.md` 等几篇，给 AI 的完整指南是 `help()`。这里写的是“为什么这样、改的时候要守住什么”。目标全景在 `vision/`（还是骨架）。
 
 ---
 
@@ -31,12 +31,12 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
 | 想做的事 | 用什么 | 深入读 |
 |---|---|---|
 | 跑命令、等长任务、知道任务卡没卡住 | `run`、`job_start`、`job_status` | [waiting.md](waiting.md) |
-| 驱动交互程序：gdb、串口、REPL、menuconfig、要登录的安装程序 | 会话 `session_*`、profile | README「为什么要自己写」「Profile」 |
+| 驱动交互程序：gdb、串口、REPL、menuconfig、要登录的安装程序 | 会话 `session_*`、profile | `docs/guide.md`「会话：驱动交互程序」「Profile」 |
 | 读写文件，在沙箱和电脑之间传文件，操作别的服务器 | `fs_*`、一次性链接、`remote_run`、`remote_copy` | [files.md](files.md) |
 | 操作桌面程序 | `ui`、`ocr`、`input`、`screenshot`、`window` | [desktop.md](desktop.md) |
-| 拿到主人写的规矩和技能，动作前按规则裁决 | `context`、`skill`、守卫、本机 hooks | README「本机规则与守卫」 |
-| 用密钥但看不到它，结果里不泄露秘密 | `secrets=[…]`、`secret_prompt`、脱敏 | README「工具一览」的秘密一行、「输出脱敏」 |
-| 用电脑上已有的其他 MCP 服务 | `mcp_tools`、`mcp_call`、`/mcp/<名称>` | README「本机的其他 MCP 服务」 |
+| 拿到主人写的规矩和技能，动作前按规则裁决 | `context`、`skill`、守卫、本机 hooks | `docs/rules-and-guards.md` |
+| 用密钥但看不到它，结果里不泄露秘密 | `secrets=[…]`、`secret_prompt`、脱敏 | `docs/guide.md`「工具一览」的秘密一行、「输出脱敏」 |
+| 用电脑上已有的其他 MCP 服务 | `mcp_tools`、`mcp_call`、`/mcp/<名称>` | `docs/local-mcp.md` |
 
 上面三块有单独的页，其余几块在这里说清要点：
 
@@ -100,7 +100,7 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
 ## 边界与考量
 
 - **不改现有参数的含义。** 新能力用新参数或新取值打开，旧客户端的行为不变。例如等待上限的默认值没有提高，只对能长等的客户端放开。
-- **开场说明不超过 4096 字符。** Claude Code 只保留 MCP instructions 的前 4096 个字符，所以开场只放要点，包括已存密钥的名字；完整指南在 `help()`。新功能写进 `help()`、工具说明和 README，不往开场说明里塞。
+- **开场说明不超过 4096 字符。** Claude Code 只保留 MCP instructions 的前 4096 个字符，所以开场只放要点，包括已存密钥的名字；完整指南在 `help()`。新功能写进 `help()`、工具说明和 `docs/` 下的文档，不往开场说明里塞；README 只放部署和接入。
 - **开场就加载的工具按用量定。** 标 anthropic/alwaysLoad 的 12 个：`context`、`run`、`job_start`、`job_status`、`job_stop`、`history`、`fs_read`、`fs_write`、`fs_edit`、`fs_search`、`fs_find`、`fs_list`。其余的按需用 ToolSearch 取。2026-11-17 按 11-02 至 11-17 的用量调过：`remote_run` 13 天 0 次，拿掉；`job_stop` 215 次、`history` 67 次，加上。
 - **单个结果约 4 万字节。** 按 UTF-8 字节算，一个中文字算 3 字节，接近它的 token 成本。读文件、搜索、命令输出到上限就停，并说明从哪里接着读。
 - **中转只转发，不解析 MCP。** 好处是 MCP 协议升级不用改中转；代价是电脑离线时，中转不能替它回答 tools/list 请求。
