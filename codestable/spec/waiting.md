@@ -32,6 +32,32 @@ AI 不该守着一个命令一轮轮地问，也不该自己睡一会儿再看�
 
 **几个调用方同时等。** 参数相同的并发等待共用一次等待，但每个调用方各收各的进度心跳。否则共用等待的那几个拿不到首字节，到 60 秒就会超时。
 
+## 叫醒：等的时候不花回合
+
+经中转的调用每次最多等 40 秒，所以云端会话以前要么每 40 秒问一次，要么用 `send_later` 定闹钟回来看。醒一次要把几十万 token 的上下文重读一遍，闹钟还常晚到：调用日志里，任务结束到会话看到，p90 的上界是 15.7 分钟。现在任务一结束就能叫醒会话：
+
+- **哪里给。** 只给经中转的调用，本机客户端能长等，不给。
+  - `job_start` 的回复、`run` 回 `still_running` 时，带 `wake` 和 `wake_note`。
+  - `job_status(wake=true)` 也给，条件按参数定：
+    - 带 id：这个任务结束。这次给了 `patterns` 的，带上它和这次的游标，新输出匹配也算；一组 id 取第一个。
+    - 只给 `files`：第一个文件出现或有改动。
+    - 什么都不带：电脑在线。
+- **怎么用。** `wake` 是一行 bash。会话把它放进沙箱后台运行：Claude Code 的 Bash `run_in_background`，最长 2 小时。
+  - 条件满足时命令结束，沙箱叫醒会话，带回最后一行结果；等的时候一个回合也不花。
+  - 2 小时到了还没满足，就再跑一次。
+- **底下是等待链接 `/t/<令牌>`。** `wake` 一遍遍 GET 它：
+  - 电脑每次最多挂 50 秒（`WAIT_HOLD_S`），每秒查一次条件。满足了回 `{"done":true,"state":…,"exit_code":…,"matched":…}`，没满足回 `{"done":false,…}`，命令接着问。
+  - 电脑不在线时，命令隔几秒再问，电脑回来就接上。
+  - 满足以后再问，照样回 `done:true`。
+- **链接的规矩。** 它和一次性文件链接一样，靠令牌本身授权：
+  - 令牌 256 位，电脑上只存哈希；
+  - 只回状态，从不回输出；
+  - 默认 12 小时有效。过期一天之内回 410，再往后和不认识的一样回 404；
+  - 存在 `~/.winhand/wait-links.json`，winhand 重启、更新后照样认得；
+  - 中转一行不改：`/t/` 本来就把 GET 转给电脑，响应头最多等 120 秒。
+
+取舍见 `.agents/notes/implemented/feature/2026-11-17-wake-through-wait-links.md`。
+
 ## 等待什么时候提前回来
 
 除了任务结束和 `patterns` 匹配，下面几种情况也会提前返回，`matched` 写明是哪一种：
@@ -102,17 +128,20 @@ AI 不该守着一个命令一轮轮地问，也不该自己睡一会儿再看�
 
 ## 证据
 
-- 取舍：`.agents/notes/implemented/feature/2026-11-01-relayed-calls-wait-40s.md`
+- 取舍：
+  - `.agents/notes/implemented/feature/2026-11-01-relayed-calls-wait-40s.md`
+  - `.agents/notes/implemented/feature/2026-11-17-wake-through-wait-links.md`
 - 实现和实测：
   - `codestable/epics/001-x-使用复盘四轮强化/issues/002-x-第2轮长任务不用守着.md`：「实测」「0.10.1 装上后复测」两节；
   - `codestable/epics/001-x-使用复盘四轮强化/issues/001-x-第1轮小修.md`：轮询只回新内容、编号跨重启；
   - `codestable/epics/001-x-使用复盘四轮强化/issues/006-x-ff-任务命令里的exit照常记下退出码.md`。
 - 代码落点：
   - `agent/src/winhand/waiting.py`：上限和心跳；
+  - `agent/src/winhand/transfer.py` 的 `issue_wait`、`endpoint`：等待链接；
   - `agent/src/winhand/jobs.py`：包装脚本；
   - `agent/src/winhand/jobwatch.py`：`activity`、卡住判断、弹窗；
   - `agent/src/winhand/proc.py`：`run`、完成命令的保留（`_forget_finished`）、`sys_info(load)`；
   - `agent/src/winhand/desktop_backend.py` 的 `upkeep()`：每分钟拉起常驻任务；
   - `agent/src/winhand/power.py`：防休眠；
   - `relay/src/bridge.ts`：离线报错、`x-winhand-user` 头。
-- 测试：`agent/tests/test_review2_jobs.py`、`agent/tests/test_review_round1.py`、`agent/tests/test_review_round2.py`、`agent/tests/test_review_round4.py`
+- 测试：`agent/tests/test_review2_wait.py`、`agent/tests/test_review2_jobs.py`、`agent/tests/test_review_round1.py`、`agent/tests/test_review_round2.py`、`agent/tests/test_review_round4.py`

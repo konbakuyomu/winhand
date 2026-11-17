@@ -101,7 +101,9 @@ async def test_tools_carry_read_only_idempotent_and_always_load_hints():
     for name in ("run", "fs_write", "window", "ocr", "clipboard", "mcp_tools"):
         assert not (tools[name].annotations and tools[name].annotations.read_only_hint), name
     assert (tools["run"].meta or {}).get("anthropic/alwaysLoad") is True
-    assert (tools["remote_run"].meta or {}).get("anthropic/alwaysLoad") is True
+    for name in ("job_stop", "history"):  # by use, 11-02 to 11-17: remote_run was never called
+        assert (tools[name].meta or {}).get("anthropic/alwaysLoad") is True, name
+    assert not (tools["remote_run"].meta or {}).get("anthropic/alwaysLoad")
     assert not (tools["ui"].meta or {}).get("anthropic/alwaysLoad")
 
 

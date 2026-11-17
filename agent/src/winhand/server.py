@@ -698,6 +698,9 @@ def build_server(
         if script is None and _ssh_program(command) and isinstance(result, dict):
             result["hint_ssh"] = SSH_HINT
         result["now"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        if result.get("still_running") and waiting.relayed():
+            result["wake"] = transfer.issue_wait({"job": result["id"]})["wake"]
+            result["wake_note"] = transfer.WAKE_NOTE
         return result
 
     @mcp.tool
