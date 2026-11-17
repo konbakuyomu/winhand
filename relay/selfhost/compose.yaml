@@ -11,8 +11,9 @@ services:
       PUBLIC_ORIGIN: https://${WINHAND_HOST:?set WINHAND_HOST to the relay's domain}
       WINHAND_STATE_DIR: /state
       OWNER_PASSPHRASE_FILE: /run/secrets/owner-passphrase
-      # A relay that still serves the computer of the single-computer days: put its device token in
-      # secrets/agent-token and add  AGENT_TOKEN_FILE: /run/secrets/agent-token
+      # Only a relay that still serves the computer of the single-computer days has secrets/agent-token;
+      # install.sh then sets AGENT_TOKEN_FILE=/run/secrets/agent-token in .env. Empty: no old addresses.
+      AGENT_TOKEN_FILE: ${AGENT_TOKEN_FILE:-}
       PROXY_TOKEN_FILE: /run/secrets/proxy-token
     volumes:
       - ./secrets:/run/secrets:ro

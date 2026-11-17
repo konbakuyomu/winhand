@@ -60,6 +60,8 @@ if [ ! -s secrets/owner-passphrase ]; then
 fi
 [ -s secrets/proxy-token ] || head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 43 > secrets/proxy-token
 printf 'WINHAND_HOST=%s\nPROXY_TOKEN=%s\nWINHAND_IMAGE=winhand-relay:local\n' "$HOST" "$(cat secrets/proxy-token)" > .env
+# A relay from the single-computer days keeps serving its computer at the old addresses.
+[ ! -s secrets/agent-token ] || printf 'AGENT_TOKEN_FILE=/run/secrets/agent-token\n' >> .env
 cp code/selfhost/compose.yaml code/selfhost/Caddyfile .
 
 # 3. Build and start (Caddy gets the certificate on the first request).
