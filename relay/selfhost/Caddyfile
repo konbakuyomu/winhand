@@ -1,0 +1,16 @@
+{
+    admin off
+}
+
+{$WINHAND_HOST} {
+    # No access log: OAuth codes, state and one-time file links must not enter logs.
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host {$WINHAND_HOST}
+        header_up -CF-Connecting-IP
+        header_up -X-Forwarded-For
+        header_up -Forwarded
+        header_up X-Winhand-Client-IP {remote_host}
+        header_up X-Winhand-Proxy-Token {$PROXY_TOKEN}
+        flush_interval -1
+    }
+}

@@ -1,5 +1,6 @@
 import {
   AuthorizationError,
+  CimdFetchError,
   type AuthRequest,
   type GrantSummary,
   type OAuthHelpers,
@@ -8,6 +9,7 @@ import {
 import { Bridge } from "./bridge";
 import { HOOK_PATH, hookRequest } from "./hook";
 import { consentPage, statusPage } from "./pages";
+import { diagnoseClaudeMetadata } from "./cimd-diagnostic";
 
 export { Bridge };
 
@@ -232,7 +234,19 @@ function protectedResourceMetadata(requestOrigin: string, env: Env): Response {
 const defaultHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/authorize") return authorize(request, env);
+    if (url.pathname === "/authorize") {
+      try {
+        return await authorize(request, env);
+      } catch (error) {
+        if (!(error instanceof CimdFetchError)) throw error;
+        // No credentials, state, request URL or upstream response body in diagnostics.
+        await diagnoseClaudeMetadata(error.metadataUrl);
+        return new Response("OAuth client metadata is temporarily unavailable. Please retry signing in later.", {
+          status: 503,
+          headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "retry-after": "60" },
+        });
+      }
+    }
     if (url.pathname === "/signout") return signOutAll(request, env);
     if (url.pathname === "/") return home(request, env);
     if (url.pathname === "/status.json") return statusJson(env);
