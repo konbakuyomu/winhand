@@ -25,6 +25,10 @@
   - 主人的 hooks 看到的是每个文件各自的修改。
   - 补丁用 `fs_apply_patch`，同样是所有 hunk 都对得上才写。
 - **对不上时给出线索。** 要替换的原文找不到时，回复给出最接近的原文、相似度和差异。新内容里出现文件原来没有的“反斜杠加双引号”时也提醒，那多半是多转义了一层。
+- **跟着文件原来的换行走。** 以前 CRLF 文件追加后变成混合换行，只差换行的编辑又给空差异，AI 只好写脚本重写整个文件（复盘第四节第 5 条）。现在：
+  - `fs_write(append=true)` 看文件末尾 64 KB：全是 CRLF，追加的内容也写成 CRLF；全是 LF 就写成 LF；本来就混合的不动。改了换行，回复里有 `newline`。
+  - `fs_edit` 先照原样找原文；找不到，再把两边都当 LF 找。找到后，原文那段是 CRLF 的，新内容也写成 CRLF，没动到的行保留各自的换行。
+  - 只差换行时，提示直接说只差换行，不给空差异。
 - **读文档给正文。** `fs_read` 读 PDF、Word、PowerPoint、Excel 时，把正文放进结构化结果。Claude Code 只把结构化部分交给模型，以前模型只看到页数这类概况，只好自己写脚本抽文字。
 - **一次读多个。** `fs_read(paths=[…])` 最多读 20 个文本或文档，字数上限平分；图片仍要一张张看。
 - **删除进回收站。** `fs_op` 删除默认进回收站。整个删文件夹时，守卫同时按 `Remove-Item -Recurse` 判断。
@@ -93,6 +97,7 @@ AI 要跨调用留着的文件，放 `~/.winhand/scratch`（`~/.winhand/config.t
   - `codestable/epics/001-x-使用复盘四轮强化/issues/003-x-第3轮文件和服务器.md`：「实测」一节；
   - `codestable/epics/001-x-使用复盘四轮强化/issues/001-x-第1轮小修.md`：读文档给正文。
 - 代码落点：
+  - `agent/src/winhand/fs.py`：文件工具，换行跟随（`fs_write` 的追加、`_apply_edit`、`_closest`）；
   - `agent/src/winhand/transfer.py`、`agent/src/winhand/bundle.py`：链接、打包、解开、分片；
   - `agent/src/winhand/guard.py` 里的 `PathCheck`：逐个文件的判断。
-- 测试：`agent/tests/test_review_round3.py`、`agent/tests/test_media.py`、`agent/tests/test_transfer_patch.py`
+- 测试：`agent/tests/test_review2_fs.py`（换行）、`agent/tests/test_review_round3.py`、`agent/tests/test_media.py`、`agent/tests/test_transfer_patch.py`

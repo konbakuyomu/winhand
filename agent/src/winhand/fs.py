@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 import uuid
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -71,7 +72,7 @@ def _read_bytes(path: str) -> bytes:
         raise FsError(f"no such file: {path}")
     if os.path.isdir(full):
         raise FsError(f"{path} is a directory; use fs_list")
-    # Python opens files sharing read and write, so a log another program is writing still reads
+    # Share read, write and delete so other programs can replace a file while it is being read
     with open(full, "rb") as fh:
         return fh.read()
 
@@ -242,6 +243,9 @@ def fs_read(
     return out
 
 
+APPEND_PEEK_BYTES = 65_536
+
+
 def fs_write(
     path: str,
     content: str,
@@ -259,9 +263,24 @@ def fs_write(
         raise FsError(f"{path} already exists; overwrite=false only creates a file that is not there yet")
     _check_expected(path, expected_sha256)
     note = None
+    newline = None
     if append:
         if create_dirs:
             os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
+        if os.path.isfile(full):
+            with open(full, "rb") as fh:  # the line ending from the file's end: a big log is not read whole
+                start = max(0, os.path.getsize(full) - APPEND_PEEK_BYTES)
+                fh.seek(start)
+                tail = fh.read()[1 if start else 0 :]  # a cut may land between \r and \n
+            crlf = b"\r\n" in tail
+            lf = b"\n" in tail.replace(b"\r\n", b"")
+            if crlf != lf:
+                normalized = content.replace("\r\n", "\n")
+                if crlf:
+                    normalized = normalized.replace("\n", "\r\n")
+                if normalized != content:
+                    content = normalized
+                    newline = "crlf" if crlf else "lf"
         enc = "utf-8" if encoding == "utf-8-sig" and os.path.isfile(full) else encoding
         data = content.encode(enc, errors="strict")
         with open(full, "ab") as fh:
@@ -272,6 +291,8 @@ def fs_write(
     out = {"path": path, "bytes": len(data), "encoding": encoding, "sha256": sha256_of(path)}
     if append:
         out["size"] = os.path.getsize(full)
+    if newline:
+        out["newline"] = newline
     if note:
         out["note"] = note
     return out
@@ -300,6 +321,14 @@ def _closest(text: str, old: str) -> str:
     if at < 0 or best < 0.6:
         return ""
     found = lines[at : at + size]
+    if best == 1.0:
+        original = "".join(text.splitlines(keepends=True)[at : at + size])
+        file_newline = "CRLF" if "\r\n" in original else "LF"
+        old_newline = "CRLF" if "\r\n" in old else "LF"
+        return (
+            f". Closest text: lines {at + 1}-{at + size} match except for line endings "
+            f"(the file has {file_newline} there, your old text has {old_newline})"
+        )
     diff = "\n".join(difflib.unified_diff(want.split("\n"), found, "your old", "the file", lineterm="", n=1))
     if len(diff) > 2000:
         diff = diff[:2000] + "\n…"
@@ -318,6 +347,11 @@ def _apply_edit(text: str, path: str, old: str, new: str, replace_all: bool, lab
         old = old.replace("\n", "\r\n")
         new = new.replace("\r\n", "\n").replace("\n", "\r\n")
     count = text.count(old)
+    normalized_text = None
+    if count == 0:
+        normalized_text = text.replace("\r\n", "\n")
+        normalized_old = old.replace("\r\n", "\n")
+        count = normalized_text.count(normalized_old)
     if count == 0:
         hint = ""
         first = old.strip().splitlines()[0].strip() if old.strip() else ""
@@ -332,8 +366,26 @@ def _apply_edit(text: str, path: str, old: str, new: str, replace_all: bool, lab
             f"{label}old text occurs {count} times in {path}; add context to make it unique "
             "or pass replace_all=true"
         )
-    first_at = text.index(old)
-    updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    if normalized_text is not None:
+        crlfs = [match.start() - n for n, match in enumerate(re.finditer("\r\n", text))]
+        normalized_new = new.replace("\r\n", "\n")
+        pieces = []
+        previous = 0
+        for match in re.finditer(re.escape(normalized_old), normalized_text):
+            start = match.start() + bisect_left(crlfs, match.start())
+            end = match.end() + bisect_left(crlfs, match.end())
+            if not pieces:
+                first_at = start
+            replacement = normalized_new
+            if "\r\n" in text[start:end]:
+                replacement = replacement.replace("\n", "\r\n")
+            pieces.extend((text[previous:start], replacement))
+            previous = end
+        pieces.append(text[previous:])
+        updated = "".join(pieces)
+    else:
+        first_at = text.index(old)
+        updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
     return updated, {"replacements": count if replace_all else 1, "line": text[:first_at].count("\n") + 1}
 
 
