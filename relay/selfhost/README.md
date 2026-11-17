@@ -16,7 +16,12 @@ curl -fsSL https://raw.githubusercontent.com/konbakuyomu/winhand/main/relay/self
 3. 构建镜像，`docker compose up -d`，Caddy 自动申请证书；
 4. 等首页能打开，打印地址；第一次运行还会打印主人口令，只显示这一次。
 
-再运行一次就是升级：换上新代码、重建镜像，`secrets/`、`state/` 和所有登录都保留。
+再运行一次就是升级：换上新代码、重建镜像，`secrets/`、`state/` 和所有登录都保留。升级按这个顺序：
+1. 先在旧中转照常服务时构建新镜像，正在用的镜像另存为 `winhand-relay:previous`；
+2. 把原来的 `compose.yaml`、`Caddyfile`、`.env` 存进 `backup-<时间>/`；
+3. 换上新容器，中转停顿几秒；
+4. 检查首页能打开，原来在线的电脑重新连上（最多等 4 分钟）；
+5. 检查不过，就自动换回旧配置和旧镜像，并报错退出。
 
 可选参数：
 - `--dir` 换安装目录；
