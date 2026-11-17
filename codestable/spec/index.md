@@ -47,6 +47,11 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
   - 接一个新工具只要写一份 TOML profile。
 - **规矩、技能与守卫。**
   - `context(path)` 按 Codex 和 Claude Code 各自的读法，返回这台电脑上的规矩、技能，以及对这个目录生效的守卫规则。云端会话还可以靠 SessionStart hook 在开场就带上这些内容。
+  - 规矩按文件给增量。再调 `context(since=上次的 digest)` 时：
+    - 整份没变，只回 `unchanged`；
+    - 变了的话，没变的文件只给路径、行数和指纹（`unchanged: true`）；只在末尾追加了内容的文件，给 `appended_after_line` 和新加的行；
+    - digest 按没截断的全文算。电脑上记最近 64 份，winhand 重启后对不上，就给全文。
+  - 超过预算的文件给 `#` 标题目录（最多 60 条）加文件的最后一段；`truncated` 写明给了哪几行，剩下的用哪条 `fs_read` 读。以前截掉的是后面，正好是主人最新追加的授权。取舍见 `.agents/notes/implemented/feature/2026-11-17-context-per-file-delta.md`。
   - 会读写电脑的调用，执行前先被描述成一个动作（`command`、`input`、`write`、`edit`、`delete`、`move`、`read`、`mcp`），按 `~/.winhand/guards.toml`（以及项目目录里的 .winhand/guards.toml）裁决：拒绝、问人或附注。
   - `fs_op` 整个删文件夹时，同时按命令判断，看成 `Remove-Item -Recurse`，所以写给命令的“禁止批量删除”规则也管得到它。
   - 本机 Codex、Claude Code 的 hooks，经 WinHand 的调用也照样运行。

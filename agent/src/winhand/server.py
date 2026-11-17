@@ -526,8 +526,8 @@ def build_server(
         (with their @imports), the skills here (read a SKILL.md with fs_read when one fits), the guard
         rules in force and the local MCP servers. Call it before working in a folder and again after
         the conversation is compacted."""
-        full = await asyncio.to_thread(workspace.context, cfg, path, repo)
-        mark = workspace.digest(full)
+        full = await asyncio.to_thread(workspace.context, cfg, path, repo, since)
+        mark = full["digest"]
         if since and since.strip() == mark:
             return {
                 "unchanged": True,
