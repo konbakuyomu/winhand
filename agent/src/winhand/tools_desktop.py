@@ -1214,6 +1214,9 @@ def register(mcp: FastMCP) -> None:
         """List the visible windows and monitors, act on one window, or wait (up to 40 s) for a
         window to appear or go away (an installer step, a dialog, a program starting)."""
 
+        if action == "read":
+            action = "list"
+
         def work():
             if action == "list":
                 out = {"monitors": desktop.monitors(), "windows": desktop.windows()}
@@ -1365,6 +1368,8 @@ def register(mcp: FastMCP) -> None:
         wait polls (up to 40 s) until the control exists, is gone, is enabled or shows a value,
         e.g. an installer's Next button becoming enabled."""
 
+        action = {"tree": "inspect", "read": "inspect"}.get(action, action)
+
         def work():
             if not steps and action not in _UI_ACTIONS:
                 raise desktop.DesktopError("action is one of " + ", ".join(_UI_ACTIONS))
@@ -1383,6 +1388,7 @@ def register(mcp: FastMCP) -> None:
                     return out
                 return media_result({**out, "screenshot": facts}, Image(data=data, format=fmt))
             if action == "inspect":
+                desktop.require_capture(w)  # a password manager's control text is as private as its picture
                 return _ui_inspect(w, filter, name, automation_id, control_type)
             with presence.acting(f"ui {action}") as said:  # waits while the person uses the machine
                 out = _ui_act(

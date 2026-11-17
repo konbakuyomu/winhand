@@ -7,7 +7,7 @@ the desktop app's settings and `winhand apps`; the file tools may not touch it, 
 "until restart" lives in this process. Terminals are refused without asking:
 typing into one would get around the guard rules, which judge commands run with `run` and
 sessions. A terminal is any console window (whatever program it shows) and the terminal
-programs below. Reading (screenshots, ocr, ui inspect) is never asked about.
+programs below. Reading is not asked about, except for screenshots and OCR of password managers.
 
 This keeps an AI from operating programs the person did not hand over, by mistake or by
 overreach. It is not a security boundary: whatever can run commands can get around it.
@@ -35,6 +35,10 @@ FILE_NAME = "desktop-apps.toml"
 WAIT_S = 40.0  # a call answers within the client's ~60 s limit; the dialog stays open longer
 DIALOG_S = 120.0
 DENIED_FOR_S = 600.0
+PROTECTED_FOR_S = 600.0
+PROTECTED_EXES = frozenset(
+    {"1password.exe", "bitwarden.exe", "keepass.exe", "keepassxc.exe", "dashlane.exe", "enpass.exe"}
+)
 
 CONSOLE_CLASSES = frozenset({"ConsoleWindowClass", "PseudoConsoleWindow"})  # cmd, PowerShell, python ...
 TERMINALS = frozenset(
@@ -155,6 +159,7 @@ def path() -> Path:
 
 _lock = threading.Lock()
 _session: dict[str, float] = {}  # exe -> when allowed (time.time) until this process ends
+_protected_until: dict[str, float] = {}  # password manager -> deadline (time.monotonic)
 _denied: dict[str, float] = {}  # exe -> when refused (time.monotonic)
 _pending: dict[str, Future] = {}  # exe -> the open dialog's answer
 _opening: set[str] = set()  # exes whose dialog has started but is not on the screen yet
@@ -266,6 +271,8 @@ def normalize(exe: str) -> str:
 
 def allow_always(exe: str) -> str:
     key = normalize(exe)
+    if key in PROTECTED_EXES:
+        return allow_session(key)
     with _lock:
         _read()
         entries = dict(_file["always"])
@@ -280,6 +287,8 @@ def allow_session(exe: str) -> str:
     key = normalize(exe)
     with _lock:
         _session[key] = time.time()
+        if key in PROTECTED_EXES:
+            _protected_until[key] = time.monotonic() + PROTECTED_FOR_S
         _denied.pop(key, None)
     _changed()
     return key
@@ -290,6 +299,7 @@ def revoke(exe: str) -> str:
     with _lock:
         _read()
         _session.pop(key, None)
+        _protected_until.pop(key, None)
         broken = _file["error"]
         if not broken and key in _file["always"]:
             entries = dict(_file["always"])
@@ -319,6 +329,7 @@ def forget_session() -> None:
     """Drop what was allowed until restart and what was refused (as a restart would)."""
     with _lock:
         _session.clear()
+        _protected_until.clear()
         _denied.clear()
     _changed()
 
@@ -339,6 +350,12 @@ def is_terminal(exe: str, console: bool = False) -> bool:
 
 
 def _status(key: str, console: bool) -> str:
+    if key in PROTECTED_EXES:
+        if key in _protected_until and time.monotonic() < _protected_until[key]:
+            return "session"
+        _protected_until.pop(key, None)
+        _session.pop(key, None)
+        return "denied" if _denied_left(key) else "ask"
     _read()
     if key in _file["always"]:
         return "always"
@@ -377,6 +394,8 @@ def one_call() -> Iterator[None]:
 
 def caution(exe: str) -> str | None:
     key = normalize(exe)
+    if key in PROTECTED_EXES:
+        return "这是密码管理器，只放开 10 分钟。"
     return next((text for names, text in CAUTIONS.values() if key in names), None)
 
 

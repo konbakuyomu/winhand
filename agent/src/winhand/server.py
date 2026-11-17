@@ -1399,7 +1399,7 @@ def build_server(
 
     @mcp.tool
     async def fs_op(
-        action: Annotated[str, Field(description="copy | move | delete | mkdir")],
+        action: Annotated[str, Field(description="copy | move | delete | mkdir | clean_scratch")],
         path: str,
         to: Annotated[str | None, Field(description="For copy/move: destination file or folder")] = None,
         overwrite: bool = False,
@@ -1409,7 +1409,12 @@ def build_server(
         ] = False,
     ) -> dict:
         """Copy, move, delete or create files and folders without a shell. Deleting moves to the
-        Recycle Bin unless permanent=true; drive roots, the home folder and Windows are refused."""
+        Recycle Bin unless permanent=true; drive roots, the home folder and Windows are refused.
+        clean_scratch asks the owner to recycle old scratch folders; path is ignored for it."""
+        if action == "clean_scratch":
+            from . import scratch_cleanup
+
+            return await asyncio.to_thread(scratch_cleanup.ask_and_clean, force=True)
         return await asyncio.to_thread(_fs, fs.fs_op, action, path, to, overwrite, recursive, permanent)
 
     @mcp.tool

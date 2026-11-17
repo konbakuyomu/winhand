@@ -29,6 +29,7 @@ NOTEPAD = App("notepad.exe", "记事本", "无标题 - 记事本", 42)
 def fresh(monkeypatch):
     """Each test is a newly started winhand: nothing allowed or refused yet, no dialog open."""
     monkeypatch.setattr(approvals, "_session", {})
+    monkeypatch.setattr(approvals, "_protected_until", {})
     monkeypatch.setattr(approvals, "_denied", {})
     monkeypatch.setattr(approvals, "_pending", {})
     monkeypatch.setattr(approvals, "_opening", set())

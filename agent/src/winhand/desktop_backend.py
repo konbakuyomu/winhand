@@ -63,6 +63,7 @@ class RpcError(Exception):
 
 
 UPKEEP_EVERY_S = 60.0  # a kept job that vanished starts again within about a minute
+SCRATCH_FIRST_S = 600.0  # the weekly scratch question waits this long after the app starts
 
 
 class Backend:
@@ -241,10 +242,13 @@ class Backend:
                 await asyncio.wait_for(self.done.wait(), 1.0)
 
     async def upkeep(self) -> None:
-        """Once a minute: start again the kept jobs that vanished (jobs.revive_kept). Only the tray
-        app does this, so one process restarts them."""
-        from . import jobs
+        """Once a minute: start again the kept jobs that vanished (jobs.revive_kept); from ten minutes
+        after start, the weekly question about old scratch folders (scratch_cleanup decides whether a
+        week has passed and whether anyone can see the dialog). Only the tray app does this, so one
+        process does it."""
+        from . import jobs, scratch_cleanup
 
+        scratch_at = time.monotonic() + SCRATCH_FIRST_S
         while not self.done.is_set():
             try:
                 for row in await asyncio.to_thread(jobs.revive_kept):
@@ -255,6 +259,21 @@ class Backend:
                     self.hub.record("job", f"常驻任务 {row['name']} {title}", status=status, summary=summary)
             except Exception:
                 log.exception("could not revive kept jobs")
+            if time.monotonic() >= scratch_at:
+                try:
+                    result = await asyncio.to_thread(scratch_cleanup.ask_and_clean)
+                except Exception:
+                    log.exception("could not ask about the scratch folders")
+                    scratch_at = time.monotonic() + 3600  # a dialog that cannot open: not every minute
+                else:
+                    if result.get("approved"):
+                        moved, failed = result["moved"], result["failed"]
+                        title = f"暂存目录：{len(moved)} 个文件夹移到了回收站"
+                        if failed:
+                            title += f"，{len(failed)} 个没移成"
+                        names = [os.path.basename(p) for p in moved] + [f["error"] for f in failed]
+                        summary = "; ".join(names)[:500]
+                        self.hub.record("cleanup", title, status="error" if failed else "ok", summary=summary)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.done.wait(), UPKEEP_EVERY_S)
 

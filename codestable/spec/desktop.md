@@ -28,6 +28,11 @@
   - 动作打开的新窗口（确认框、报错、文件选择框）列在 `new_windows` 里。
 - **找控件。** `filter='文件名|打开'` 匹配其中任一段文字，也匹配控件的类名。窗口在读的过程中变了，会自动重读。
 
+## 少写错几种写法
+
+- `ui(action="tree")`、`ui(action="read")` 按 `inspect` 办；`window(action="read")` 按 `list` 办。复盘时 `ui` 的报错 25 次里有 10 次是这几种写法。
+- 找不到窗口时，报错只列可见的程序名（最多 10 个），不列窗口标题，免得把浏览器标签页、文档名带出去。
+
 ## 截图
 
 - **大小。** 长边不超过 1568 像素，总共约 115 万像素以内。这是 Claude 不会再自行缩小的上限，所以按截图上的像素点击才不会偏。原尺寸的图存在电脑上（`original_file`），要看细节就用 `fs_read` 加 `region` 放大。
@@ -48,6 +53,12 @@ AI 第一次点击、输入或操作某个程序时，电脑上弹窗问主人�
 - 一直允许，记在 `~/.winhand/desktop-apps.toml`。
 
 截图、读字、inspect 不需要授权。终端窗口一律拒绝，让 AI 改用 `run` 或会话，那里有守卫把关。WinHand 自己的窗口（授权弹窗、守卫确认框、桌面端），任何桌面工具都碰不到。
+
+**密码管理器例外**（1Password、Bitwarden、KeePass、KeePassXC、Dashlane、Enpass，按程序名认，不按标题）：
+- 主人 2026-11-17 定的：默认不让 AI 看，也不让 AI 操作，要用时由电脑前的人放开一次。起因是 11-17 有一段操作对着 1Password 点了 116 次、截了 211 张图，截图把窗口内容原样交给了模型。
+- 「程序授权」开关关着也照样问。人选「允许」或「一直允许」都只放开 10 分钟，记在内存里，不写进 desktop-apps.toml；10 分钟后再用，重新问。
+- 按窗口截它、`ui` inspect 它（控件里的字和截图一样私密），要先经人放开。
+- 整屏、按显示器或按区域截图、`ocr` 时，画面里没放开的密码管理器窗口涂黑再交出去，结果里 `masked` 列出程序名。
 
 ## 主人在电脑前时
 
@@ -83,8 +94,10 @@ AI 第一次点击、输入或操作某个程序时，电脑上弹窗问主人�
 - 实现和实测：`codestable/epics/001-x-使用复盘四轮强化/issues/004-x-第4轮桌面.md` 的「实测」一节：边框不进截图、截最小化窗口、让路、急停。
 - 代码落点：
   - `agent/src/winhand/presence.py`：让路、急停、边框；
+  - `agent/src/winhand/approvals.py` 的 `PROTECTED_EXES`、`agent/src/winhand/desktop.py` 的 `require_capture`、`_mask_protected`：密码管理器；
   - `agent/src/winhand/tools_desktop.py`：`ui` 的编号和批量动作；
   - `agent/src/winhand/jobwatch.py`：命令被弹窗卡住。
 - 测试：
+  - `agent/tests/test_review2_desktop.py`：写法、窗口列表、密码管理器；
   - `agent/tests/test_review_round4.py`；
   - `agent/tests/test_windows_scenarios.py`，只在 Windows 上跑。

@@ -92,7 +92,7 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
 - **后台任务**：`job_start` 起的任务，独立于 winhand 进程，winhand 重启也不丢。
 - **游标**：输出的绝对位置。从同一个游标接着问时，只回新的内容。
 - **一次性链接**：中转上的 `/t/<令牌>`，用一次就失效，文件内容不经过对话。
-- **暂存目录**：`~/.winhand/scratch`，AI 跨调用存文件的地方，不自动清理。
+- **暂存目录**：`~/.winhand/scratch`，AI 跨调用存文件的地方。不自动删：每周问主人一次，主人同意才把 14 天没动的文件夹移进回收站，见 [files.md](files.md)。
 - **守卫**：`~/.winhand/guards.toml` 和项目目录里 .winhand/guards.toml 的规则，在动作执行前裁决。
 - **程序授权**：AI 第一次操作某个程序前，先问主人。
 - **让路、急停、边框**：主人在电脑前时，桌面操作的三层保护，见 [desktop.md](desktop.md)。
@@ -101,6 +101,7 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
 
 - **不改现有参数的含义。** 新能力用新参数或新取值打开，旧客户端的行为不变。例如等待上限的默认值没有提高，只对能长等的客户端放开。
 - **开场说明不超过 4096 字符。** Claude Code 只保留 MCP instructions 的前 4096 个字符，所以开场只放要点，包括已存密钥的名字；完整指南在 `help()`。新功能写进 `help()`、工具说明和 README，不往开场说明里塞。
+- **开场就加载的工具按用量定。** 标 anthropic/alwaysLoad 的 12 个：`context`、`run`、`job_start`、`job_status`、`job_stop`、`history`、`fs_read`、`fs_write`、`fs_edit`、`fs_search`、`fs_find`、`fs_list`。其余的按需用 ToolSearch 取。2026-11-17 按 11-02 至 11-17 的用量调过：`remote_run` 13 天 0 次，拿掉；`job_stop` 215 次、`history` 67 次，加上。
 - **单个结果约 4 万字节。** 按 UTF-8 字节算，一个中文字算 3 字节，接近它的 token 成本。读文件、搜索、命令输出到上限就停，并说明从哪里接着读。
 - **中转只转发，不解析 MCP。** 好处是 MCP 协议升级不用改中转；代价是电脑离线时，中转不能替它回答 tools/list 请求。
 - **不是沙箱。** 守卫、程序授权、让路都只防误操作，挡不住刻意绕路：`run` 里的程序自己读写什么，守卫管不到。真正要隔离时，用系统权限或单独的账户。

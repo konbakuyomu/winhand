@@ -398,6 +398,7 @@ async def test_tray_upkeep_puts_restarted_and_failed_kept_jobs_on_the_timeline(
 
     monkeypatch.setattr(jobs, "revive_kept", revive)
     monkeypatch.setattr(desktop_backend, "UPKEEP_EVERY_S", 0.01)
+    monkeypatch.setattr(desktop_backend, "SCRATCH_FIRST_S", 3600)  # not this test's business
     try:
         await backend.upkeep()
         entries = [
@@ -408,5 +409,59 @@ async def test_tray_upkeep_puts_restarted_and_failed_kept_jobs_on_the_timeline(
             ("常驻任务 x 没能重新启动", "error", "gone"),
         ]
         assert len(calls) == 2 and "revival test error" in caplog.text
+    finally:
+        await backend.close()
+
+
+async def test_tray_upkeep_records_an_approved_scratch_cleanup(winhand_home, monkeypatch):
+    from winhand import desktop_backend, scratch_cleanup
+
+    backend = desktop_backend.Backend(lambda _line: None)
+
+    def ask():
+        backend.done.set()
+        return {
+            "approved": True,
+            "moved": ["C:/s/old-a", "C:/s/old-b"],
+            "failed": [{"path": "C:/s/c", "error": "busy"}],
+        }
+
+    monkeypatch.setattr(jobs, "revive_kept", lambda: [])
+    monkeypatch.setattr(scratch_cleanup, "ask_and_clean", ask)
+    monkeypatch.setattr(desktop_backend, "SCRATCH_FIRST_S", 0)
+    try:
+        await backend.upkeep()
+        entries = [
+            (e["title"], e["status"], e["summary"]) for e in backend.hub.snapshot() if e["kind"] == "cleanup"
+        ]
+        assert entries == [("暂存目录：2 个文件夹移到了回收站，1 个没移成", "error", "old-a; old-b; busy")]
+    finally:
+        await backend.close()
+
+
+async def test_tray_upkeep_waits_an_hour_after_the_scratch_question_fails(winhand_home, monkeypatch, caplog):
+    from winhand import desktop_backend, scratch_cleanup
+
+    backend = desktop_backend.Backend(lambda _line: None)
+    rounds, asked = [], []
+
+    def revive():
+        rounds.append(True)
+        if len(rounds) == 3:
+            backend.done.set()
+        return []
+
+    def ask():
+        asked.append(True)
+        raise RuntimeError("cannot open a dialog")
+
+    monkeypatch.setattr(jobs, "revive_kept", revive)
+    monkeypatch.setattr(scratch_cleanup, "ask_and_clean", ask)
+    monkeypatch.setattr(desktop_backend, "SCRATCH_FIRST_S", 0)
+    monkeypatch.setattr(desktop_backend, "UPKEEP_EVERY_S", 0.01)
+    try:
+        await backend.upkeep()
+        assert len(rounds) == 3 and len(asked) == 1  # not again each minute
+        assert "could not ask about the scratch folders" in caplog.text
     finally:
         await backend.close()

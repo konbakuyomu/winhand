@@ -1192,7 +1192,9 @@ def _recycle(full: str) -> None:
     op = SHFILEOPSTRUCTW()
     op.wFunc = 3  # FO_DELETE
     op.pFrom = plain + "\0"  # the list is double-NUL terminated; ctypes adds the second
-    op.fFlags = 0x0040 | 0x0010 | 0x0004 | 0x0400  # ALLOWUNDO | NOCONFIRMATION | SILENT | NOERRORUI
+    # ALLOWUNDO | NOCONFIRMATION | SILENT | NOERRORUI | WANTNUKEWARNING: without the last one, what the
+    # Recycle Bin cannot take (too big, a drive without one) is deleted for good without a word
+    op.fFlags = 0x0040 | 0x0010 | 0x0004 | 0x0400 | 0x4000
     code = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     if code or op.fAnyOperationsAborted:
         raise FsError(f"could not move {plain} to the Recycle Bin (code {code:#x})")
