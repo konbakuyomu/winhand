@@ -61,11 +61,17 @@ function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store", "access-control-allow-origin": "*" } });
 }
 
+// The authorization server for the current list of computers, kept per isolate: the list changes
+// only when a computer is paired or removed, and building it costs CPU on every request otherwise.
+let cachedServer: { key: string; server: OAuthAuthorizationServer<Env> | null } | undefined;
+
 /** The computers and the authorization server for them (null while no computer is paired). */
 async function directory(env: Env, origin: string) {
   const legacy = Boolean(env.AGENT_TOKEN);
   const pcs = await listPcs(env);
-  return { pcs, legacy, server: authorizationServer(env, { origin, pcs, legacy }) };
+  const key = JSON.stringify([origin, pcs, legacy, env.CIMD ?? ""]);
+  if (cachedServer?.key !== key) cachedServer = { key, server: authorizationServer(env, { origin, pcs, legacy }) };
+  return { pcs, legacy, server: cachedServer.server };
 }
 
 function bridgeRequest(path: string, base: string, request: Request, user: string): Request {

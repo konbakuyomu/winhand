@@ -20,5 +20,12 @@
     "wrangler": "^4.141.0"
   },
   "private": true,
-  "type": "module"
+  "type": "module",
+  "cloudflare": {
+    "bindings": {
+      "OWNER_PASSPHRASE": {
+        "description": "主人口令：授权 Claude 和在中转首页配对电脑时输入。用一串足够长的随机字符（至少 24 个）。"
+      }
+    }
+  }
 }
