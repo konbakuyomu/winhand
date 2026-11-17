@@ -59,8 +59,31 @@ AI 不该守着一个命令一轮轮地问，也不该自己睡一会儿再看�
 
 - `run-N` 的编号存在电脑上，winhand 重启后接着往下编，不会重复。每个 `run` 一开始就有编号：回复在路上丢了时，`history()` 里能看到它，`job_status` 也能接着等。
 - 后台任务的命令单独存成一个脚本来运行，所以命令里写了 `exit N`，也照常记下退出码 N。
-- `job_start` 的 `timeout_s` 到时，结束整棵进程树，退出码记为 -1，标 `timed_out`。
+- 完成的 `run` 至少留最近 20 条。回过 `still_running`、把编号交出去的，结束后再留 1 小时，这期间别的命令跑完多少条都挤不掉它。
+  - 以前只留最近 20 条：几个会话同时跑命令时，`run-8211` 在 `job_status` 等它的时候被挤掉，退出码丢了。
+  - 不是全部留一小时：输出都在内存里，命令多的时候占得太多。没交出编号的，调用方当场已经拿到结果。
+- `job_start` 的 `timeout_s` 到时，结束整棵进程树，退出码记为 -1，标 `timed_out`，并给 `reason`（`timeout_s reached (N s)`），任务列表里也有。
 - `after=[任务 id]` 让任务等前面的任务结束再开始，可以把几步串起来。
+
+## 列表、停止和常驻任务
+
+- **列表只给状态行。** `job_status()` 不带 id 时列最近 20 个任务，每个只给 `id`、`name`、`state`、`exit_code`、`started`、`finished`、`seconds`（超时的加 `timed_out`、`reason`），不带输出。
+  - 以前每个直接运行的程序（比如 Codex）都带着最多 6 KB 的 stderr 尾巴，20 个就一两万字，一个会话看列表就把别的会话的输出读进了自己的上下文。
+  - `prefix=` 按 id 或名字的开头筛，先筛再取 20 个。
+  - `files=[…]` 不带 id 也照样给出那几个文件的末尾。
+- **停止只回结果。** `job_stop` 回 `id`、`state`、`exit_code`、`stopped` 和最后 20 行（最多 2,000 字）。后台任务和 `run-N` 都一样。
+- **回复带电脑的时间。** `run` 和 `job_status` 的回复有 `now`：电脑本地时间，带时区。以前 199 次 `run` 只为看时间。
+- **`stdin_file`。** `job_start(stdin_file=路径)` 把电脑上的一个 UTF-8 文件当 stdin（开头的 BOM 去掉）。它和 `stdin=` 二选一，只能配 `args=`。守卫把它当作读这个文件来判断。
+- **常驻任务。** `job_start(keep=true)` 的任务，进程没留下退出码就没了（电脑重启、被结束）时，托盘程序在一分钟内照原样再起一个：
+  - 沿用原来的命令、参数、目录、名字、超时和密钥名；
+  - 旧任务记 `revived_as`，新任务记 `revived_from`，托盘的时间线上记一条；
+  - 每个任务只拉起一次；拉不起来（程序或目录没了、密钥删了）也只记一次，原因写在 `revive_error`；
+  - `job_stop` 停掉的不再拉起；
+  - 不能配 `stdin`、`stdin_file`、`elevated`：重启时电脑前可能没人点 UAC；
+  - 密钥只记名字，拉起时再从密钥库取，任务目录里没有值；
+  - 只有托盘程序会拉起。本机 stdio 服务和 `winhand connect` 不拉，免得几个进程各拉一份。
+- **`quiet_ok_s`。** `job_start(quiet_ok_s=秒数)`：这么久没有输出算正常，卡住的门槛取它和 5 分钟中大的那个。
+- **负载。** `sys_info(load=true)` 给可用内存、总内存（GB，一位小数）、CPU 占用（采样 0.5 秒）、在跑的后台任务数和 `run` 数。查进程的命令行仍用 `proc_list(name=…)`：它本来就按名字或命令行筛，并给出命令行的前 300 字。
 
 ## 任务运行期间电脑不睡
 
@@ -88,6 +111,8 @@ AI 不该守着一个命令一轮轮地问，也不该自己睡一会儿再看�
   - `agent/src/winhand/waiting.py`：上限和心跳；
   - `agent/src/winhand/jobs.py`：包装脚本；
   - `agent/src/winhand/jobwatch.py`：`activity`、卡住判断、弹窗；
+  - `agent/src/winhand/proc.py`：`run`、完成命令的保留（`_forget_finished`）、`sys_info(load)`；
+  - `agent/src/winhand/desktop_backend.py` 的 `upkeep()`：每分钟拉起常驻任务；
   - `agent/src/winhand/power.py`：防休眠；
   - `relay/src/bridge.ts`：离线报错、`x-winhand-user` 头。
-- 测试：`agent/tests/test_review_round1.py`、`agent/tests/test_review_round2.py`、`agent/tests/test_review_round4.py`
+- 测试：`agent/tests/test_review2_jobs.py`、`agent/tests/test_review_round1.py`、`agent/tests/test_review_round2.py`、`agent/tests/test_review_round4.py`

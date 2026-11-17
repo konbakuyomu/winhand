@@ -62,6 +62,9 @@ class RpcError(Exception):
         self.code = code
 
 
+UPKEEP_EVERY_S = 60.0  # a kept job that vanished starts again within about a minute
+
+
 class Backend:
     def __init__(self, write_line) -> None:
         self.write_line = write_line
@@ -236,6 +239,24 @@ class Backend:
                     self.emit("sessions", {"sessions": current})
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.done.wait(), 1.0)
+
+    async def upkeep(self) -> None:
+        """Once a minute: start again the kept jobs that vanished (jobs.revive_kept). Only the tray
+        app does this, so one process restarts them."""
+        from . import jobs
+
+        while not self.done.is_set():
+            try:
+                for row in await asyncio.to_thread(jobs.revive_kept):
+                    if "error" in row:
+                        title, status, summary = "没能重新启动", "error", row["error"]
+                    else:
+                        title, status, summary = "已重新启动", "ok", f"{row['from']} -> {row['id']}"
+                    self.hub.record("job", f"常驻任务 {row['name']} {title}", status=status, summary=summary)
+            except Exception:
+                log.exception("could not revive kept jobs")
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.done.wait(), UPKEEP_EVERY_S)
 
     # ---------------------------------------------------------------- methods
 
@@ -665,6 +686,7 @@ async def serve(stdin, stdout) -> int:
     backend = Backend(write_line)
     threading.Thread(target=read_stdin, name="desktop-stdin", daemon=True).start()
     watcher = asyncio.create_task(backend.watch_sessions())
+    upkeep = asyncio.create_task(backend.upkeep())
     pending: set[asyncio.Task] = set()
     try:
         while not backend.done.is_set():
@@ -688,6 +710,7 @@ async def serve(stdin, stdout) -> int:
     finally:
         backend.done.set()
         watcher.cancel()
+        upkeep.cancel()
         await backend.close()
     return 0
 

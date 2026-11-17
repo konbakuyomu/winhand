@@ -206,7 +206,10 @@ def describe(
         text = _join([a.get("command") or "", *(a.get("args") or [])]).strip()
         if a.get("stdin"):
             text = f"{text}\n{a['stdin']}"
-        return one("command", text=text, cwd=_abs(a.get("cwd")))
+        out = one("command", text=text, cwd=_abs(a.get("cwd")))
+        if a.get("stdin_file") is not None:
+            out += one("read", a["stdin_file"])
+        return out
     if tool == "remote_run":
         text = _join([a.get("script") or "", *(a.get("args") or [])]).strip()
         return one("command", text=text, host=a.get("host"))

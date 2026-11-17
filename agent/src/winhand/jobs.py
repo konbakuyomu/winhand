@@ -206,6 +206,10 @@ def start(
     timeout_s: float | None = None,
     after: list[str] | None = None,
     keep_awake: bool = True,
+    stdin_file: str | None = None,
+    keep: bool = False,
+    quiet_ok_s: float | None = None,
+    secrets: list[str] | None = None,
 ) -> dict:
     """Start `command` (PowerShell) detached; with `args`, `command` is a program run directly.
     Elevated jobs show a UAC prompt first. `env` is added to its environment (not elevated jobs:
@@ -229,6 +233,20 @@ def start(
         raise JobError(f"working directory does not exist: {cwd}")
     if stdin is not None and args is None:
         raise JobError("stdin goes to a program run directly: give its arguments as args (args=[] for none)")
+    if stdin_file is not None and args is None:
+        raise JobError(
+            "stdin_file goes to a program run directly: give its arguments as args (args=[] for none)"
+        )
+    if stdin is not None and stdin_file is not None:
+        raise JobError("give stdin or stdin_file, not both")
+    if keep and (stdin is not None or stdin_file is not None):
+        raise JobError("keep cannot be used with stdin or stdin_file")
+    if keep and elevated:
+        raise JobError(
+            "keep cannot be used with elevated: nobody may be there for the UAC prompt of a restart"
+        )
+    if stdin_file is not None:
+        stdin = Path(stdin_file).expanduser().read_text(encoding="utf-8-sig")
     if env and elevated:
         raise JobError(
             "an elevated job starts with the administrator's environment: secrets and env cannot reach it"
@@ -256,8 +274,6 @@ def start(
         script = _program_script(program, list(args or []), directory, cwd, stdin is not None, prologue)
     else:
         script = _script(command, directory, cwd, prologue)
-    shell = runner
-    argv = [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)]
     meta = {
         "id": job_id,
         "command": subprocess.list2cmdline([program, *(args or [])]) if program else command,
@@ -265,7 +281,22 @@ def start(
         "elevated": elevated,
         "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "directory": str(directory),
+        "name": name or first,
+        "keep": keep,
+        "quiet_ok_s": quiet_ok_s,
     }
+    if keep:  # what revive_kept needs to start it again: the secrets by name, never their values
+        meta.update(
+            {
+                "start_command": command,
+                "args": args,
+                "shell": shell,
+                "keep_awake": keep_awake,
+                "secrets": secrets,
+            }
+        )
+    shell = runner
+    argv = [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)]
     if program is not None:
         meta["program"] = True
     if timeout_s:
@@ -442,28 +473,47 @@ def status(job_id: str, since: int = 0, max_chars: int = 20_000) -> dict:
     if finished:
         result.update({k: v for k, v in finished.items() if k != "finished"})
         result["finished"] = finished.get("finished")
+        if finished.get("timed_out"):
+            result["timed_out"] = True
+            result["reason"] = f"timeout_s reached ({meta['timeout_s']:g} s)"
     return result
 
 
-def list_jobs(limit: int = 20) -> list[dict]:
+def list_jobs(limit: int = 20, prefix: str | None = None) -> list[dict]:
     rows = []
-    for directory in sorted(_root().iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
+    fields = ("id", "name", "state", "exit_code", "started", "finished", "seconds", "timed_out", "reason")
+    for directory in sorted(_root().iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        meta = _read_json(directory / "job.json")
+        if not meta:
+            continue
+        if prefix is not None and not (
+            directory.name.startswith(prefix) or (meta.get("name") or "").startswith(prefix)
+        ):
+            continue
         try:
             s = status(directory.name, max_chars=0)
         except JobError:
             continue
-        s.pop("output", None)
-        rows.append(s)
+        if meta.get("name") is not None:
+            s["name"] = meta["name"]
+        rows.append({k: s[k] for k in fields if k in s})
+        if len(rows) >= limit:
+            break
     return rows
 
 
 def stop(job_id: str) -> dict:
     import psutil
 
-    s = status(job_id, max_chars=0)
+    s = status(job_id)
+    directory = _root() / job_id
+    meta = _read_json(directory / "job.json")
+    if meta.get("keep"):
+        meta["stopped"] = True
+        _write_meta(directory, meta)
     if s["state"] != "running":
         return s
-    pid = _read_json(_root() / job_id / "job.json").get("pid")
+    pid = meta.get("pid")
     try:
         parent = psutil.Process(pid)
         for child in parent.children(recursive=True):
@@ -475,3 +525,50 @@ def stop(job_id: str) -> dict:
         json.dumps({"exit_code": -1, "stopped": True}), encoding="utf-8"
     )
     return status(job_id)
+
+
+def revive_kept() -> list[dict]:
+    """Start again each kept job (keep=True) whose process vanished without an exit code, as when
+    the PC restarts. Each is restarted once (`revived_as`); job_stop marks it `stopped`, and a restart
+    that fails is not tried again (`revive_error`). The tray app calls this every minute and puts
+    what it returns on its timeline."""
+    from . import secret_store
+
+    root = _root()
+    metas = [(d, _read_json(d / "job.json")) for d in root.iterdir()]
+    kept = [(d, meta) for d, meta in metas if meta and meta.get("keep")]
+    running_names = {meta["name"] for d, meta in kept if status(d.name, max_chars=0)["state"] == "running"}
+    done = []
+    for directory, meta in kept:
+        if {"stopped", "revived_as", "revive_error"} & meta.keys() or meta["name"] in running_names:
+            continue
+        if status(directory.name, max_chars=0)["state"] != "vanished":
+            continue
+        try:
+            new = start(
+                meta["start_command"],
+                args=meta.get("args"),
+                cwd=meta.get("cwd"),
+                shell=meta.get("shell"),
+                name=meta["name"],
+                env=secret_store.load(meta.get("secrets") or []) or None,
+                timeout_s=meta.get("timeout_s"),
+                keep=True,
+                quiet_ok_s=meta.get("quiet_ok_s"),
+                keep_awake=meta.get("keep_awake", True),
+                secrets=meta.get("secrets"),
+            )
+        except Exception as exc:  # its program, folder or a secret is gone: said once, not every minute
+            meta["revive_error"] = str(exc)[:300]
+            _write_meta(directory, meta)
+            done.append({"name": meta["name"], "from": directory.name, "error": meta["revive_error"]})
+            continue
+        meta["revived_as"] = new["id"]
+        _write_meta(directory, meta)
+        new_directory = root / new["id"]
+        new_meta = _read_json(new_directory / "job.json")
+        new_meta["revived_from"] = directory.name
+        _write_meta(new_directory, new_meta)
+        done.append({"name": meta["name"], "from": directory.name, "id": new["id"]})
+        running_names.add(meta["name"])
+    return done

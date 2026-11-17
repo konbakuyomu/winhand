@@ -9,6 +9,7 @@ import json
 import os
 import textwrap
 import weakref
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -475,10 +476,13 @@ def build_server(
             bool,
             Field(description="Also check for setups that break tools (PowerShell, code page, shims ...)"),
         ] = False,
+        load: Annotated[
+            bool, Field(description="Also report memory, CPU usage and running job/run counts")
+        ] = False,
     ) -> dict:
         """Machine facts: OS, shell, code page, available dev tools, serial ports, local MCP servers.
         With checks=true, a health check of the things that commonly trip work here, with fixes."""
-        info = await asyncio.to_thread(proc.sys_info)
+        info = await asyncio.to_thread(proc.sys_info, load)
         if checks:
             info["checks"] = await asyncio.to_thread(proc.doctor)
             entries = [s.entry for s in local_mcp.services().services.values()]
@@ -693,6 +697,7 @@ def build_server(
         )
         if script is None and _ssh_program(command) and isinstance(result, dict):
             result["hint_ssh"] = SSH_HINT
+        result["now"] = datetime.now().astimezone().isoformat(timespec="seconds")
         return result
 
     @mcp.tool
