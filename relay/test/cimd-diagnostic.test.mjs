@@ -54,13 +54,13 @@ test('CIMD exception becomes no-store 503, without issuing credentials', async (
   const { context } = load(async () => new Response('{}'));
   context.CimdFetchError = class extends Error { constructor() { super('PRIVATE'); this.metadataUrl = url; } };
   context.AuthorizationError = class extends Error {};
-  context.Bridge = class {};
-  let source = stripTypeScriptTypes(fs.readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8'));
-  source = source.replace(/^import[\s\S]*?from [^;]+;\s*/gm, '').replace(/^export \{ Bridge \};/m, '').replace('export default', 'const worker =');
-  vm.runInContext(source + '\nglobalThis.handler = defaultHandler;', context);
-  const response = await context.handler.fetch(new Request('https://relay.example/authorize'), {
-    OAUTH_PROVIDER: { parseAuthRequest() { throw new context.CimdFetchError(); } },
-  });
+  Object.assign(context, { OAuthAuthorizationServer: class {}, OAuthResourceServer: class {}, consentPage: () => '',
+    LEGACY_PC: 'default', secretEquals: async () => false, validName: () => true });
+  const source = stripTypeScriptTypes(fs.readFileSync(new URL('../src/auth.ts', import.meta.url), 'utf8'))
+    .replace(/^import[\s\S]*?from [^;]+;\s*/gm, '').replace(/^export /gm, '');
+  vm.runInContext(source + '\nglobalThis.authorizeFn = authorize;', context);
+  const server = { getOAuthApi: () => ({ parseAuthRequest() { throw new context.CimdFetchError(); } }) };
+  const response = await context.authorizeFn(new Request('https://relay.example/authorize'), {}, server, 'https://relay.example');
   assert.equal(response.status, 503);
   assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal(response.headers.get('retry-after'), '60');

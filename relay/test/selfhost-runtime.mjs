@@ -15,6 +15,7 @@ import { render } from '../selfhost/config.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const binary = process.env.WORKERD_BIN;
 assert.ok(binary && path.isAbsolute(binary), 'Set absolute WORKERD_BIN');
+await fs.mkdir(path.join(root, 'dist'), { recursive: true });
 const dir = await fs.mkdtemp(path.join(root, 'dist/runtime-integration-'));
 const settings = { PUBLIC_ORIGIN: 'https://relay.example.com', OWNER_PASSPHRASE: randomBytes(32).toString('hex'), AGENT_TOKEN: randomBytes(32).toString('hex'), PROXY_TOKEN: randomBytes(32).toString('hex') };
 for (const part of ['bridge','kv']) await fs.mkdir(path.join(dir, 'state',part), { recursive: true });

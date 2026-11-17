@@ -427,14 +427,17 @@ test('a caller giving up on an orphaned call gets it cancelled when the agent is
 });
 
 test('a PC offline for minutes is reported at once, with where to watch for it', async () => {
-  const h = harness({AGENT_GRACE_S: '20', PUBLIC_ORIGIN: 'https://relay.example/'});
+  const h = harness({AGENT_GRACE_S: '20'});
   h.ctx.stored.set('offlineSince', Date.now() - 10 * 60_000);
-  const answer = await h.object.fetch(rpc(9));
+  // the Worker passes the computer's public address space along with every forwarded call
+  const answer = await h.object.fetch(new Request('https://bridge/forward?path=/mcp&base=https://relay.example/pc/home', {
+    method: 'POST', body: JSON.stringify({jsonrpc: '2.0', id: 9, method: 'tools/call', params: {}}),
+  }));
   assert.equal(h.timers.size, 0); // no grace wait was started
   const body = await answer.json();
   assert.equal(body.id, 9);
   assert.match(body.error.message, /offline since .* did not wait/);
-  assert.match(body.error.message, /https:\/\/relay\.example\/status\.json/);
+  assert.match(body.error.message, /https:\/\/relay\.example\/pc\/home\/status\.json/);
 });
 
 test('a PC that just went offline still gets the grace period', async () => {

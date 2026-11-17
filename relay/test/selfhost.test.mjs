@@ -20,6 +20,12 @@ test('independent strong secrets are mandatory', () => {
   assert.throws(() => validate({ ...settings, AGENT_TOKEN: 'short' }));
   assert.throws(() => validate({ ...settings, AGENT_TOKEN: settings.PROXY_TOKEN }));
 });
+test('a relay without the old single-computer token is valid and gets no AGENT_TOKEN binding', () => {
+  const { AGENT_TOKEN: _unused, ...newer } = settings;
+  assert.equal(validate(newer), settings.PUBLIC_ORIGIN);
+  assert.ok(!render(newer, '/data').includes('AGENT_TOKEN'));
+  assert.match(render({ ...newer, CIMD: 'on' }, '/data'), /name="CIMD", text="on"/);
+});
 test('generated native config has isolated persistence and loopback-only ingress', () => {
   const config = render(settings, '/data');
   assert.match(config, /127\.0\.0\.1:8787/);

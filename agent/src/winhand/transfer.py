@@ -32,7 +32,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote
 
 from . import bundle, config, fs, winenv
 
@@ -113,13 +113,14 @@ def _waits() -> dict[str, dict]:
 
 
 def set_relay(url: str | None) -> None:
-    """Remember the relay's public origin from the agent's WebSocket URL (wss://host/agent)."""
+    """Remember this computer's public address space on the relay from the agent's WebSocket URL:
+    wss://host/pc/home/agent -> https://host/pc/home; wss://host/agent -> https://host."""
     global _public_base
     if not url:
         return
-    parts = urlsplit(url)
-    scheme = {"wss": "https", "ws": "http"}.get(parts.scheme, parts.scheme)
-    _public_base = urlunsplit((scheme, parts.netloc, "", "", "")).rstrip("/")
+    from . import config
+
+    _public_base = config.relay_base(url)
 
 
 def public_base() -> str:
