@@ -7,7 +7,9 @@
 # certificate). Running it again upgrades the relay to the newest code and keeps its state, secrets
 # and sign-ins. Options: --dir <path> (default /opt/winhand-relay), --ref <git ref> (default main),
 # --source <local checkout> (use these files instead of downloading), --no-build (use the image
-# winhand-relay:local that is already there).
+# winhand-relay:local that is already there), --cimd on|off (accept OAuth clients identified by a
+# metadata document URL; a relay whose Claude sign-ins were made that way must keep it on; kept
+# from the previous run when not given).
 set -euo pipefail
 
 REPO="konbakuyomu/winhand"
@@ -16,13 +18,15 @@ REF="main"
 SOURCE=""
 HOST=""
 BUILD=1
+CIMD=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir) DIR="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
     --source) SOURCE="$2"; shift 2 ;;
     --no-build) BUILD=""; shift ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    --cimd) CIMD="$2"; shift 2 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) HOST="$1"; shift ;;
   esac
 done
@@ -59,7 +63,10 @@ if [ ! -s secrets/owner-passphrase ]; then
   printf '%s' "$NEW_PASSPHRASE" > secrets/owner-passphrase
 fi
 [ -s secrets/proxy-token ] || head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 43 > secrets/proxy-token
+[ -n "$CIMD" ] || CIMD="$( { grep -E '^CIMD=' .env 2>/dev/null || true; } | tail -1 | cut -d= -f2)"
+case "$CIMD" in on|off|"") ;; *) die "--cimd takes on or off" ;; esac
 printf 'WINHAND_HOST=%s\nPROXY_TOKEN=%s\nWINHAND_IMAGE=winhand-relay:local\n' "$HOST" "$(cat secrets/proxy-token)" > .env
+[ "$CIMD" != "on" ] || printf 'CIMD=on\n' >> .env
 # A relay from the single-computer days keeps serving its computer at the old addresses.
 [ ! -s secrets/agent-token ] || printf 'AGENT_TOKEN_FILE=/run/secrets/agent-token\n' >> .env
 cp code/selfhost/compose.yaml code/selfhost/Caddyfile .

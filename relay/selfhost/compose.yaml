@@ -14,6 +14,9 @@ services:
       # Only a relay that still serves the computer of the single-computer days has secrets/agent-token;
       # install.sh then sets AGENT_TOKEN_FILE=/run/secrets/agent-token in .env. Empty: no old addresses.
       AGENT_TOKEN_FILE: ${AGENT_TOKEN_FILE:-}
+      # on: accept OAuth clients identified by a metadata document URL (claude.ai signs in that way
+      # where CIMD is on). A relay whose existing sign-ins were made that way must keep it on.
+      CIMD: ${CIMD:-}
       PROXY_TOKEN_FILE: /run/secrets/proxy-token
     volumes:
       - ./secrets:/run/secrets:ro

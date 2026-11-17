@@ -22,7 +22,12 @@ curl -fsSL https://raw.githubusercontent.com/konbakuyomu/winhand/main/relay/self
 - `--dir` 换安装目录；
 - `--ref` 指定分支或标签；
 - `--source` 用本地检出代替下载；
-- `--no-build` 用已有的 `winhand-relay:local` 镜像。
+- `--no-build` 用已有的 `winhand-relay:local` 镜像；
+- `--cimd on|off`：是否接受用元数据地址标识的 OAuth 客户端。不给时沿用上次的设置，新部署默认关。原来开着 CIMD、claude.ai 的登录是 CIMD 客户端的部署（单台电脑时代的中转都是），升级时要加 `--cimd on`，否则旧登录刷新会失败。
+
+在已有的部署上升级（同一个 `--dir`）：
+- `secrets/` 里有 `agent-token` 时，`install.sh` 照样把它交给中转，旧地址继续可用；
+- 旧镜像留着，可以回退：把 `.env` 里的 `WINHAND_IMAGE` 改回原来的标签，再运行 `docker compose up -d`。
 
 ```text
 Claude → HTTPS（Caddy）→ 127.0.0.1:8787 上的 workerd → OAuth + Bridge → 电脑上的 winhand

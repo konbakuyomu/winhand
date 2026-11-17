@@ -66,6 +66,8 @@ uv run winhand connect
 旧部署设有 `AGENT_TOKEN`，只连一台电脑，地址是 `/mcp`、`/agent`、`/t/…`、`/hook/…`。新代码部署上去以后：
 
 1. 只要还设着 `AGENT_TOKEN`，旧地址照常通。它们指向一台叫 `default` 的电脑，旧连接器的登录也照常可用，不用马上改。
+   - 旧中转开着 CIMD，claude.ai 的登录就是 CIMD 客户端。所以升级时要设 `CIMD=on`：自托管用 `install.sh --cimd on`，Cloudflare 加变量 `CIMD=on`。
+   - 不设的话，旧连接器的访问令牌最多一小时后过期，刷新会失败，要重新授权。
 2. 在首页给这台电脑配对一个名字，在 claude.ai 加上 `/pc/<名称>/mcp` 连接器。各个会话都换到新连接器以后，删掉 `AGENT_TOKEN`，旧地址随之消失。
 
 ## 登录
