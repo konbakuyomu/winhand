@@ -12,7 +12,7 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
 连上来的客户端有两类：
 
 - **本机客户端**：这台电脑上的 Codex、Claude Desktop、Claude Code，用 stdio 或本机 HTTP 直连。
-- **经中转的客户端**：claude.ai 连接器和云端 Claude Code 会话，经中转（Cloudflare Worker）到达电脑。电脑主动用 WebSocket 连出去，不开任何入站端口。
+- **经中转的客户端**：claude.ai 连接器和云端 Claude Code 会话，经中转到达电脑。中转是 Cloudflare Worker，或者跑在自己服务器上的同一份代码。电脑主动用 WebSocket 连出去，不开任何入站端口。一个中转可以连多台电脑，每台电脑一个连接器地址 `https://<域名>/pc/<名称>/mcp`。
 
 两类客户端用的是同一套工具，只在等待上限这类地方有区别。
 
@@ -72,16 +72,20 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
 ## 三个部分怎样连起来（当前）
 
 ```text
-claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudflare Worker + Durable Object）
-                                                 │ 只透明转发 HTTP（含 SSE），不解析 MCP
-                                                 ▼ WebSocket（电脑主动连出）
+claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudflare Worker，或自己服务器上的 workerd + Caddy）
+                         （每台电脑一个连接器）    │ 每台电脑一个 Durable Object；只透明转发 HTTP（含 SSE），不解析 MCP
+                                                 ▼ WebSocket（各台电脑主动连出）
 本机客户端 ──stdio / 本机 HTTP──▶ agent（Python，跑在电脑上）──▶ 终端、文件、进程、桌面、本机 MCP 服务
                                     ▲ 启动、更新
                                  桌面端（WinUI 托盘程序）：连接状态、调用时间线、会话
 ```
 
 - **agent**（`agent/`）：所有工具都在这里。
-- **中转**（`relay/`）：负责 OAuth、在线状态、一次性文件链接，以及断线时替正在执行的调用续传。转发的每个请求都加一个 `x-winhand-user` 头，agent 靠它认出经中转的调用。
+- **中转**（`relay/`）：负责电脑清单与配对、OAuth、在线状态、一次性文件链接，以及断线时替正在执行的调用续传。转发的每个请求都加一个 `x-winhand-user` 头，agent 靠它认出经中转的调用。
+  - 每台电脑的东西都在 `/pc/<名称>/` 下：`mcp`（和 `mcp/<服务>`）、`agent`、`t/<令牌>`、`hook/<事件>`、status.json。电脑看到的路径不带这个前缀，仍是 `/mcp` 等。
+  - agent 不需要知道自己的名字：链接和 hook 的前缀取自它连接的地址去掉末尾的 `/agent`（`config.relay_base`）。
+  - 首页列出每台电脑和它的连接器地址；在首页填电脑名称和主人口令，得到一条一次性安装命令，在那台电脑的 PowerShell 里运行即装好、配好、连上。
+  - 部署：Cloudflare 用 Deploy 按钮，只要主人口令；自己的服务器用 `relay/selfhost/install.sh` 一条命令，再运行就是升级，先构建再换容器，检查不过自动回退。
 - **桌面端**（`desktop/`）：日常就用它。安装包由 `vX.Y.Z` 标签触发 `.github/workflows/release.yml` 构建并签名。AI 碰不到 WinHand 自己的窗口，所以更新要主人在桌面端里点。发版和部署的步骤见 `codestable/notes/001-发版与部署.md`。
 
 ## 统一语言
@@ -91,7 +95,11 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
 - **会话**：一个交互程序的一次运行，带状态和游标。
 - **后台任务**：`job_start` 起的任务，独立于 winhand 进程，winhand 重启也不丢。
 - **游标**：输出的绝对位置。从同一个游标接着问时，只回新的内容。
-- **一次性链接**：中转上的 `/t/<令牌>`，用一次就失效，文件内容不经过对话。
+- **一次性链接**：中转上的 `/pc/<电脑名称>/t/<令牌>`（单台电脑的旧部署是 `/t/<令牌>`），用一次就失效，文件内容不经过对话。
+- **电脑名称**：一台电脑在中转上的名字，小写字母、数字和中间的连字符，最长 32 个字符。它出现在连接器地址里，所以不收中文。
+- **配对**：在首页给一台电脑生成一次性安装命令 `irm https://<域名>/i/<码> | iex`，运行它换到这台电脑的设备令牌。用已有的名字配对，就是给那台换令牌。
+- **设备令牌**：电脑连中转用的令牌，每台一个，由中转生成，中转只存哈希。
+- **旧地址 / default**：中转设着 `AGENT_TOKEN` 时，单台电脑时代的 `/mcp`、`/agent`、`/t/…`、`/hook/…` 照常可用，指向一台叫 `default` 的电脑，也就是 `/pc/default/`。
 - **暂存目录**：`~/.winhand/scratch`，AI 跨调用存文件的地方。不自动删：每周问主人一次，主人同意才把 14 天没动的文件夹移进回收站，见 [files.md](files.md)。
 - **守卫**：`~/.winhand/guards.toml` 和项目目录里 .winhand/guards.toml 的规则，在动作执行前裁决。
 - **程序授权**：AI 第一次操作某个程序前，先问主人。
@@ -104,6 +112,13 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
 - **开场就加载的工具按用量定。** 标 anthropic/alwaysLoad 的 12 个：`context`、`run`、`job_start`、`job_status`、`job_stop`、`history`、`fs_read`、`fs_write`、`fs_edit`、`fs_search`、`fs_find`、`fs_list`。其余的按需用 ToolSearch 取。2026-11-17 按 11-02 至 11-17 的用量调过：`remote_run` 13 天 0 次，拿掉；`job_stop` 215 次、`history` 67 次，加上。
 - **单个结果约 4 万字节。** 按 UTF-8 字节算，一个中文字算 3 字节，接近它的 token 成本。读文件、搜索、命令输出到上限就停，并说明从哪里接着读。
 - **中转只转发，不解析 MCP。** 好处是 MCP 协议升级不用改中转；代价是电脑离线时，中转不能替它回答 tools/list 请求。
+- **各台电脑互不牵连。**
+  - 每台电脑一块地址、一个设备令牌、一个 OAuth 资源（`/pc/<名称>/mcp`，RFC 8707、RFC 9728）。给一台签的令牌，别的电脑不认；授权页写明是哪台电脑。
+  - 移除一台电脑，作废它的设备令牌、发给它的登录和它的连接，别的电脑不受影响。
+  - 不选「一个连接器、每个工具加一个用哪台电脑的参数」：40 多个工具都要加参数，模型漏带就会在错的电脑上执行。代价是每台电脑在 claude.ai 里各授权一次。
+  - OAuth 用同一个库的授权服务器加每台一个资源服务器。授权服务器的资源清单在构造时固定，所以按电脑清单构造，并在每个 isolate 里缓存。
+- **CIMD 默认关。** 部署在受限地区机房的 Worker 去取 Claude 的元数据文档，会被转到「该地区不可用」的页面（2026-11-13）。关掉以后客户端走动态注册，中转不用访问 Claude。原来开着 CIMD 的部署（claude.ai 的登录是 CIMD 客户端，例如 LAX）必须保持 `CIMD=on`，否则那些登录刷新会失败。
+- **首页公开。** 只显示电脑名称、在线与否、winhand 版本和登录数，不显示 Windows 名称和系统版本。配对、移除电脑、退出登录都要主人口令，和授权页共用一个错误计数。
 - **不是沙箱。** 守卫、程序授权、让路都只防误操作，挡不住刻意绕路：`run` 里的程序自己读写什么，守卫管不到。真正要隔离时，用系统权限或单独的账户。
 - **长期质量约束：**
   - 可靠性：回复在路上丢了，也能核对和接上（`history()`、游标、任务编号跨重启连续），不让 AI 盲目重发。
@@ -116,5 +131,6 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
 - 想知道长任务怎么等，为什么经中转每次只能等 40 秒 → [waiting.md](waiting.md)
 - 要在沙箱和电脑之间传很多文件或大文件，或者操作服务器 → [files.md](files.md)
 - 要改桌面工具，或想弄清 AI 什么时候会停下来等人 → [desktop.md](desktop.md)
-- 为什么这样选、否掉了哪些做法 → `.agents/notes/`
-- 这些能力是怎样一轮轮做出来、在电脑上怎样实测的 → `codestable/epics/001-x-使用复盘四轮强化/`（已关闭，只作历史和证据）
+- 部署中转、接电脑、多台电脑的地址和安全设计 → `docs/relay.md`；自己的服务器 → `relay/selfhost/README.md`
+- 为什么这样选、否掉了哪些做法 → `.agents/notes/`（多台电脑：`.agents/notes/implemented/architecture/2026-11-18-multi-pc-relay.md`）
+- 这些能力是怎样一轮轮做出来、在电脑上怎样实测的 → `codestable/epics/001-x-使用复盘四轮强化/`、`codestable/epics/002-o-第二次复盘五轮强化/`、`codestable/epics/003-x-简单部署与多台电脑/`（003 已关闭，只作历史和证据）

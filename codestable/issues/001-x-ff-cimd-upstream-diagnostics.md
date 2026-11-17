@@ -2,7 +2,7 @@
 kind: issue
 title: "CIMD 上游故障受限诊断与错误处理"
 type: ff
-status: open
+status: closed
 created: 2026-11-13
 ---
 
@@ -17,3 +17,7 @@ Claude 原 OAuth/CIMD 登录在 14:35:39 UTC 到达 /authorize，Worker 抛出 C
 - 边界：不使用诊断返回值鉴权；保留原库 5KB 限长、超时、URL/PKCE/OAuth 校验。未撤销旧授权，未修改密钥、访问策略或路由。
 - 回滚：此前线上 Worker 版本 8fadec56-2b98-4fb2-9bf2-5e6d8a104638。代码变更未提交。
 - codestable：本记录说明诊断阶段现状；未改变原 OAuth 架构，尚未宣称连接修复。
+- 对 `codestable/` 的影响（2026-11-18 关闭时补）：
+  - 根因：Cloudflare 上的 Worker 在受限地区出口取 Claude 的元数据，被转到「该地区不可用」的页面。生产 11-13 搬到 LAX 自托管。
+  - Epic 003 把 CIMD 改成默认关，新部署走动态注册；开着 CIMD 的旧部署要保持 `CIMD=on`。这两条已写进 `codestable/spec/index.md` 的边界一节。
+  - 诊断代码 `relay/src/cimd-diagnostic.ts` 随 Epic 003 / Issue 001 进了仓库，CIMD 失败时仍回可重试的 503。

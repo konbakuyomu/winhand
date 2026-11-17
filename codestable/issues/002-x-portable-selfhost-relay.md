@@ -2,7 +2,7 @@
 kind: issue
 title: "可移植自托管中转与 LAX 验证"
 type: feature
-status: open
+status: closed
 created: 2026-11-13
 ---
 
@@ -45,3 +45,17 @@ Claude网页连接器创建最初遇429，未绕过限流。之后独立UI/主�
 用户运行中要求安全/恢复审计，已完成非破坏性核查，无重启/重建。服务及本机边界/持久化权限/自启动正常；54测试通过。日志限额仅仓库候选，Node启动器后备及SSH spawn-error恢复磁盘代码已同步、下一次正常启动生效；Node watchdog和生产定时备份尚未安排；额外不可解析ACL未改。完整证据见电脑上 LAX 部署记录的审计章节。
 
 不自动关闭本票、提交或推送。LAX服务、Windows链路、API及Claude网页调用均有验收记录，常规收尾仍需用户授权；日志/恢复等后续改良保持明确未生效边界。
+
+## 关闭时（2026-11-18）
+
+- 回写：
+  - 自托管这种部署形态写进了 `codestable/spec/index.md` 的中转一节：同一份代码，workerd 加 Caddy，`install.sh` 一条命令部署和升级；
+  - 部署和升级步骤在 `relay/selfhost/README.md` 和 `codestable/notes/001-发版与部署.md`；
+  - 取舍见 `.agents/notes/implemented/architecture/2026-11-13-portable-relay-boundary.md`。
+- 关闭判断：
+  - LAX 自 11-13 起在生产运行；
+  - 代码 11-18 随 Epic 003 进了仓库，并加上一条命令的部署；
+  - LAX 11-18 用 `install.sh --cimd on` 升级成功（见 `codestable/epics/003-x-简单部署与多台电脑/issues/005-x-一键部署.md`）。
+- 遗留（原票里就写着尚未安排，这次也没做）：
+  - 生产的定期备份与恢复演练；
+  - 电脑上 SSH 隧道 Node 进程崩溃后的看门狗。
