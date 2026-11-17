@@ -6,20 +6,21 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": { "enabled": true },
   "kv_namespaces": [
-    // `npx wrangler kv namespace create OAUTH_KV`, then paste the id here
+    // The Deploy to Cloudflare button creates the namespace and puts its id here. By hand:
+    // `npx wrangler kv namespace create OAUTH_KV`, then paste the id.
     { "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_ID" }
   ],
   "durable_objects": {
     "bindings": [{ "name": "BRIDGE", "class_name": "Bridge" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Bridge"] }],
-  "vars": {
-    // Public origin claude.ai will use, e.g. "https://mcp.example.com"
-    "PUBLIC_ORIGIN": ""
-  }
-  // Serve on your own domain (workers.dev is often unreachable from mainland China):
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Bridge"] }]
+  // Serve on your own domain (*.workers.dev is often unreachable from mainland China): add a
+  // Custom Domain to the Worker in the dashboard, or
   // "routes": [{ "pattern": "mcp.example.com", "custom_domain": true }]
-  // Secrets (never in this file): `npx wrangler secret put OWNER_PASSPHRASE` and `... AGENT_TOKEN`
-  // Optional: `... HOOK_TOKEN` lets cloud Claude Code sessions fetch this machine's rules at
-  // session start (see `winhand bridge init`).
+  // Secret (never in this file): OWNER_PASSPHRASE, asked for by the deploy button, or
+  // `npx wrangler secret put OWNER_PASSPHRASE`. Computers are paired on the relay's home page.
+  // Optional variables: PUBLIC_ORIGIN (default: each request's origin), CIMD=on, AGENT_GRACE_S;
+  // optional secrets: HOOK_TOKEN (cloud sessions fetch this machine's rules at session start, see
+  // `winhand bridge init`), AGENT_TOKEN (only for a relay that still serves the computer of the
+  // single-computer days at the old addresses).
 }

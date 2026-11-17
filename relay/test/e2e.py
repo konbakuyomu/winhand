@@ -131,13 +131,13 @@ async def many_sign_ins(http: httpx.AsyncClient) -> None:
           and not await signed_in(http, renewed.json()["access_token"]),
           "past 20 sign-ins, the oldest are signed out")
     check(await signed_in(http, newest[0]) and await signed_in(http, newest[-1]), "the newest 20 stay signed in")
-    check("现在有 20 个登录" in (await http.get(f"{BASE}/")).text, "the status page counts the sign-ins")
+    check("Claude 登录：20 个" in (await http.get(f"{BASE}/")).text, "the status page counts the sign-ins")
 
     wrong = await http.post(f"{BASE}/signout", data={"passphrase": "nope"})
     check(wrong.status_code == 401 and "口令不对" in wrong.text and await signed_in(http, newest[-1]),
           "signing everyone out needs the passphrase")
     done = await http.post(f"{BASE}/signout", data={"passphrase": PASSPHRASE})
-    check(done.status_code == 200 and "已退出 20 个登录" in done.text and "现在有 0 个登录" in done.text,
+    check(done.status_code == 200 and "已退出 20 个登录" in done.text and "Claude 登录：0 个" in done.text,
           f"the owner signs every client out ({done.status_code})")
     check(not await signed_in(http, newest[-1]), "a signed-out token is refused")
 
@@ -223,7 +223,7 @@ async def resumed_across_a_drop(http: httpx.AsyncClient, token: str) -> None:
     agent = asyncio.create_task(run_forever(url, AGENT_TOKEN, mcp=build_server(Config()), stop=stop))
     try:
         for _ in range(100):
-            if "电脑在线" in (await http.get(f"{BASE}/")).text:
+            if "在线 · winhand" in (await http.get(f"{BASE}/")).text:
                 break
             await asyncio.sleep(0.1)
         transport = StreamableHttpTransport(f"{BASE}/mcp", headers={"Authorization": f"Bearer {token}"})
@@ -306,10 +306,10 @@ async def main() -> None:
         check('"result"' in answered.text and "offline" not in answered.text,
               f"a call made during the reconnect is served once the agent is back ({answered.text[:120]})")
         for _ in range(100):
-            if "电脑在线" in (await http.get(f"{BASE}/")).text:
+            if "在线 · winhand" in (await http.get(f"{BASE}/")).text:
                 break
             await asyncio.sleep(0.1)
-        check("电脑在线" in (await http.get(f"{BASE}/")).text, "status page shows the agent online")
+        check("在线 · winhand" in (await http.get(f"{BASE}/")).text, "status page shows the agent online")
 
         hooked = await http.post(hook_url, content=start, headers={
             "X-Winhand-Hook-Token": HOOK_TOKEN, "X-Winhand-Repo": "nobody/none", "content-type": "application/json"})

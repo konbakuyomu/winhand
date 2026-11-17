@@ -55,6 +55,16 @@ def main(argv: list[str] | None = None) -> int:
     conn.add_argument("--url", help="relay agent URL, e.g. wss://mcp.example.com/agent")
     conn.add_argument("--token", help="device token issued by the relay")
     conn.add_argument("--save", action="store_true", help="store --url/--token in config.toml")
+    login = sub.add_parser(
+        "login", help="store the relay address and device token in config.toml, without connecting"
+    )
+    login.add_argument(
+        "--url", required=True, help="this computer's agent URL, e.g. wss://mcp.example.com/pc/home/agent"
+    )
+    login.add_argument("--token", help="device token (--token-stdin keeps it off the command line)")
+    login.add_argument(
+        "--token-stdin", action="store_true", help="read the device token from the first line of stdin"
+    )
     mcp = sub.add_parser("mcp", help="local MCP servers offered through the relay at /mcp/<name>")
     mcp.add_argument("action", choices=["list", "import", "test"])
     mcp.add_argument("names", nargs="*", help="import: which ones (default all); test: which to test")
@@ -90,6 +100,26 @@ def main(argv: list[str] | None = None) -> int:
         build_server().run(
             transport="http", host=args.host, port=args.port, show_banner=False, host_origin_protection="auto"
         )
+        return 0
+    if cmd == "login":
+        from . import config
+
+        if args.token_stdin:
+            # bytes: Windows PowerShell may put a UTF-8 BOM in front of what it pipes to a program
+            raw = (
+                sys.stdin.buffer.readline() if hasattr(sys.stdin, "buffer") else sys.stdin.readline().encode()
+            )
+            token = raw.removeprefix(b"\xef\xbb\xbf").decode("utf-8", "replace").lstrip("\ufeff").strip()
+        else:
+            token = (args.token or "").strip()
+        if not token:
+            parser.error("give the device token with --token-stdin (on stdin) or --token")
+        url = args.url.strip()
+        if not url.startswith(("wss://", "ws://")):
+            parser.error(f"--url must be the relay's agent URL (wss://...), not {url!r}")
+        cfg = config.load()
+        cfg.relay_url, cfg.device_token = url, token
+        print(f"saved to {config.save(cfg)}")  # never the token
         return 0
     if cmd == "connect":
         from . import config

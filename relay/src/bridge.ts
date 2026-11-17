@@ -65,7 +65,9 @@ export class Bridge extends DurableObject<Env> {
     const url = new URL(request.url);
     if (url.pathname === "/connect") return this.acceptAgent(request);
     if (url.pathname === "/status") return Response.json(await this.status());
-    return this.forward(request, url.searchParams.get("path") ?? "/mcp", request.headers.get("x-winhand-user") ?? "");
+    if (url.pathname === "/disconnect") return this.disconnect();
+    const base = url.searchParams.get("base") ?? "";
+    return this.forward(request, url.searchParams.get("path") ?? "/mcp", request.headers.get("x-winhand-user") ?? "", base);
   }
 
   private async status() {
@@ -104,16 +106,29 @@ export class Bridge extends DurableObject<Env> {
     for (const wake of waiting) wake();
   }
 
-  private async offlineMessage(waitedMs: number): Promise<string> {
+  /** The computer was removed: close its connection (its token no longer opens a new one). */
+  private disconnect(): Response {
+    for (const socket of this.ctx.getWebSockets("agent")) {
+      try {
+        socket.serializeAttachment({ ...(socket.deserializeAttachment() as object | null), active: false });
+        socket.close(1008, "this computer was removed from the relay");
+      } catch {
+        // already closed
+      }
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  /** Why a call got no answer; `base` is the computer's public address space (status.json is there). */
+  private async offlineMessage(waitedMs: number, base: string): Promise<string> {
     const since = await this.ctx.storage.get<number>("offlineSince");
     const when = since ? ` since ${new Date(since).toISOString()} (${describe(Date.now() - since)} ago)` : "";
     const waited = waitedMs
       ? `waited ${Math.round(waitedMs / 1000)} s for it to reconnect`
       : "did not wait, it has been away for minutes";
-    const origin = this.env.PUBLIC_ORIGIN?.replace(/\/$/, "");
-    const watch = origin
-      ? ` To learn when it is back without calling tools: ${origin}/status.json says "online": true ` +
-        `(a background loop such as: until curl -fsS ${origin}/status.json | grep -q '"online":true'; do sleep 60; done).`
+    const watch = base
+      ? ` To learn when it is back without calling tools: ${base}/status.json says "online": true ` +
+        `(a background loop such as: until curl -fsS ${base}/status.json | grep -q '"online":true'; do sleep 60; done).`
       : "";
     return (
       `winhand on the PC is offline${when}; ${waited}. ` +
@@ -206,7 +221,7 @@ export class Bridge extends DurableObject<Env> {
     socket.send(JSON.stringify(frame));
   }
 
-  private async forward(request: Request, path: string, user: string): Promise<Response> {
+  private async forward(request: Request, path: string, user: string, base: string): Promise<Response> {
     // MCP calls are small JSON-RPC bodies: read them, so a failure can be answered as a JSON-RPC
     // error for the same id, which every client shows to the model. File transfers stream, and a
     // session-start hook (/hook/...) is not JSON-RPC: a failure there is a plain 5xx.
@@ -220,7 +235,7 @@ export class Bridge extends DurableObject<Env> {
     const longGone = since !== undefined && Date.now() - since > LONG_OFFLINE_MS;
     const limit = hook ? HOOK_GRACE_MS : longGone ? 0 : undefined;
     const socket = await this.waitForAgent(limit);
-    if (!socket) return reply(await this.offlineMessage(limit === 0 ? 0 : Math.min(this.graceMs(), limit ?? Infinity)), 503);
+    if (!socket) return reply(await this.offlineMessage(limit === 0 ? 0 : Math.min(this.graceMs(), limit ?? Infinity), base), 503);
     const headTimeout = hook ? HOOK_HEAD_TIMEOUT_MS : HEAD_TIMEOUT_MS;
 
     const id = crypto.randomUUID();

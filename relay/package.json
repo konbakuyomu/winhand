@@ -5,7 +5,11 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc",
-    "test": "node --disable-warning=ExperimentalWarning --test test/bridge.test.mjs test/hook.test.mjs"
+    "test": "node --disable-warning=ExperimentalWarning --test test/bridge.test.mjs test/hook.test.mjs test/cimd-diagnostic.test.mjs test/selfhost.test.mjs test/pcs.test.mjs",
+    "selfhost:prepare": "node selfhost/prepare.mjs",
+    "selfhost:start": "node selfhost/start.mjs",
+    "selfhost:typecheck": "tsc -p selfhost/tsconfig.json",
+    "test:runtime": "node test/selfhost-runtime.mjs && node test/multi-pc-runtime.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.1.0"
@@ -16,5 +20,12 @@
     "wrangler": "^4.141.0"
   },
   "private": true,
-  "type": "module"
+  "type": "module",
+  "cloudflare": {
+    "bindings": {
+      "OWNER_PASSPHRASE": {
+        "description": "主人口令：授权 Claude 和在中转首页配对电脑时输入。用一串足够长的随机字符（至少 24 个）。"
+      }
+    }
+  }
 }

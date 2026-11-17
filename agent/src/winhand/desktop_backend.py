@@ -346,12 +346,13 @@ class Backend:
     # ------------------------------------------------------ local MCP servers
 
     def public_base(self) -> str | None:
-        """https://<relay host>/mcp: where remote clients reach the local servers."""
+        """https://<relay host>[/pc/<name>]/mcp: where remote clients reach the local servers."""
         if not self.cfg.relay_url:
             return None
-        parsed = urlparse(self.cfg.relay_url)
-        scheme = "https" if parsed.scheme == "wss" else "http"
-        return f"{scheme}://{parsed.netloc}/mcp"
+        try:
+            return f"{config.relay_base(self.cfg.relay_url)}/mcp"
+        except ValueError:
+            return None
 
     def mcp_state(self) -> dict:
         base = self.public_base()

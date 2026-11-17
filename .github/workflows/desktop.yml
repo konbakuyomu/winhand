@@ -3,9 +3,9 @@ name: desktop
 on:
   push:
     branches: [main]
-    paths: ["agent/**", "desktop/**", ".github/workflows/desktop.yml"]
+    paths: ["agent/**", "desktop/**", "relay/**", ".github/workflows/desktop.yml"]
   pull_request:
-    paths: ["agent/**", "desktop/**", ".github/workflows/desktop.yml"]
+    paths: ["agent/**", "desktop/**", "relay/**", ".github/workflows/desktop.yml"]
   workflow_dispatch:
 
 permissions:
@@ -52,3 +52,10 @@ jobs:
             desktop/out/releases/*
             desktop/out/signatures.json
           if-no-files-found: ignore
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # the command the relay's home page gives, run against a local relay with this installer
+      - name: One-line install (pair, install, login, connect)
+        shell: pwsh
+        run: ./relay/test/Install-E2E.ps1

@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # multi-pc-runtime builds the relay as it was before Epic 003 from git history
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
@@ -39,3 +41,11 @@ jobs:
           npx wrangler dev --port 8787 --ip 127.0.0.1 > wrangler.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/ >/dev/null && break; sleep 1; done
           uv run --project ../agent python test/e2e.py || (cat wrangler.log; exit 1)
+      - name: Self-host and several computers on real workerd (OAuth, pairing, old sign-ins after the upgrade)
+        working-directory: relay
+        run: |
+          npm ci --prefix selfhost/runtime --ignore-scripts
+          export WORKERD_BIN="$PWD/selfhost/runtime/node_modules/@cloudflare/workerd-linux-64/bin/workerd"
+          npm run selfhost:typecheck
+          node test/selfhost-runtime.mjs
+          node test/multi-pc-runtime.mjs

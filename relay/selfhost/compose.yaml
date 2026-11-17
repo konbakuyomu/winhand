@@ -1,0 +1,42 @@
+services:
+  relay:
+    image: ${WINHAND_IMAGE:-winhand-relay:local}
+    network_mode: host
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    command: ["node", "selfhost/serve.mjs"]
+    environment:
+      PUBLIC_ORIGIN: https://${WINHAND_HOST:?set WINHAND_HOST to the relay's domain}
+      WINHAND_STATE_DIR: /state
+      OWNER_PASSPHRASE_FILE: /run/secrets/owner-passphrase
+      # Only a relay that still serves the computer of the single-computer days has secrets/agent-token;
+      # install.sh then sets AGENT_TOKEN_FILE=/run/secrets/agent-token in .env. Empty: no old addresses.
+      AGENT_TOKEN_FILE: ${AGENT_TOKEN_FILE:-}
+      # on: accept OAuth clients identified by a metadata document URL (claude.ai signs in that way
+      # where CIMD is on). A relay whose existing sign-ins were made that way must keep it on.
+      CIMD: ${CIMD:-}
+      PROXY_TOKEN_FILE: /run/secrets/proxy-token
+    volumes:
+      - ./secrets:/run/secrets:ro
+      - ./state:/state
+      - ./generated:/app/dist
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+  https:
+    image: caddy:2-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+    network_mode: host
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    depends_on: [relay]
+    environment:
+      WINHAND_HOST: ${WINHAND_HOST:?set WINHAND_HOST to the relay's domain}
+      PROXY_TOKEN: ${PROXY_TOKEN:?required}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-data:/data
+      - ./caddy-config:/config
+    security_opt: ["no-new-privileges:true"]

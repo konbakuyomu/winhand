@@ -322,14 +322,11 @@ MATCHER = "startup|resume|clear|compact"
 
 
 def relay_origin(url: str) -> str:
-    """https://<host> of the relay, from its agent URL (wss://<host>/agent) or any URL on it."""
-    from urllib.parse import urlsplit
+    """Where this computer's hooks are on the relay, from its agent URL or any URL on it:
+    https://<host>/pc/<name> on a relay with several computers, https://<host> otherwise."""
+    from . import config
 
-    parts = urlsplit(url.strip())
-    if parts.scheme not in ("wss", "https", "ws", "http") or not parts.hostname:
-        raise ValueError(f"not a relay URL: {url!r}")
-    scheme = "https" if parts.scheme in ("wss", "https") else "http"
-    return f"{scheme}://{parts.netloc}"
+    return config.relay_base(url)
 
 
 def hook_command(origin: str, part: str | None = None) -> str:
@@ -403,7 +400,9 @@ def merge_settings(path: str, origin: str) -> dict:
 
 def setup_text(origin: str) -> str:
     """What the person sets up in the cloud environment, printed by `winhand bridge init`."""
-    host = origin.split("://", 1)[1]
+    from urllib.parse import urlsplit
+
+    host = urlsplit(origin).netloc
     return f"""云端环境里还要做一次设置（会话标题栏的云环境菜单 → Edit）：
 
 1. 推荐：Network secrets（Pro/Max 才有）里加一条

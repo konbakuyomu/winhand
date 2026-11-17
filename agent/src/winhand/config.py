@@ -58,6 +58,24 @@ def config_path() -> Path:
     return home() / "config.toml"
 
 
+_PC_SPACE = re.compile(r"^(/pc/[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?)(?:/.*)?$")
+
+
+def relay_base(url: str) -> str:
+    """The public address space this computer has on its relay, from the agent's URL or any URL on
+    the relay: wss://host/pc/home/agent -> https://host/pc/home (a relay with several computers);
+    wss://host/agent -> https://host (the single-computer addresses). One-time links, hooks and the
+    computer's MCP endpoints hang below it."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("wss", "https", "ws", "http") or not parts.hostname:
+        raise ValueError(f"not a relay URL: {url!r}")
+    scheme = "https" if parts.scheme in ("wss", "https") else "http"
+    space = _PC_SPACE.match(parts.path)
+    return f"{scheme}://{parts.netloc}{space.group(1) if space else ''}"
+
+
 SCRATCH_ENV = "WINHAND_SCRATCH"
 
 
