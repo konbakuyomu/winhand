@@ -21,8 +21,10 @@ import asyncio
 import collections
 import contextlib
 import hashlib
+import json
 import math
 import os
+import re
 import secrets
 import threading
 import time
@@ -32,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from . import bundle, fs, winenv
+from . import bundle, config, fs, winenv
 
 DEFAULT_TTL_S = 600
 MAX_TTL_S = 1800
@@ -43,6 +45,12 @@ MAX_PART_MB = 64
 MAX_PARTS = 128
 MAX_PARTED_MB = 2048
 LISTED = 20  # names given one by one in an answer
+WAIT_HOLD_S = 50
+WAKE_NOTE = (
+    "Run `wake` in the background (Bash run_in_background, timeout 7200000 ms). "
+    "It ends when the condition holds and you are woken with its final status; "
+    "if it is stopped at 2 h, run it again."
+)
 
 
 class TransferError(RuntimeError):
@@ -90,6 +98,18 @@ _lock = threading.Lock()
 _public_base: str | None = None
 recent: collections.deque[dict] = collections.deque(maxlen=20)
 listeners: list[Callable[[dict], None]] = []
+_wait_links: dict[str, dict] | None = None  # token hash -> condition; kept in wait-links.json
+_wait_done: dict[str, dict] = {}  # token hash -> the answer once the condition held
+WAIT_FORGET_S = 86400  # an expired wait link still answers 410 this long, then 404 like any unknown one
+
+
+def _waits() -> dict[str, dict]:
+    """The wait links, read from disk on first use: they outlive a winhand restart or update."""
+    global _wait_links
+    if _wait_links is None:
+        path = config.home() / "wait-links.json"
+        _wait_links = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    return _wait_links
 
 
 def set_relay(url: str | None) -> None:
@@ -135,6 +155,43 @@ def _issue(ticket: Ticket) -> tuple[str, str]:
         _sweep(time.time())
         _tickets[_key(token)] = ticket
     return token, f"{public_base()}/t/{token}"
+
+
+def issue_wait(cond: dict, ttl_s: float = 43200) -> dict:
+    """A wait link: GET /t/<token> holds up to WAIT_HOLD_S and answers {"done": true, ...} once the
+    condition holds ({"job": id} ends, its new output from `cursor` matches `patterns`, {"file":
+    path} appears or changes, {"online": true}). `wake` is a bash line that polls it until then:
+    run in a cloud sandbox's background, it ends, and so wakes the session, without a turn spent
+    waiting. Only the state goes out, never output."""
+    if set(cond) not in ({"job"}, {"job", "patterns", "cursor"}, {"file"}, {"online"}):
+        raise TransferError("wait condition is job, job with patterns and cursor, file, or online=true")
+    if "online" in cond and cond["online"] is not True:
+        raise TransferError("online must be true")
+    for pattern in cond.get("patterns", []):
+        re.compile(pattern, re.MULTILINE)
+    base = public_base()
+    token = secrets.token_urlsafe(32)
+    issued = time.time()
+    expires = issued + ttl_s
+    with _lock:
+        waits = _waits()
+        for old in [k for k, t in waits.items() if t["expires"] < issued - WAIT_FORGET_S]:
+            del waits[old]
+            _wait_done.pop(old, None)
+        waits[_key(token)] = {"cond": cond, "issued": issued, "expires": expires}
+        path = config.home() / "wait-links.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(waits, separators=(",", ":")), encoding="utf-8")
+    url = f"{base}/t/{token}"
+    return {
+        "url": url,
+        "expires": datetime.fromtimestamp(expires).astimezone().isoformat(timespec="seconds"),
+        "wake": (
+            f"u='{url}'; while :; do r=$(curl -sS -m 75 \"$u\" 2>/dev/null); "
+            'case "$r" in *\'"done":true\'*|*expired*|*unknown*) echo "$r"; break;; '
+            "'') sleep 15;; *) sleep 5;; esac; done"
+        ),
+    }
 
 
 def _ttl(ttl_s: float) -> float:
@@ -380,9 +437,56 @@ def _unpacked(archive: str, ticket_path: str, overwrite: bool, got: str, size: i
 
 async def endpoint(request):
     """Starlette handler for /transfer/{token}: GET downloads, PUT/POST uploads."""
-    from starlette.responses import FileResponse, JSONResponse
+    from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
     token = request.path_params.get("token", "")
+    key = _key(token)
+    wait = _waits().get(key)
+    if wait is not None:
+        if request.method != "GET":
+            return PlainTextResponse("method not allowed", status_code=405)
+        from . import jobs, proc
+        from .tools_desktop import _is_run, _new_text
+
+        cond = wait["cond"]
+        regexes = [re.compile(p, re.MULTILINE) for p in cond.get("patterns", [])]
+        deadline = time.monotonic() + WAIT_HOLD_S
+        stderr_before = None
+        while True:
+            if time.time() >= wait["expires"]:
+                return PlainTextResponse("expired wait link", status_code=410)
+            if key in _wait_done:
+                result = _wait_done[key]
+                break
+            if "job" in cond:
+                fetch = proc.run_status if _is_run(cond["job"]) else jobs.status
+                status = await asyncio.to_thread(fetch, cond["job"], cond.get("cursor", 0))
+                result = {"done": status["state"] != "running"}
+                result.update({k: status[k] for k in ("state", "exit_code") if k in status})
+                if not result["done"] and regexes:
+                    if stderr_before is None:
+                        stderr_before = status.get("stderr_size", 0)
+                    text = _new_text(status, stderr_before)
+                    matched = next((r.pattern for r in regexes if r.search(text)), None)
+                    if matched is not None:
+                        result.update(done=True, matched=matched)
+            elif "file" in cond:
+                path = fs._p(cond["file"])
+                done = False
+                if os.path.exists(path):
+                    stamp = os.stat(path)
+                    done = stamp.st_mtime > wait["issued"] or stamp.st_ctime > wait["issued"]
+                result = {"done": done}
+            else:
+                result = {"done": True}
+            if result["done"]:
+                _wait_done[key] = result
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(1, remaining))
+        return Response(json.dumps(result, separators=(",", ":")), media_type="application/json")
     if request.method == "GET":
         ticket = take(token, "download")
         if ticket is None:

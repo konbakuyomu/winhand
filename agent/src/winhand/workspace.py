@@ -1312,7 +1312,10 @@ def _truncated(path: str, shown: int, total: int) -> str:
     return f"showing {shown} of {total} lines; read the rest with fs_read(path={path!r}, offset={shown + 1})"
 
 
-def context(cfg: Config, path: str | None = None, repo: str | None = None) -> dict:
+_context_cache: dict[str, dict[str, str]] = {}
+
+
+def context(cfg: Config, path: str | None = None, repo: str | None = None, since: str | None = None) -> dict:
     repo_info = find_repo(cfg, repo) if repo else None
     if repo_info:
         if not path:
@@ -1466,14 +1469,50 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
         if key in out:
             out[key] = mask(out[key])
 
+    import hashlib
+
+    texts = {}
+    for item in rules.ordered():
+        text = rules.texts.get(id(item))
+        item = mask(item)
+        item["sha"] = None
+        if text is not None:
+            text = mask(text)
+            item["lines"] = len(text.splitlines())
+            item["sha"] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+            item["content"] = text
+            texts[item["path"]] = text
+        out["rules"].append(item)
+    if masked:
+        out["redacted"] = masked
+        out["redaction_note"] = redact.NOTE
+    body = json.dumps(out, sort_keys=True, ensure_ascii=False, default=str)
+    mark = hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()[:16]
+    out["digest"] = mark
+    previous = _context_cache.get(since) if since != mark else None
+    _context_cache[mark] = texts
+    if len(_context_cache) > 64:
+        del _context_cache[next(iter(_context_cache))]
+
+    items = out["rules"]
+    out["rules"] = []
     # the budget is what the masked result will be once it is JSON: backslashes, quotes and line
     # breaks take two characters there; 300 more for the redaction count and note, and room to
     # name the files that do not fit at all
     budget = BUDGET_CHARS - _json_len(out) - 300 - OMITTED_CHARS
     omitted: list[str] = []
-    for item in rules.ordered():
-        text = rules.texts.get(id(item))
-        item = mask(item)
+    for item in items:
+        text = item.pop("content", None)
+        old = previous.get(item["path"]) if previous is not None else None
+        if text is not None and old is not None:
+            if text == old:
+                item = {key: item[key] for key in ("path", "format", "scope", "lines", "sha")}
+                item["unchanged"] = True
+                text = None
+            elif text.startswith(old):
+                item = {key: item[key] for key in ("path", "format", "scope", "lines", "sha")}
+                item["appended_after_line"] = len(old.splitlines())
+                text = text[len(old) :]
         if text is None:
             cost = _json_len(item) + 2
             if cost > budget:
@@ -1482,29 +1521,50 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
             out["rules"].append(item)
             budget -= cost
             continue
-        text = mask(text)
         lines = text.splitlines()
-        item["lines"] = len(lines)
         cost = _json_len(item) + len(', "content": ""') + 2
         if cost + _encoded(text) <= budget:
             item["content"] = text
             budget -= cost + _encoded(text)
             out["rules"].append(item)
             continue
-        cost += _encoded(_truncated(item["path"], len(lines), len(lines))) + len(', "truncated": ""')
+        total = item["lines"]
+        cost += _encoded(
+            f"showing headings and lines {total}-{total} of {total}; read lines 1-{total} with "
+            f"fs_read(path={item['path']!r}, offset=1, limit={total})"
+        ) + len(', "truncated": ""')
         if cost > budget:
             omitted.append(item["path"])
             continue
-        shown_lines, spent = [], 0
-        for line in lines:
+        headings = []
+        for number, line in enumerate(lines, total - len(lines) + 1):
+            if not line.startswith("#"):
+                continue
+            if len(headings) == 60:
+                break
+            heading = f"{number}: {line}"
+            prefix = "Headings:\n" + "\n".join(headings + [heading]) + "\n\n"
+            if cost + _encoded(prefix) + _encoded(lines[-1]) + 2 > budget:
+                break
+            headings.append(heading)
+        prefix = "Headings:\n" + "\n".join(headings) + "\n\n" if headings else ""
+        shown_lines, spent = [], _encoded(prefix)
+        for line in reversed(lines):
             line_cost = _encoded(line) + 2
             if cost + spent + line_cost > budget:
                 break
             shown_lines.append(line)
             spent += line_cost
-        if shown_lines:
-            item["content"] = "\n".join(shown_lines)
-        item["truncated"] = _truncated(item["path"], len(shown_lines), len(lines))
+        if not shown_lines:
+            omitted.append(item["path"])
+            continue
+        first = total - len(shown_lines) + 1
+        item["content"] = prefix + "\n".join(reversed(shown_lines))
+        item["truncated"] = (
+            f"showing {'headings and ' if headings else ''}lines {first}-{total} of {total}; "
+            f"read lines 1-{first - 1} with "
+            f"fs_read(path={item['path']!r}, offset=1, limit={first - 1})"
+        )
         budget -= cost + spent
         out["rules"].append(item)
     if omitted:
@@ -1520,18 +1580,7 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None) -> di
             "note": "these rule files did not fit in this answer; read them with fs_read"
             + (f" ({len(omitted) - len(names)} not even named)" if len(names) < len(omitted) else ""),
         }
-    if masked:
-        out["redacted"] = masked
-        out["redaction_note"] = redact.NOTE
     return _sendable(out)
-
-
-def digest(answer: dict) -> str:
-    """A short fingerprint of a context() answer: the same rules, skills and guards give the same one."""
-    import hashlib
-
-    body = json.dumps(answer, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def briefed(answer: dict) -> dict:

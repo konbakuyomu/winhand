@@ -333,6 +333,54 @@ def _glob_match(path: str, pattern: str, base: str | None) -> bool:
     return _PurePath(path).full_match(pattern if pattern.startswith("**") else "**/" + pattern)
 
 
+def _command_view(text: str) -> str:
+    """Keep commands visible while masking quoted search patterns in place."""
+    out = list(text)
+    command = ""
+    first_arg = True
+    pattern = False
+    pattern_list = False
+    for token in re.finditer(r"""'(?:''|[^'])*'|"(?:`.|""|[^"`])*"|[^\s'";|&,]+|[;|&,\n'\"]""", text):
+        value = token.group()
+        if value in (";", "|", "&", "\n"):
+            command = ""
+            first_arg = True
+            pattern = pattern_list = False
+            continue
+        if not command:
+            command = value.casefold()
+            continue
+        quoted = (
+            len(value) >= 2
+            and value[0] in "'\""
+            and value[-1] == value[0]
+            and (token.start() == 0 or text[token.start() - 1].isspace() or text[token.start() - 1] == ",")
+            and (token.end() == len(text) or text[token.end()].isspace() or text[token.end()] in ",;|&")
+        )
+        mask = False
+        if command in ("select-string", "sls"):
+            if value.casefold() == "-pattern":
+                pattern, pattern_list = True, False
+            elif value == "," and pattern_list:
+                pattern = True
+            else:
+                mask = pattern and quoted
+                pattern, pattern_list = False, mask
+        elif command in ("rg", "grep", "findstr"):
+            if value.startswith("--pre"):  # rg runs this program on every file: nothing after it is masked
+                pattern = first_arg = False
+                command = "rg --pre"
+            elif value == "-e" and command in ("rg", "grep"):
+                pattern, first_arg = True, False
+            elif not value.startswith("-") or pattern:
+                mask = quoted and (pattern or first_arg)
+                pattern = first_arg = False
+        # Double-quoted substitutions execute commands, so leave them visible to the rules.
+        if mask and not (value[0] == '"' and ("$(" in value or "`" in value)):
+            out[token.start() + 1 : token.end() - 1] = "x" * (len(value) - 2)
+    return "".join(out)
+
+
 def matches(rule: Rule, action: Action) -> bool:
     if action.kind not in rule.on:
         return False
@@ -342,8 +390,14 @@ def matches(rule: Rule, action: Action) -> bool:
         if action.opaque:
             if not rule.blind:
                 return False
-        elif not (action.text and rule.match.search(action.text)):
-            return False
+        else:
+            text = (
+                _command_view(action.text)
+                if action.kind in ("command", "input") and action.text
+                else action.text
+            )
+            if not (text and rule.match.search(text)):
+                return False
     if rule.path and not any(
         _glob_match(v, g, rule.base) for p in action.paths for v in variants(p) for g in rule.path
     ):
@@ -430,6 +484,27 @@ def builtin_file() -> RuleFile:
                 Rule(BUILTIN, 4, ("command", "input"), "ask",
                      "这条 harmonia 命令会以明文输出密钥，或者删除变量、改变 Harmonia 的设置",
                      match=_HARMONIA_ASK, blind=False),
+                Rule(BUILTIN, 7, ("read", "write", "edit", "delete", "move"), "deny",
+                     "登录信息（令牌、密钥、浏览器资料）不交给模型",
+                     path=(
+                         "**/.config/colab-cli/token.json",
+                         "**/.config/colab-cli/sessions.json",
+                         "**/.config/gcloud/**",
+                         "**/application_default_credentials.json",
+                         "**/.git-credentials",
+                         "**/.netrc",
+                         "**/_netrc",
+                         "**/.docker/config.json",
+                         "**/GitHub CLI/hosts.yml",
+                         "**/gh/hosts.yml",
+                         "**/.ssh/id_rsa",
+                         "**/.ssh/id_ed25519",
+                         "**/.ssh/id_ecdsa",
+                         "**/AppData/Local/Google/Chrome/User Data/**",
+                         "**/AppData/Local/Microsoft/Edge/User Data/**",
+                         "**/AppData/Roaming/Mozilla/Firefox/Profiles/**",
+                         "**/AppData/Local/1Password/**",
+                     )),
             ],
         )  # fmt: skip
     return _builtin[(folder, store)]
@@ -539,6 +614,9 @@ def _where(rule: Rule) -> str:
 
 def refusal(verdict: Verdict, answer: str | None = None) -> str:
     lines = ["refused by a guard rule on this machine"]
+    if verdict.deny or verdict.ask:
+        rule = (verdict.deny or verdict.ask)[0][0]
+        lines[0] += f" ({_where(rule)}: {rule.reason[:60]})"
     for f in verdict.broken:
         lines.append(f"- {f.path} cannot be used ({f.error}); fix the file, then call again")
     for rule, action in verdict.deny:

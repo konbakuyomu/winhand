@@ -176,7 +176,14 @@ def snapshot(pid: int | None, created: float | None, quiet_s: float | None, key:
     }
     if quiet_s is not None:
         out["quiet_s"] = int(quiet_s)
-        if quiet_s >= STALL_AFTER_S and busy < 0.02:
+        stall_after = STALL_AFTER_S
+        if key is not None and not key.startswith("run-"):
+            from . import jobs
+
+            meta = jobs._read_json(jobs._root() / key / "job.json")
+            if meta and meta.get("quiet_ok_s") is not None:
+                stall_after = max(stall_after, meta["quiet_ok_s"])
+        if quiet_s >= stall_after and busy < 0.02:
             out["stalled"] = True
             out["stalled_note"] = (
                 f"no output for {int(quiet_s)} s and almost no CPU: it may be stuck (a dialog, a "

@@ -14,6 +14,7 @@ import re
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -1213,6 +1214,9 @@ def register(mcp: FastMCP) -> None:
         """List the visible windows and monitors, act on one window, or wait (up to 40 s) for a
         window to appear or go away (an installer step, a dialog, a program starting)."""
 
+        if action == "read":
+            action = "list"
+
         def work():
             if action == "list":
                 out = {"monitors": desktop.monitors(), "windows": desktop.windows()}
@@ -1364,6 +1368,8 @@ def register(mcp: FastMCP) -> None:
         wait polls (up to 40 s) until the control exists, is gone, is enabled or shows a value,
         e.g. an installer's Next button becoming enabled."""
 
+        action = {"tree": "inspect", "read": "inspect"}.get(action, action)
+
         def work():
             if not steps and action not in _UI_ACTIONS:
                 raise desktop.DesktopError("action is one of " + ", ".join(_UI_ACTIONS))
@@ -1382,6 +1388,7 @@ def register(mcp: FastMCP) -> None:
                     return out
                 return media_result({**out, "screenshot": facts}, Image(data=data, format=fmt))
             if action == "inspect":
+                desktop.require_capture(w)  # a password manager's control text is as private as its picture
                 return _ui_inspect(w, filter, name, automation_id, control_type)
             with presence.acting(f"ui {action}") as said:  # waits while the person uses the machine
                 out = _ui_act(
@@ -1520,6 +1527,23 @@ def register(mcp: FastMCP) -> None:
         keep_awake: Annotated[
             bool, Field(description="Hold off sleep while it runs (the display may still turn off)")
         ] = True,
+        stdin_file: Annotated[
+            str | None,
+            Field(
+                description="With args: read UTF-8 text from this file as stdin; cannot be used with stdin"
+            ),
+        ] = None,
+        keep: Annotated[
+            bool,
+            Field(
+                description="Start it again if its process vanishes (the PC restarted, it was killed); the "
+                "tray app checks every minute. Not with stdin, stdin_file or elevated"
+            ),
+        ] = False,
+        quiet_ok_s: Annotated[
+            float | None,
+            Field(description="Seconds without output that are normal for this job: no stall warning before"),
+        ] = None,
     ) -> dict:
         """Run a command in the background, independent of winhand: it keeps running even if
         winhand restarts or is reinstalled, and its output and exit code stay available via
@@ -1534,10 +1558,28 @@ def register(mcp: FastMCP) -> None:
             except secret_store.SecretError as exc:
                 return {"error": str(exc)}
             return jobs.start(
-                command, cwd, name, elevated, args, stdin, shell, env or None, timeout_s, after, keep_awake
+                command,
+                cwd,
+                name,
+                elevated,
+                args,
+                stdin,
+                shell,
+                env or None,
+                timeout_s,
+                after,
+                keep_awake,
+                stdin_file=stdin_file,
+                keep=keep,
+                quiet_ok_s=quiet_ok_s,
+                secrets=list(secrets or []),
             )
 
-        return await asyncio.to_thread(_errors, work)
+        result = await asyncio.to_thread(_errors, work)
+        if not result.get("error") and waiting.relayed():
+            result["wake"] = transfer.issue_wait({"job": result["id"]})["wake"]
+            result["wake_note"] = transfer.WAKE_NOTE
+        return result
 
     @mcp.tool
     async def job_status(
@@ -1569,6 +1611,17 @@ def register(mcp: FastMCP) -> None:
             list[str] | None,
             Field(description="Also show the end of these files (a log the job writes besides its output)"),
         ] = None,
+        prefix: Annotated[
+            str | None, Field(description="Without id: list jobs whose id or name starts with this text")
+        ] = None,
+        wake: Annotated[
+            bool,
+            Field(
+                description="Through the relay: also give `wake`, a bash line to run in the background that "
+                "ends when this job ends or its patterns match (the first id of a list; without id, "
+                "the first of files changes, or the PC is online)"
+            ),
+        ] = False,
     ) -> dict:
         """State (running/finished/vanished), exit code and output of a background job or of a `run`
         that was still going (run-N). With wait_s it blocks until the job ends, new output matches
@@ -1576,15 +1629,37 @@ def register(mcp: FastMCP) -> None:
         wait runs out (then call again with since=cursor). A running job's `activity` gives its
         processes, CPU, memory, how long it has been quiet and the windows it shows. Several ids
         wait for whichever job finishes or matches first, and answer with every job's state."""
+
+        def reply(result):
+            result = _with_files(result, files)
+            if wake and not result.get("error") and waiting.relayed():
+                target = id[0] if isinstance(id, list) and id else id
+                if target:
+                    condition = {"job": target}
+                    if patterns:
+                        status = result["jobs"][target] if isinstance(id, list) else result
+                        condition.update(patterns=patterns, cursor=status["cursor"])
+                elif files:
+                    condition = {"file": files[0]}
+                else:
+                    condition = {"online": True}
+                result["wake"] = transfer.issue_wait(condition)["wake"]
+                result["wake_note"] = transfer.WAKE_NOTE
+            return result
+
         if id is None:
-            return await asyncio.to_thread(_errors, lambda: {"jobs": jobs.list_jobs()})
+            result = await asyncio.to_thread(_errors, lambda: {"jobs": jobs.list_jobs(prefix=prefix)})
+            result["now"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            return reply(result)
         id = _job_ids(id)
         if isinstance(id, list):
             ids = list(dict.fromkeys(str(i) for i in id))
             if len(ids) == 1:
                 id = ids[0]
             else:
-                return _with_files(await _job_statuses(ctx, ids, since, wait_s, patterns, tail), files)
+                result = await _job_statuses(ctx, ids, since, wait_s, patterns, tail)
+                result["now"] = datetime.now().astimezone().isoformat(timespec="seconds")
+                return reply(result)
         start = since.get(id, 0) if isinstance(since, dict) else since
         limit = tail or 20_000
 
@@ -1595,7 +1670,8 @@ def register(mcp: FastMCP) -> None:
             status = await asyncio.to_thread(fetch)
             if status.get("state") == "running":
                 status = {**status, "activity": await asyncio.to_thread(_activity, id)}
-            return _with_files(trim_repeat(id, start, status, tail is not None), files)
+            status["now"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            return reply(trim_repeat(id, start, status, tail is not None))
         try:
             regexes = [re.compile(p, re.MULTILINE) for p in patterns or []]
         except re.error as exc:
@@ -1609,7 +1685,8 @@ def register(mcp: FastMCP) -> None:
         note = waiting.capped_note(ctx, wait_s)
         if note and status.get("state") == "running":
             status = {**status, "wait_note": note}
-        return _with_files(trim_repeat(id, start, status, tail is not None), files)
+        status["now"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        return reply(trim_repeat(id, start, status, tail is not None))
 
     async def _job_statuses(ctx, ids, since, wait_s, patterns, tail) -> dict:
         cursors = {i: (since.get(i, 0) if isinstance(since, dict) else since) for i in ids}
@@ -1651,6 +1728,16 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool
     async def job_stop(id: str) -> dict:
         """Stop a running background job (and its child processes)."""
-        if _is_run(id):
-            return await asyncio.to_thread(_errors, proc.run_stop, id)
-        return await asyncio.to_thread(_errors, jobs.stop, id)
+
+        def work():
+            status = proc.run_stop(id) if _is_run(id) else jobs.stop(id)
+            lines = (status.get("output") or "").splitlines() + (status.get("stderr") or "").splitlines()
+            return {
+                "id": status["id"],
+                "state": status["state"],
+                "exit_code": status.get("exit_code"),
+                "stopped": True,
+                "tail": "\n".join(lines[-20:])[-2000:],
+            }
+
+        return await asyncio.to_thread(_errors, work)

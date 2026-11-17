@@ -20,7 +20,7 @@ Status: implemented
   - 请求带进度令牌；
   - 不是经中转来的。中转转发的每个请求都带 `x-winhand-user` 头，`waiting.relayed()` 用 FastMCP 的 `get_http_headers()` 看有没有这个头。
 - 其余调用最多 40 秒。要的比这长时，回复里带 `wait_note`，说明原因（经中转，或不收进度），并提示按游标接着问。
-- 开场说明、`help()`、工具说明、`run` 的 still_running 提示、README 都改回 `wait_s=40`。每次等不完就按游标再问。
+- 开场说明、`help()`、工具说明、`run` 的 still_running 提示、README（这部分现在在 `docs/guide.md`）都改回 `wait_s=40`。每次等不完就按游标再问。
 - 心跳照旧：带进度令牌就发，对 40 秒内的等待没有坏处。
 
 ## Alternatives considered

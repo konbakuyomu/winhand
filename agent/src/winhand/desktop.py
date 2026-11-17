@@ -494,7 +494,7 @@ def require_operable(hwnd, what: str) -> None:
         raise admin_error(facts)
     from . import approvals
 
-    if approvals.enabled():
+    if approvals.enabled() or facts["process"].lower() in approvals.PROTECTED_EXES:
         app = app_of(root)
         if not app.exe:  # the process is gone or cannot be read: whose window it is stays unknown
             raise approvals.NotOperable(
@@ -743,7 +743,7 @@ def _approval_of(hwnd, pid: int, process: str, kind: str) -> str | None:
         return "winhand"
     from . import approvals
 
-    if not approvals.enabled() or not process:
+    if not process or (not approvals.enabled() and process.lower() not in approvals.PROTECTED_EXES):
         return None
     exe = process.lower()
     if exe == "applicationframehost.exe":
@@ -826,8 +826,8 @@ def find_window(selector: str | int) -> dict:
     found = rank_windows(candidates, str(selector))
     if found is not None:
         return found
-    titles = ", ".join(f"{w['title'][:40]!r}" for w in candidates[:15])
-    raise DesktopError(f"no window matches {selector!r}; visible: {titles}")
+    programs = ", ".join(list(dict.fromkeys(w["process"].lower() for w in candidates if w["process"]))[:10])
+    raise DesktopError(f"no window matches {selector!r}; visible programs: {programs}")
 
 
 def _force_foreground(hwnd) -> bool:
@@ -1108,6 +1108,42 @@ PEEK_S = 0.4  # a minimized window shown again needs a moment to draw itself
 PEEK_NOTE = "the window was minimized: it was shown without taking the focus for this picture, then put back"
 
 
+def require_capture(w: dict) -> None:
+    """A password manager's window is shown to the model (picture or control text) only within the
+    10 minutes the person at the machine allowed; otherwise they are asked first."""
+    from . import approvals
+
+    if w["process"].lower() not in approvals.PROTECTED_EXES:
+        return
+    app = app_of(w["hwnd"])
+    if approvals.status(app.exe, app.console) == "ask":
+        require_desktop()
+    try:
+        approvals.check(app, "截图")
+    except approvals.NotOperable as exc:
+        raise approvals.NotOperable("这是密码管理器，要用请让电脑前的人放开一次。 " + str(exc)) from exc
+
+
+def _mask_protected(image, left: int, top: int) -> list[str]:
+    from . import approvals
+
+    masked: list[str] = []
+    for w in windows():
+        exe = w["process"].lower()
+        if exe not in approvals.PROTECTED_EXES or w["minimized"] or approvals.status(exe) == "session":
+            continue
+        x1, y1 = max(0, w["left"] - left), max(0, w["top"] - top)
+        x2 = min(image.size[0], w["left"] + w["width"] - left)
+        y2 = min(image.size[1], w["top"] + w["height"] - top)
+        if x1 < x2 and y1 < y2:
+            image.paste("black", (x1, y1, x2, y2))
+            app = app_of(w["hwnd"])
+            name = app.name or app.exe
+            if name not in masked:
+                masked.append(name)
+    return masked
+
+
 @contextlib.contextmanager
 def peek(window):
     """While capturing a minimized window: show it without activating it, then put it back exactly
@@ -1117,6 +1153,7 @@ def peek(window):
         yield None
         return
     w = find_window(window)
+    require_capture(w)
     if not w.get("minimized"):
         yield None
         return
@@ -1231,6 +1268,7 @@ def capture(
     image = None
     if window is not None:
         w = find_window(window)
+        require_capture(w)
         if w["minimized"]:
             raise DesktopError("the window is minimized; restore it first (window action=restore)")
         target = {"window": {k: w[k] for k in ("hwnd", "title", "process")}}
@@ -1274,6 +1312,9 @@ def capture(
             key = ("desktop",)
     if image is None:
         image = ImageGrab.grab(bbox=(left, top, left + width, top + height), all_screens=True)
+    masked = _mask_protected(image, left, top)
+    if masked:
+        target["masked"] = masked
     note = target.pop("note", None)
     place = {"left": left, "top": top, "target": target, "key": key}
     if note:

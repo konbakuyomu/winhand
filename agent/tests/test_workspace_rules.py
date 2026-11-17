@@ -352,11 +352,12 @@ def test_imports_out_of_the_project_need_claude_codes_approval(tmp_path, home, w
         ),
     )
     contents, skipped = read()
-    assert contents == ["outside secret", "PRIVATE KEY", "ok"] and list(skipped) == [".env"]
+    assert contents == ["outside secret", "ok"] and sorted(skipped) == [".env", "id_rsa"]
+    assert "guard" in skipped["id_rsa"]  # a private key stays out even when imports are approved
 
     (home / ".claude.json").unlink()
     out = ctx(root, formats=["claude-code"], external_imports=True)
-    assert [r.get("content") for r in out["rules"][1:]] == ["outside secret", "PRIVATE KEY", "ok"]
+    assert [r.get("content") for r in out["rules"][1:]] == ["outside secret", "ok"]
 
 
 def test_guarded_rule_files_and_skills_are_not_read(tmp_path, home, winhand_home):
@@ -442,7 +443,8 @@ def test_links_out_of_the_project_need_approval(tmp_path, home):
     assert all("outside the project" in why for why in skipped.values())
 
     approved = ctx(root / "sub", external_imports=True)
-    assert [r.get("content") for r in approved["rules"]] == ["PRIVATE KEY", "my notes", "PRIVATE NOTES"]
+    assert [r.get("content") for r in approved["rules"]] == [None, "my notes", "PRIVATE NOTES"]
+    assert "guard" in approved["rules"][0]["skipped"]  # the link to a private key is still not followed
 
 
 def test_network_paths_are_not_touched(tmp_path, home, monkeypatch):

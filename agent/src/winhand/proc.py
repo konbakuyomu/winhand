@@ -491,6 +491,8 @@ def _failure_hint(
 # before that; a command still going by then keeps running and is picked up with job_status.
 REPLY_WITHIN_S = 40.0
 _KEEP_FINISHED = 20
+_FINISHED_TTL_S = 3600  # a command handed back still running: kept this long after it ends
+_ended: dict[str, float] = {}  # run id -> when _forget_finished first saw it finished
 STDERR_TAIL_CHARS = 6_000  # of a command still running, in job_status
 
 
@@ -518,6 +520,7 @@ class _Running:
         self.command: str | None = None
         self.script: str | None = None  # a PowerShell script, for hints on its parse errors
         self.nested_direct = False
+        self.handed_back = False  # its id went back to the caller, who may ask job_status later
 
     def _pump(self, stream, sink: bytearray) -> None:
         for chunk in iter(lambda: stream.read1(65536), b""):
@@ -586,10 +589,17 @@ def _next_run_id() -> str:
 
 
 def _forget_finished() -> None:
-    """Keep the last _KEEP_FINISHED finished commands, so job_status can still answer for them."""
+    """Keep the last _KEEP_FINISHED finished commands, and those handed back still running (someone
+    may be waiting on their id) for an hour after they end, however many others finish meanwhile."""
+    now = time.monotonic()
     finished = [j for j in list(_running.values()) if j.proc.poll() is not None]
+    for job in finished:
+        _ended.setdefault(job.id, now)
     for old in finished[:-_KEEP_FINISHED]:
+        if old.handed_back and now - _ended[old.id] < _FINISHED_TTL_S:
+            continue
         _running.pop(old.id, None)
+        _ended.pop(old.id, None)
 
 
 def _note_run_id(rid: str) -> None:
@@ -713,6 +723,7 @@ def run(
         job.kill()
         _forget_finished()
         return _result(job, output_limit)
+    job.handed_back = True
     threading.Thread(target=_expire, args=(job,), daemon=True).start()
     out, err = job.text()
     stdout, _ = clip(out, output_limit, keep="both")
@@ -814,9 +825,7 @@ def run_status(rid: str, since: int = 0, max_chars: int = 20_000) -> dict:
                 f"no running command {rid!r}: it ran before winhand last restarted (this start began at "
                 f"run-{first}), so its output is gone. history() lists what it did and its exit code"
             )
-        raise ValueError(
-            f"no running command {rid!r} (winhand keeps the last {_KEEP_FINISHED} after they finish)"
-        )
+        raise ValueError(f"no running command {rid!r} (winhand keeps finished commands for an hour)")
     done = job.proc.poll() is not None
     if done:
         job.wait(5)
@@ -908,7 +917,7 @@ def proc_kill(pid: int, tree: bool = True, force: bool = False) -> dict:
     return {"pid": pid, "name": name, "killed": True, "processes": len(targets)}
 
 
-def sys_info() -> dict:
+def sys_info(load: bool = False) -> dict:
     info = {
         "os": f"{platform.system()} {platform.release()} ({platform.version()})",
         "machine": platform.machine(),
@@ -933,6 +942,22 @@ def sys_info() -> dict:
         info["serial_ports"] = [f"{p.device} - {p.description}" for p in serial.tools.list_ports.comports()]
     except Exception:
         pass
+    if load:
+        from . import jobs
+
+        memory = psutil.virtual_memory()
+        jobs_running = 0
+        for directory in jobs._root().iterdir():
+            meta = jobs._read_json(directory / "job.json")
+            if meta and not (directory / "exit.json").exists() and jobs._alive(meta):
+                jobs_running += 1
+        info["load"] = {
+            "memory_free_gb": round(memory.available / 1073741824, 1),
+            "memory_total_gb": round(memory.total / 1073741824, 1),
+            "cpu_percent": round(psutil.cpu_percent(interval=0.5), 1),
+            "jobs_running": jobs_running,
+            "runs_running": sum(j.proc.poll() is None for j in list(_running.values())),
+        }
     return info
 
 

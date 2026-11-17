@@ -59,9 +59,10 @@ ALWAYS_LOAD = frozenset(
         "fs_read",
         "fs_search",
         "fs_write",
+        "history",
         "job_start",
         "job_status",
-        "remote_run",
+        "job_stop",
         "run",
     }
 )

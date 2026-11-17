@@ -206,7 +206,10 @@ def describe(
         text = _join([a.get("command") or "", *(a.get("args") or [])]).strip()
         if a.get("stdin"):
             text = f"{text}\n{a['stdin']}"
-        return one("command", text=text, cwd=_abs(a.get("cwd")))
+        out = one("command", text=text, cwd=_abs(a.get("cwd")))
+        if a.get("stdin_file") is not None:
+            out += one("read", a["stdin_file"])
+        return out
     if tool == "remote_run":
         text = _join([a.get("script") or "", *(a.get("args") or [])]).strip()
         return one("command", text=text, host=a.get("host"))
@@ -253,6 +256,8 @@ def describe(
         return [Action("mcp", tool, text=mcp_text(a.get("server"), a.get("tool"), a.get("arguments")))]
     if tool == "fs_op":
         op = (a.get("action") or "").lower()
+        if op == "clean_scratch":  # its dialog asks the owner before anything is recycled
+            return []
         if op == "copy":
             return one("read", a.get("path")) + one("write", _destination(a.get("path"), a.get("to")))
         if op == "mkdir":

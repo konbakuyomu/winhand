@@ -1,7 +1,7 @@
 # WinHand
 
 > **读者：** 第一次接手 WinHand 的开发者：它现在是什么、一次典型使用怎样发生、各块能力在哪、边界在哪。
-> 参数和用法的完整说明在 `README.md`，给 AI 的完整指南是 `help()`。这里写的是“为什么这样、改的时候要守住什么”。目标全景在 `vision/`（还是骨架）。
+> 部署和接入在 `README.md`，参数和用法的完整说明在 `docs/guide.md` 等几篇，给 AI 的完整指南是 `help()`。这里写的是“为什么这样、改的时候要守住什么”。目标全景在 `vision/`（还是骨架）。
 
 ---
 
@@ -31,12 +31,12 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
 | 想做的事 | 用什么 | 深入读 |
 |---|---|---|
 | 跑命令、等长任务、知道任务卡没卡住 | `run`、`job_start`、`job_status` | [waiting.md](waiting.md) |
-| 驱动交互程序：gdb、串口、REPL、menuconfig、要登录的安装程序 | 会话 `session_*`、profile | README「为什么要自己写」「Profile」 |
+| 驱动交互程序：gdb、串口、REPL、menuconfig、要登录的安装程序 | 会话 `session_*`、profile | `docs/guide.md`「会话：驱动交互程序」「Profile」 |
 | 读写文件，在沙箱和电脑之间传文件，操作别的服务器 | `fs_*`、一次性链接、`remote_run`、`remote_copy` | [files.md](files.md) |
 | 操作桌面程序 | `ui`、`ocr`、`input`、`screenshot`、`window` | [desktop.md](desktop.md) |
-| 拿到主人写的规矩和技能，动作前按规则裁决 | `context`、`skill`、守卫、本机 hooks | README「本机规则与守卫」 |
-| 用密钥但看不到它，结果里不泄露秘密 | `secrets=[…]`、`secret_prompt`、脱敏 | README「工具一览」的秘密一行、「输出脱敏」 |
-| 用电脑上已有的其他 MCP 服务 | `mcp_tools`、`mcp_call`、`/mcp/<名称>` | README「本机的其他 MCP 服务」 |
+| 拿到主人写的规矩和技能，动作前按规则裁决 | `context`、`skill`、守卫、本机 hooks | `docs/rules-and-guards.md` |
+| 用密钥但看不到它，结果里不泄露秘密 | `secrets=[…]`、`secret_prompt`、脱敏 | `docs/guide.md`「工具一览」的秘密一行、「输出脱敏」 |
+| 用电脑上已有的其他 MCP 服务 | `mcp_tools`、`mcp_call`、`/mcp/<名称>` | `docs/local-mcp.md` |
 
 上面三块有单独的页，其余几块在这里说清要点：
 
@@ -47,8 +47,22 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
   - 接一个新工具只要写一份 TOML profile。
 - **规矩、技能与守卫。**
   - `context(path)` 按 Codex 和 Claude Code 各自的读法，返回这台电脑上的规矩、技能，以及对这个目录生效的守卫规则。云端会话还可以靠 SessionStart hook 在开场就带上这些内容。
+  - 规矩按文件给增量。再调 `context(since=上次的 digest)` 时：
+    - 整份没变，只回 `unchanged`；
+    - 变了的话，没变的文件只给路径、行数和指纹（`unchanged: true`）；只在末尾追加了内容的文件，给 `appended_after_line` 和新加的行；
+    - digest 按没截断的全文算。电脑上记最近 64 份，winhand 重启后对不上，就给全文。
+  - 超过预算的文件给 `#` 标题目录（最多 60 条）加文件的最后一段；`truncated` 写明给了哪几行，剩下的用哪条 `fs_read` 读。以前截掉的是后面，正好是主人最新追加的授权。取舍见 `.agents/notes/implemented/feature/2026-11-17-context-per-file-delta.md`。
   - 会读写电脑的调用，执行前先被描述成一个动作（`command`、`input`、`write`、`edit`、`delete`、`move`、`read`、`mcp`），按 `~/.winhand/guards.toml`（以及项目目录里的 .winhand/guards.toml）裁决：拒绝、问人或附注。
   - `fs_op` 整个删文件夹时，同时按命令判断，看成 `Remove-Item -Recurse`，所以写给命令的“禁止批量删除”规则也管得到它。
+  - 认命令时，引号里的搜索模式不算数：`Select-String -Pattern '…'`，以及 `rg`、`grep`、`findstr` 的模式参数和 `-e` 后面的引号内容，判断前换成 `x`。这样 `-Pattern '…|rm'` 这类搜索不会被当成删除命令。以下照旧看：
+    - 双引号里带 `$(` 或反引号的，因为会执行；
+    - `rg --pre` 之后的参数，因为 `rg` 会对每个文件跑那个程序。
+
+    这只减少误伤，规则本身一条不改。
+  - 内置第 7 条规则（`winhand (built in)`）：登录信息不交给模型，读、写、改、删、移都拒。
+    - 覆盖：colab-cli 的 token.json 和 sessions.json、gcloud 配置目录、application_default_credentials.json、.git-credentials、.netrc、.docker/config.json、gh 的 hosts.yml、~/.ssh 下的 id_rsa、id_ed25519、id_ecdsa、Chrome、Edge、Firefox 的用户资料目录、1Password 的本地目录。
+    - 规矩文件里 `@` 引用或链接到这些文件，主人批准了外部引用也不读。
+  - 拒绝的第一行写明是哪个文件的第几条规则，以及原因的前 60 字，调用日志里看得到出处。
   - 本机 Codex、Claude Code 的 hooks，经 WinHand 的调用也照样运行。
 - **密钥与脱敏。**
   - 密钥存在电脑上：`secret_prompt` 让人在掩码框里输入，程序用 `run(secrets=[名字])` 拿到值，AI 只知道名字。
@@ -78,7 +92,7 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
 - **后台任务**：`job_start` 起的任务，独立于 winhand 进程，winhand 重启也不丢。
 - **游标**：输出的绝对位置。从同一个游标接着问时，只回新的内容。
 - **一次性链接**：中转上的 `/t/<令牌>`，用一次就失效，文件内容不经过对话。
-- **暂存目录**：`~/.winhand/scratch`，AI 跨调用存文件的地方，不自动清理。
+- **暂存目录**：`~/.winhand/scratch`，AI 跨调用存文件的地方。不自动删：每周问主人一次，主人同意才把 14 天没动的文件夹移进回收站，见 [files.md](files.md)。
 - **守卫**：`~/.winhand/guards.toml` 和项目目录里 .winhand/guards.toml 的规则，在动作执行前裁决。
 - **程序授权**：AI 第一次操作某个程序前，先问主人。
 - **让路、急停、边框**：主人在电脑前时，桌面操作的三层保护，见 [desktop.md](desktop.md)。
@@ -86,7 +100,8 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
 ## 边界与考量
 
 - **不改现有参数的含义。** 新能力用新参数或新取值打开，旧客户端的行为不变。例如等待上限的默认值没有提高，只对能长等的客户端放开。
-- **开场说明不超过 4096 字符。** Claude Code 只保留 MCP instructions 的前 4096 个字符，所以开场只放要点，包括已存密钥的名字；完整指南在 `help()`。新功能写进 `help()`、工具说明和 README，不往开场说明里塞。
+- **开场说明不超过 4096 字符。** Claude Code 只保留 MCP instructions 的前 4096 个字符，所以开场只放要点，包括已存密钥的名字；完整指南在 `help()`。新功能写进 `help()`、工具说明和 `docs/` 下的文档，不往开场说明里塞；README 只放部署和接入。
+- **开场就加载的工具按用量定。** 标 anthropic/alwaysLoad 的 12 个：`context`、`run`、`job_start`、`job_status`、`job_stop`、`history`、`fs_read`、`fs_write`、`fs_edit`、`fs_search`、`fs_find`、`fs_list`。其余的按需用 ToolSearch 取。2026-11-17 按 11-02 至 11-17 的用量调过：`remote_run` 13 天 0 次，拿掉；`job_stop` 215 次、`history` 67 次，加上。
 - **单个结果约 4 万字节。** 按 UTF-8 字节算，一个中文字算 3 字节，接近它的 token 成本。读文件、搜索、命令输出到上限就停，并说明从哪里接着读。
 - **中转只转发，不解析 MCP。** 好处是 MCP 协议升级不用改中转；代价是电脑离线时，中转不能替它回答 tools/list 请求。
 - **不是沙箱。** 守卫、程序授权、让路都只防误操作，挡不住刻意绕路：`run` 里的程序自己读写什么，守卫管不到。真正要隔离时，用系统权限或单独的账户。

@@ -1,626 +1,66 @@
 # winhand
 
-让 AI 通过**一个 MCP** 接管一台 Windows 电脑。它能驱动真终端和各种交互式程序，包括调试器、仿真器、REPL、串口和网络控制台、menuconfig 这类全屏界面、需要登录或确认的安装程序；同时提供文件读写、进程管理，还能把本机已有的其他 MCP 服务各自作为独立的远程地址提供出去。
+winhand 让 claude.ai 和 Claude Code 通过一个 MCP 地址操作你的 Windows 电脑：运行命令和后台任务，驱动 gdb、串口、REPL、安装程序这类交互程序，读写文件并在 AI 的沙箱和电脑之间传文件，按名字操作桌面程序。你在电脑上写给 AI 的规矩、技能和守卫规则，每次调用都照样生效。
 
-```
-claude.ai 连接器 ──HTTPS + OAuth──▶ relay（Cloudflare Worker，你的域名）
-                                       │  Durable Object 维持会话，透明转发 HTTP（含 SSE）
-                                       ▼  WebSocket（电脑主动连出，不开任何入站端口）
-Claude Desktop / Codex ──stdio──▶ winhand agent（跑在你的电脑上）
-                                   ├─ 通用会话引擎：pty | pipe | serial | tcp
-                                   ├─ 文件 / 进程 / 系统信息
-                                   └─ 本机 MCP 服务：pyocd-debug、usb-camera … 各自在 /mcp/<名称>
-```
+它由两部分组成：部署在 Cloudflare Workers 上的中转，给 claude.ai 提供带登录授权的 MCP 地址；运行在电脑上的 winhand，主动用 WebSocket 连上中转，在本机执行。电脑不开任何入站端口。
 
-## 为什么要自己写
+## 部署中转
 
-通用 MCP 在“交互式、有状态、会卡在某个等待点”的程序上都不好用，例如：
-
-- `continue` 之后什么也不输出、一直等断点命中的 gdb
-- 要求输入两步验证码的 npm
-- 只能靠方向键操作的 menuconfig
-- 会随时打印日志的串口 msh
-
-winhand 把这些都当作**会话**，用同一套模型管理：
-
-| 能力 | 说明 |
-|---|---|
-| 真终端 | Windows 用 ConPTY（pywinpty），其他平台用 openpty。程序以为有人在屏幕前，所以提示符、颜色、密码提示、全屏界面都和人工操作时一模一样 |
-| 多种传输 | `pty`（默认）、`pipe`（普通子进程）、`serial`（COM 口，也支持 pyserial 的 URL 写法）、`tcp`（gdbserver 端口、RTT、OpenOCD 4444 端口、QEMU monitor，telnet 协商会自动处理） |
-| 状态推断 | 每次调用都返回 `state`、`reason`（判断依据）和 `next`（下一步建议）。状态分为：<br>`running`：正在输出<br>`awaiting_input`：提示符、确认问题或分页器在等输入<br>`needs_user`：要密码、验证码或浏览器登录，必须由人来处理<br>`idle`：安静但没有提示符<br>`blocked`：长时间无响应<br>`exited`：已退出 |
-| 通用等待 | `session_wait` 可以同时设多个条件（正则、状态、静默、屏幕稳定、输出量），并且能**跨多个会话同时等**。遇到 `needs_user` 或程序退出，一定会立刻返回。经中转来的调用单次最多等 40 秒，给中转和客户端返回留出余量（本机客户端接收进度时最多 1800 秒，同 `job_status`）；超时不算失败，再调用一次就能接着等 |
-| 虚拟屏幕 | `session_screen` 返回整屏文字、光标位置、反色（选中）行，menuconfig、htop、安装向导都能“看见” |
-| 游标读取 | 输出按绝对位置编号，读过的内容不会重复返回，也不会漏读；大段输出会截断并告诉你怎么翻页；完整日志保存在 `~/.winhand/logs` |
-| 自动应答 | 可以配置“看到某个提示就自动回答”，比如分页器、`Quit anyway? (y or n)`。永远不会自动回答密码 |
-| 保密输入 | `session_prompt_user` 在电脑桌面弹出掩码输入框，答案直接写进会话。原文回显会在返回、写入虚拟屏幕及日志前遮罩，包括分段和带 ANSI 样式的回显；不能保护程序主动编码或改写后的口令 |
-| 声明式 profile | 接入一个新工具只需要写一份 TOML 配置，不用写代码 |
-| Windows 适配 | 自动补全缺失的 `ComSpec`、`SystemRoot`；统一 UTF-8 编码；关闭分页器；按 `PATHEXT` 找到 `npm.cmd` 这类包装脚本；兼容中文、空格路径和超长路径；自动识别 GBK 文件；编辑文件时保留原有的 CRLF 换行 |
-
-## 桌面端（推荐的日常用法）
-
-下载 [Releases](https://github.com/konbakuyomu/winhand/releases) 里的 `winhand-win-Setup.exe`，安装后在通知区域运行，不需要 Python 或 .NET。在设置里填好中转地址和设备令牌，打开“登录 Windows 后自动启动”即可。窗口里能实时看到连接状态、Claude 的每次工具调用（时间线）和打开的会话。新版本在后台下载，你点“立即更新”或退出时安装。详见 [desktop/README.md](desktop/README.md)。
-
-安装包使用自签名证书（`CN=winhand`，SHA-256 `711736B2…DBEC2`），想让自己的电脑信任它，见 [Windows 签名与信任](docs/windows-signing.md)。
-
-## 安装与使用
-
-需要 [uv](https://docs.astral.sh/uv/)。
-
-```powershell
-git clone https://github.com/konbakuyomu/winhand
-cd winhand\agent
-uv sync
-uv run winhand doctor          # 查看它在这台机器上能找到什么
-uv run winhand profiles        # 列出内置 profile
-uv run winhand mcp import      # 从 Codex / Claude Desktop / Claude Code 的配置导入本机 MCP 服务（可选）
-```
-
-接入本地 MCP 客户端（stdio 方式），以 Codex 的 `config.toml` 为例：
-
-```toml
-[mcp_servers.winhand]
-command = "uv"
-args = ["--directory", 'D:\path\to\winhand\agent', "run", "winhand", "stdio"]
-```
-
-也可以用 `uv run winhand http --port 8765`，以 streamable HTTP 方式在本机提供服务。
-
-## 从 claude.ai 远程接入（relay）
-
-`relay/` 是一个 Cloudflare Worker，职责如下：
-
-- 对 claude.ai 提供标准的 MCP 远程端点，包括 OAuth 2.1（支持动态注册和 CIMD），授权页用“主人口令”校验；
-- 电脑上的 `winhand connect` 主动用 WebSocket 连上它，**电脑本身不开任何入站端口**；
-- 中转层不解析 MCP 协议，只透明转发 HTTP 请求（包括流式 SSE 响应），以后 MCP 协议升级也不用改它。
-
-部署步骤（需要 Cloudflare 账号，以及一个托管在 Cloudflare 上的域名。`*.workers.dev` 在国内经常连不上）：
+需要一个 Cloudflare 账号，和一个托管在 Cloudflare 上的域名（`*.workers.dev` 在国内常连不上）。
 
 ```powershell
 cd relay
 npm ci
-npx wrangler login                                   # 浏览器里授权
-npx wrangler kv namespace create OAUTH_KV            # 把输出的 id 填进 wrangler.jsonc
-#   在 wrangler.jsonc 中填写 PUBLIC_ORIGIN = "https://mcp.你的域名"，并取消 routes 那一行的注释
-npx wrangler secret put OWNER_PASSPHRASE             # 授权页口令（要足够长）
-npx wrangler secret put AGENT_TOKEN                  # 电脑连中转用的设备令牌（随机长串）
+npx wrangler login
+npx wrangler kv namespace create OAUTH_KV   # 把输出的 id 填进 wrangler.jsonc
+npx wrangler secret put OWNER_PASSPHRASE
+npx wrangler secret put AGENT_TOKEN
 npx wrangler deploy
 ```
 
-在电脑上连接中转（加上 `--save` 会把地址和令牌写进 `~/.winhand/config.toml`，之后直接运行 `winhand connect` 即可）：
+部署前在 `relay/wrangler.jsonc` 里填好 `PUBLIC_ORIGIN`，并取消 `routes` 那一行的注释，换成你的域名。
+
+| 配置项 | 作用 | 默认值 |
+| --- | --- | --- |
+| `PUBLIC_ORIGIN` | 中转的公网地址，例如 `https://mcp.example.com` | 无，必须设置 |
+| `OWNER_PASSPHRASE` | 在 claude.ai 授权时输入的主人口令（secret） | 无，必须设置 |
+| `AGENT_TOKEN` | 电脑连中转用的设备令牌（secret） | 无，必须设置 |
+| `AGENT_GRACE_S` | 电脑短暂掉线时，请求等它重连的秒数 | `20` |
+
+## 连接电脑
+
+下载 [Releases](https://github.com/konbakuyomu/winhand/releases) 里的 `winhand-win-Setup.exe` 安装，它在通知区域运行，不需要 Python 或 .NET。在设置里填中转地址 `wss://<你的域名>/agent` 和设备令牌，打开「登录 Windows 后自动启动」。新版本在后台下载，在设置里点更新即可。安装包用自签名证书，信任方法见 [Windows 签名与信任](docs/windows-signing.md)。
+
+不装桌面端时，也可以用命令行连接（需要 [uv](https://docs.astral.sh/uv/)），`--save` 会把地址和令牌记下来：
 
 ```powershell
 cd agent
-uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> --save
+uv run winhand connect --url wss://<你的域名>/agent --token <AGENT_TOKEN> --save
 ```
 
-最后在 claude.ai 的“设置 → 连接器 → 添加自定义连接器”里填入 `https://mcp.你的域名/mcp`，完成授权后，**新开一个会话**即可使用。打开 `https://mcp.你的域名/` 能看到电脑是否在线。
+## 接入 Claude
 
-多个 Claude 账号、多个会话可以同时连接这台电脑。每次输口令授权都是一个独立的登录，新登录不会让别处掉线：
-
-- 30 天没用过的登录会自动失效，再用时重新输一次口令；一直在用的登录不会过期。
-- 最多保留最新的 20 个登录，超出时作废最早的。
-- 打开 `https://mcp.你的域名/` 能看到现在有几个登录。在那里输入主人口令，可以一次退出所有登录（比如怀疑某个登录泄露了）；之后各处要重新授权。
-
-安全设计：
-
-- 授权页口令用常量时间比较；同一 IP 连续输错 5 次锁定 15 分钟。状态页“退出所有登录”的口令和授权页共用这个计数。
-- 设备令牌在中转一侧只保存在 Worker secret 里，电脑一侧在 `~/.winhand/config.toml`；winhand 返回给模型的任何内容里它都会被遮挡（见[输出脱敏](#输出脱敏)）。
-- 电脑为隧道在 127.0.0.1 上开的端口只认隧道：每次启动随机生成一个口令，隧道转发的请求都带着它，本机其他程序或网页（DNS rebinding）连上这个端口也调不了工具；Host/Origin 不对的请求也会被拒绝。
-- 状态页谁都能打开，所以只显示电脑在不在线和 winhand 版本，不显示电脑名和 Windows 版本。
-- OAuth token 由中转校验，不会转发给电脑。
-- 授权页有防 CSRF 的一次性 handle 和绑定 cookie，并禁止被嵌入 iframe。
-- 电脑短暂掉线（winhand 重启或升级、网络切换）时，请求会先等它重连，默认最多 20 秒（变量 `AGENT_GRACE_S`），之后才报错。离线超过 2 分钟（睡着了、关机了）就不再等，立刻报错。报错是带同一请求 id 的 JSON-RPC 错误，写明离线多久和可能原因，客户端会原样交给模型。
-- `https://mcp.你的域名/status.json` 给脚本用：`online`、`version`、`offline_since`、`offline_for_s`，同样不含电脑名。云端会话可以在后台循环查它，电脑一回来就接着干活，不用等人提醒。
-- 电脑和中转之间的连接断一下（winhand 没重启）时，正在执行的调用不会丢：中转按帧记着已经收到多少，电脑重连后从断开处接着发，客户端那边看到的是一次完整的回复。电脑最多替断开的调用保留 60 秒、单个调用 8 MB 的回复。
-- 一次性文件链接 `https://mcp.你的域名/t/<令牌>` 不走 OAuth，靠令牌本身授权：
-  - 令牌是 256 位随机数，只能用一次，默认 10 分钟内有效，最长 30 分钟；
-  - 目标路径和大小上限在签发时就固定了，上传可以要求 sha256 一致；
-  - 电脑上只在内存里保存令牌的哈希，winhand 重启后所有链接作废；
-  - 同一 IP 反复用无效令牌会被暂时拒绝。
-
-### 一次性文件链接（大文件、补丁）
-
-`fs_upload_url` / `fs_download_url` 发出一次性链接，模型在自己的沙箱里用 `curl -T 文件 链接` 上传、`curl -o 名字 链接` 下载，文件内容不经过对话。这样传 100 KB 的补丁只要几秒，不必再分段写 base64。传上来的补丁可以直接交给 `fs_apply_patch(root, patch_file=...)`：它会自动判断 `-p`，保留每个文件原来的编码和 CRLF，所有 hunk 都对得上才写入。
-
-一次传多个文件：
-
-- **下载文件夹**：`fs_download_url(path=文件夹)` 或 `paths=[...]`，可加 `include=["*.log"]`、`exclude=["node_modules", ".git"]`。内容边打包成一个 zip 边下载，所以没有事先算好的 sha256，用 `unzip -t` 检查。读规则保护的文件不放进去，回复里列出名字；文件夹里的链接和联接点不跟进去。打包途中读不了的文件，记在 zip 里的 `winhand-errors.txt`。
-- **上传后解开**：`fs_upload_url(path=文件夹, extract=true)`，传一个 zip 或 tar（`.tar.gz`、`.tgz` 等）。要么全部解开，要么一个也不写：名字不安全（绝对路径、`..`、盘符、`CON` 这类设备名、末尾带点）、包里有链接、会经文件夹里已有的链接写到外面、写规则保护的文件、已存在的文件（没给 `overwrite=true`），都会让整包拒收。回复里逐个列出解开的文件和 sha256（前 200 个）。
-- **大文件分片**：给 `size=字节数`，超过 `part_mb`（默认 4 MB）就每片一个链接。复盘时发现，一次传 8–10 MB 以上，有的沙箱约 30 秒就报 502（文件其实传到了）；分片后每片都能在这之前传完。分片可以乱序、并行，传坏的片再传一次即可；最后一片的回复就是结果。整个文件最大 2 GB。
-
-`fs_read(paths=[...])` 一次读最多 20 个文本文件或文档，字数上限按文件平分；图片仍要一张张用 `fs_read(path)` 看。
-
-AI 要跨调用留着的文件，放 winhand 自己的暂存目录：默认 `~/.winhand/scratch`，`config.toml` 里 `[scratch] folder = "D:/..."` 可以改。`context()` 会给出这个路径，在电脑上启动的程序可以用 `%WINHAND_SCRATCH%` 找到它。这里的东西不会自动删除；`%TEMP%` 你会手动清理，复盘时有两次暂存在那里的文件因此丢了。
-
-要在 Claude Code 云端会话里用这个功能，得在云环境的网络设置里放行中转域名：打开会话标题栏的云环境菜单 → Edit → Network access 选 Custom，在 Allowed domains 里加上 `mcp.你的域名`，并勾上 Also include default list of common package managers（不勾就只剩你填的域名）。改完约一分钟生效，正在运行的会话也会跟着生效。只靠下面“云端会话开场就带上本机规矩”里的 Network secret 放行时，它的 Path prefixes 要留空：填了 `/hook/` 的话，一次性链接（`/t/…`）会被沙箱的代理拦下，curl 报 403。中转更新后要重新执行 `npx wrangler deploy`。
-
-端到端测试（CI 中自动运行）：`relay/test/e2e.py` 在 `wrangler dev` 上模拟 claude.ai，走完注册 → 授权 → 换 token → 经隧道调用 MCP 工具的整个流程。
-
-## 工具一览
-
-| 分组 | 工具 |
-|---|---|
-| 会话 | `session_start` `session_send` `session_wait` `session_read` `session_screen` `session_list` `session_stop` `session_resize` `session_prompt_user` `profile_list` |
-| 秘密 | `secret_prompt`：在电脑上弹出掩码输入框，让人输入令牌或密码，直接存进文件（可写成 .env 里的一行）或 Windows 凭据管理器，模型拿不到值。只给 `key`（例如 `CLOUDFLARE_API_TOKEN`）时存进本机密钥库 `~/.winhand/secrets.env`，之后 `run`、`job_start` 用 `secrets=['CLOUDFLARE_API_TOKEN']` 把它作为环境变量交给程序，以后的会话也能用，不用再建新密钥。密钥库在结果里一律遮挡（重启后也是），AI 读不到也改不了。AI 一连上就从 winhand 的说明里看到已存的名字（“Stored here: …”，密钥库一变就更新），不用先调 `context()`；对已存的名字再调 `secret_prompt` 时，输入框会提示“已经存在”，点取消即可。电脑前的人在桌面 App 的“设置 → 密钥”里查看名字、添加、修改、改名、删除、显示或复制值（显示期间截图拍不到 App 窗口） |
-| 一次性命令和进程 | `run`（约 40 秒内一定回复；没跑完的命令继续运行，用 `job_status(id, wait_s=40)` 等后续输出）`remote_run`（经本机的 ssh 配置在另一台机器上跑脚本）`proc_list` `proc_kill` `sys_info` |
-| 文件 | `fs_read` `fs_write` `fs_edit` `fs_list` `fs_find` `fs_search` `fs_stat` `fs_op` |
-| 桌面 | `screenshot`（`wait` 等画面变化或停止变化，`path` 存文件）`window` `input` `ui`（`ref`、`steps` 一次做几步）`ocr`（认屏幕上的字）`clipboard` |
-| 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
-| 后台任务 | `job_start` `job_status` `job_stop` |
-| 本机规则 | `context`：这台电脑写给 AI 的规矩（按 Codex、Claude Code 的读法：AGENTS.md、CLAUDE.md、`.claude/rules`、`@` 引用）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务；`repo=owner/name` 可按仓库名找到本机目录。见[本机规则与守卫](#本机规则与守卫) |
-| 技能和本机 MCP | `skill(name)`：取一个技能的 SKILL.md 和文件清单（相当于 Claude Code 的 Skill 工具）；`mcp_tools` 列出本机 MCP 服务和它们的工具，`mcp_call` 调用其中的工具。见[本机的其他 MCP 服务](#本机的其他-mcp-服务) |
-| 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
-
-`run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义（解释器不在这几种里时，把它写在 `command`，例如 `run(command=r'.venv\Scripts\python.exe', script=...)`、`command='node'`）；只给 `command` 时整行交给 PowerShell 执行。PowerShell 的输出和管道统一是不带 BOM 的 UTF-8，Windows PowerShell 5.1 也一样，中文不会变成问号，传给原生程序的文本开头也不会多出 BOM。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
-
-`job_status` 的 `wait_s` 和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。经中转来的调用（claude.ai 连接器、云端会话）一次最多等 40 秒，等不完就带着游标再问：2026-11-01 实测，云端会话经连接器的调用到 60 秒就被切断，即使请求了进度、进度也发出去了。只有这台电脑上的客户端（stdio，或不经中转的 HTTP）、并且接收进度通知时，一次最多等 1800 秒：开始时立刻发一次进度，之后每 15 秒一次。等待中途，任务弹出新窗口（常常是等人点的对话框）或者长时间没有输出也不占 CPU 时，会提前返回，`matched` 分别是 `window` 和 `stalled`。还在跑的任务带 `activity`：进程数、CPU、内存、多久没输出、是否卡住、弹出的窗口；`files=[…]` 顺便给出其他文件（比如布线器自己的日志）的末尾。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。从同一个游标接着问时只回新的东西：启动命令和日志路径只在第一次回，stderr 只回上次之后新写的部分（给了 `tail` 时照常回末尾）。`run-N` 的编号记在 `~/.winhand/run-counter`，winhand 重启后接着编，不会重复；每个 `run` 一开始就有 id，回复在路上丢了时，`history()` 里能看到它，`job_status` 也能接着等。任务命令里写了 `exit N` 也照常记下退出码 N（命令单独存成 `command.ps1` 运行；以前 `exit` 会把外层的包装脚本一起结束，任务显示为 vanished）。`job_start` 的 `timeout_s` 到时结束整棵进程树（退出码 -1，`timed_out`）；`after=[任务 id]` 让它等前面的任务结束再开始，用来把几步串起来；不写 `shell` 时，装了 PowerShell 7 就用它（`*>`、Out-File 写出的是 UTF-8，不再是 UTF-16）。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容（不检查就别写这个参数，空值也当作没写）；`fs_write` 加 `overwrite=false` 表示只新建、文件已存在就拒绝。可选参数不要写成“有名字没有值”：这样的调用在到达 winhand 之前就会被客户端当作无法解析的 JSON 拒绝。`fs_edit` 的多处修改里，新旧文本一样的那处会跳过并注明，不再连累其他修改；同时给了 `old/new` 和 `edits`、而 `old/new` 正好是其中一处时照常执行。`fs_op` 删除默认进回收站。
-
-模型常按 Claude Code 内置工具的习惯传参（`file_path`、`old_string`/`new_string`、`-A`/`-B`/`-C`、`head_limit`、按毫秒给的 `timeout` 等）。winhand 把这些换成自己的参数名再执行，结果里用 `args_note` 说明换了什么；认不出的参数，报错时列出这个工具真正的参数。路径里的 `%USERPROFILE%`、`$env:LOCALAPPDATA`、开头的 `~` 都会展开。
-
-任务和命令运行期间电脑不会睡眠（只是不睡，显示器照常可以关）：`run` 由 winhand 自己向系统声明，后台任务由它自己的包装脚本声明，所以 winhand 重启也不影响；做完就撤销，之后照常按空闲时间睡眠。`config.toml` 里写 `[power] keep_awake = false` 可以关掉，单个后台任务可以用 `job_start(keep_awake=false)`。
-
-工具在列表里带着客户端认得的提示：读类工具标 `readOnlyHint`（Claude Code 会把它们并行执行，连接断了还会在新连接上自动补发一次），停止类工具标 `idempotentHint`；`run`、`job_start`、`job_status`、`remote_run`、`fs_*` 等常用工具带 `anthropic/alwaysLoad`，会话开始就加载，不用先搜索工具。
-
-单次结果有大小上限，按 UTF-8 字节计，约 4 万字节（一个中文字算 3 字节，接近它的 token 成本）。`fs_read`、`fs_list`、`fs_search`、`run`、`job_status` 和会话输出到上限就停，并说明从哪里接着读。以前一次能返回 6 万字左右，中文或密集代码会超过 Claude Code 单个结果 2.5 万 token 的上限，整条结果作废。
-
-截图和图片按大小预算编码（PNG，过大时改用 JPEG 并逐步缩小），保证能通过客户端的结果大小限制；长边不超过 1568 像素、总共不超过约 115 万像素，这是 Claude 不再自行缩小的上限，按截图像素点击才不会偏（以前 1920×1080 的屏幕发出去是 1568×882，会被再缩一次）；原始分辨率的截图同时保存在本机（结果里的 `original_file`），需要看清细节时用 `fs_read` 加 `region` 放大那一块。
-
-需要看界面或确认某个程序、对话框、安装程序的状态时，模型应自己调用 `screenshot`，不要让人截图；要点击时优先用 `ui`。`ui(action="wait")` 可以一直等到某个控件出现、消失、变为可用或显示某个值（比如安装程序的"下一步"按钮变为可点），`window(action="wait")` 等某个窗口出现或关闭，最多等 40 秒。按进程名选窗口时，优先选该程序的主窗口，不会选中它的提示框或弹出菜单。
-
-操作桌面程序有几条路。一条走不通时换下一条，从最稳的开始：
-
-1. **程序自己的命令行、接口或文件**（例如 KiCad 的 kicad-cli）；
-2. **`ui` 按名字操作控件**：
-   - 用的是 Windows 原生的 UI Automation，在 winhand 进程内调用；
-   - 经典 Win32 程序的菜单栏、展开的菜单、树、列表、工具栏也能读到、能操作；
-   - 原生接口用不了时，自动退回 PowerShell 脚本，结果里的 `backend` 会写明；
-3. **快捷键**：`input(action="keys")`；
-4. **`ocr` 认屏幕上的字**：适合没有控件的界面，例如画布、游戏、远程桌面、自绘界面。它用 Windows 自带的 OCR，不需要安装。
-   - `ocr(action="read")` 列出每行文字和屏幕位置；
-   - `ocr(action="click", text="保存")` 点击那段文字；
-   - `ocr(action="wait", text=...)` 等文字出现，`state="gone"` 时等它消失；
-   - 查找不区分大小写、全角和半角，忽略空格；
-   - 没有完全匹配时，`similar` 给出 OCR 实际读成的相近文字，不会点击；
-   - 同一段文字出现在好几处、又没给 `index` 时，列出各处位置，不点击；只有一处独占一行（像按钮）时点那一处。`ui` 遇到多个同名控件也一样，列出候选让模型指定 `index` 或 `automation_id`；
-5. **坐标点击**：最后才用，每次点击后截图核对。
-
-`screenshot(wait="change")` 等画面和上一次截图相比有变化再返回；`wait="stable"` 等画面停止变化 `stable_ms` 后再返回。这两种等待都可以代替固定的睡眠，文字光标闪烁不算变化。没给窗口时，`wait="stable"` 只看最前面的窗口：别处在放视频也不影响。仍然等不到时，回复里的 `kept_changing` 写明一直在变的区域和窗口。
-
-截图和输入的几个补充：
-
-- `screenshot(path=...)` 同时把原尺寸的图存进这个文件（`.png`，或 `.jpg`）。这算一次写文件，守卫按写规则判断。
-- 截最小化的窗口：先不抢焦点地把它显示出来，截完再放回去；原来是最大化的，还原时仍是最大化。截图的说明里会写上这一点。
-- `input` 新增：
-  - `modifiers=['ctrl']`：点击、滚动、拖动时按住修饰键；
-  - `triple_click`；
-  - `hold_key`：按住 `keys` 指定的键 `duration_s` 秒，最多 10 秒；
-  - `keys` 加 `repeat=N`：把整串按键按 N 遍；
-  - `cursor_position`：鼠标现在在哪，同时给出屏幕坐标和最近一次截图里的坐标；
-  - `window=<标题>`：`x`、`y` 是这个窗口里的像素，和给它单独截的图一致；先把它切到前台，按键和文字也发给它。
-- `ui` 新增：
-  - inspect 给每个控件一个编号 `ref`（如 `e12`），之后用 `ref='e12'` 就能操作这一个控件；编号到下一次 inspect 为止；
-  - `filter='文件名|打开'` 匹配其中任一段文字，也匹配控件的类名；`name`、`automation_id`、`control_type` 同样能缩小列表；
-  - 窗口在读的过程中变了，会自动重读；
-  - 动作打开了新窗口（确认框、报错、文件选择框），回复的 `new_windows` 会列出来；
-  - `steps=[...]`：一次按顺序做几个动作，也可以是 `keys`、`type`、`wait`；遇到出错、等不到或回读对不上就停下，最后截一张图。
-- `ocr` 找不到原样的文字时，再忽略标点找一遍：“COM17 · 115200”里的 “·” 认成 “•”、“-”，或者没认出来，都能找到，结果标上 `loose`。
-
-### 你在用电脑时，AI 让开
-
-- **让路**：你动了鼠标或键盘后，AI 的桌面操作（`input`、`ui` 的动作、`ocr` 的点击、`window` 的操作）先等你停手 5 秒，最多等 10 秒，还在用就告诉 AI “这人正在用电脑”，什么也不做。WinHand 自己发出的输入不算；你在 WinHand 的弹窗里点按钮、输入密钥也不算。
-- **急停**：按 **Ctrl+Alt+Shift+Backspace**，AI 的桌面操作在接下来 1 分钟里一律拒绝，回复里说明是你按的。`ui(steps=[...])` 做到一半时，也从下一步起停下。急停键在 WinHand 启动时就注册好；按下的时间记在 `~/.winhand/desktop-stopped`，所以电脑上同时跑着的几个 WinHand 进程（比如本机 Claude Code 用的 stdio）都会停。
-- **边框**：AI 操作桌面时，屏幕四周有一圈细细的橙色边框，最后一个动作之后 2 秒消失。截图里看不到它。Windows 10 2004 以前的系统没法把它排除在截图之外，就不显示。
-- **设置**：`config.toml` 里
-
-  ```toml
-  [desktop]
-  yield_to_owner = true   # false：不等你
-  owner_idle_s = 5        # 停手多久才算不用了
-  stop_keys = true        # false：不注册急停键
-  border = true           # false：不显示边框
-  ```
-
-  `sys_info()` 的 `desktop_owner` 一项显示当前的设置，以及急停键注册成功没有。
-
-### 命令被弹窗卡住时
-
-`run` 还没结束就先回复时，以及 `job_status` 的 `activity` 里：命令已经超过 5 秒没有输出，又在它运行期间冒出了要你回应的窗口，就会在 `prompts` 里列出它的标题和程序，并让它的任务栏按钮闪烁，直到你切过去。这类窗口包括对话框、Windows 安全中心的登录框、1Password、KeePassXC、Bitwarden、GPG 的 pinentry、Git Credential Manager。复盘里，一次 `git commit` 就卡在 1Password 的签名窗口上，没人去点。
-
-出现 UAC 这类安全桌面时，回复里也会写明：命令可能在等它，只有你能回答。长等待（`job_status(wait_s=...)`）碰到这两种情况会提前返回，`matched` 是 `prompt` 或 `secure_screen`。
-
-以下情况不能操作：
-
-- **锁屏、UAC 提示、远程桌面会话已断开时**：
-  - `input`、点击、`window(action="focus")` 直接说明原因，不发送输入；
-  - 整个桌面、显示器或区域的截图和读字也直接说明原因，不返回黑图；
-  - 窗口截图在窗口自己能画出来时照常返回，并附一句说明。
-- **以管理员身份运行的程序**：Windows 会悄悄丢掉普通程序发给它的点击和按键。
-  - 窗口列表里，这类窗口标为 `admin: true`；
-  - `ui`、`input`、`ocr` 的点击会拒绝，并说明原因；
-  - 截图和读字照常；
-  - `sys_info(checks=true)` 也会列出这些情况。
-
-不支持高 DPI 的老程序，在缩放过的显示器上截窗口图时，会放大到窗口在屏幕上的实际大小，坐标与屏幕一致。
-
-### 程序授权：AI 操作程序前先问你
-
-AI 第一次点击、输入或操作某个程序时，电脑上会弹出“WinHand：AI 想操作一个程序”，写明是哪个程序、哪个窗口、要做什么。三个按钮：
-
-- **拒绝**（默认焦点，误按回车不会批准）：这次不执行；之后 10 分钟内对这个程序的操作直接拒绝，不再弹窗，AI 会改为在对话里问你；
-- **允许到 WinHand 重启**：只记在这次运行的 WinHand 里；
-- **一直允许**：写入 `~/.winhand/desktop-apps.toml`，以后不再问。
-
-几点说明：
-
-- **要授权的操作**：`input` 的点击、拖动、滚动、按键、输入文字；`ui` 除 inspect 和 wait 以外的动作；`ocr` 的点击；`window` 的切到前台、最小化、最大化、还原、关闭、移动。截图、读字、`ui` inspect、剪贴板不受限制。
-- **按程序算**：按 exe 文件名，例如 `notepad.exe`。鼠标动作看坐标处的窗口，按键看前台窗口，带 Win 键的组合键算 `explorer.exe`。
-- **等你回答**：工具调用最多等约 40 秒；还没回答时先告诉 AI “正在等人允许”，弹窗继续开 2 分钟，你点了允许后，AI 下一次调用直接执行。2 分钟没人回答，这次就算拒绝，不记住。
-- **提醒**：浏览器、密码管理器、聊天软件、系统工具和命令行程序的弹窗里多一行红字，说明允许后 AI 能做什么。
-- **终端**：所有控制台窗口（命令提示符、PowerShell、python 等），以及 Windows Terminal、PuTTY、mintty 等终端程序，不弹窗，直接拒绝，提示 AI 改用 `run` 或会话工具，那里有守卫规则把关。确实要让 AI 在终端窗口里打字时，把它加入“一直允许”。
-- **WinHand 自己的窗口**：授权弹窗、守卫的确认框和桌面端，任何桌面工具都碰不到，即使关掉了授权。
-- **窗口列表**：`window(action="list")` 的每个窗口带 `approval`：`always`、`session`、`denied`、`terminal`、`ask` 或 `winhand`。
-
-管理授权：
-
-- 桌面端“设置”页的“程序授权”：开关“AI 操作程序前先问我”，查看和撤销两个列表，从开着的程序里挑选或输入 exe 名加入“一直允许”；
-- 命令行：
-  ```
-  winhand apps                    # 列出
-  winhand apps allow notepad.exe  # 弹确认框，你选“是”才加入一直允许
-  winhand apps revoke notepad.exe # 撤销
-  winhand apps off                # 弹确认框后关闭授权；winhand apps on 重新开启
-  ```
-- 授权文件 `~/.winhand/desktop-apps.toml` 也可以手动编辑（`ask = false` 关闭授权，`[always]` 下列出程序）。AI 的文件工具（`fs_write`、`fs_edit`、`fs_op` 等）改不了它，也不能删除或移走它所在的文件夹。
-
-这一层防的是 AI 误操作、越界去动你没交给它的程序，不是安全边界：AI 能执行命令，真想绕过也能绕过，和守卫规则的定位一样。
-
-`sys_info(checks=true)` 会做一次环境体检，逐项列出 PowerShell 7、代码页、RedirectionGuard、长路径、Git Bash、WSL、scoop/mise shim、ssh、ripgrep 和非 ASCII 用户目录的状态，每项附修复建议。
-
-`ui` 的操作只执行一次，之后回读控件状态；`verified=true` 表示可观察状态符合预期，`false` 表示未达到，`null` 表示无法确认。填写内容、切换勾选、选择、展开和聚焦可以按控件支持的状态核验；普通按钮被点击不代表它触发的工作已经完成，还应检查结果窗口。`verify_wait_s` 默认 3 秒，最多 10 秒，用于等待回读状态改变。
-
-`remote_run(host, script)` 用这台电脑的 ssh 配置和密钥（包括别名和 ProxyJump）在另一台机器上执行脚本：
-
-- 以非交互方式运行（BatchMode），带保活；脚本从 stdin 送过去，CRLF 会转成 LF。
-- `env`、`cwd`、`args` 都会正确转义；`shell='python3'` 的脚本也拿得到 `env` 和 `cwd`。
-- `secrets=['NAME']` 把本机密钥库里的值作为环境变量交给远程脚本，模型看不到值。
-- 失败时 `ssh_error` 会说明原因：连不上、主机指纹不对、密钥被拒，还是脚本本身返回了非零退出码。
-- 结果里网址中的 `用户:密码@` 一律遮挡。
-
-`remote_copy(host, local, remote_path, direction='up'|'down')` 用同一套 ssh 配置经 scp 传文件或文件夹。用 `run` 直接调 ssh、scp 时，结果里会提示改用这两个工具。
-
-需要交互登录时用 `session_start(profile="ssh", vars={"host": ...})`。如果要盯日志，加上 `restart_on_exit`，连接断了会自动重新连上。
-
-### 输出脱敏
-
-在 `~/.winhand/config.toml` 里加一个 `[redact]` 段，所有工具结果在离开电脑之前都会把命中的值换成 `«redacted:种类»`：
-
-```toml
-[redact]
-values = ["我的域名.example"]
-patterns = ['sk-[A-Za-z0-9]{20,}']
-ssh_hosts = true      # ~/.ssh/config（含 Include）里所有 HostName
-files = ['%LOCALAPPDATA%\vps-fleet\secrets\*.env']   # 这些文件里 KEY=VALUE 的值
-ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
-```
-
-不用配置也会遮挡的：
-
-- winhand 自己的秘密：设备令牌；本机 MCP 服务的请求头（含其中的 Bearer 令牌）和它们 `env` 里名字带 token、secret、password、api_key 之类的值；`~/.winhand` 里文件名带 passphrase、password、token、secret、credential 的小文件（如 `owner-passphrase.txt`）里的值；
-- 常见令牌格式：GitHub（`ghp_`、`github_pat_`…）、OpenAI / Anthropic（`sk-`）、AWS 访问密钥、Slack、Google API key、GitLab、npm、Hugging Face、私钥块和 JWT。`known_secrets = false` 可以关掉这一项。
-
-`fs_send` 交出的文件里若含有被遮挡的值，文件不发出，换成一句说明。`secret_prompt` 收下的值也会自动遮挡。为了防止把占位符写回文件、冲掉真实值，`fs_write`、`fs_edit`、`fs_apply_patch` 和 `run` 会拒绝含有 `«redacted:` 的内容。本机其他 MCP 服务（`/mcp/<名称>`）不经过脱敏。
-
-短暂断网后，agent 会重连，本机仍存活的会话继续运行。连接恢复时先用 `history` 看刚才的调用是否已经执行（带 run id 和退出码；几个客户端同时用这台电脑时，`client` 写明每条是谁发的，客户端保持 MCP 会话时 `this_session` 标出你自己的；winhand 重启后，桌面端日志里重启前的调用也列出来，标 `before_restart`），再用 `session_list` 找原会话，再用 `session_read(since=上次实际收到的 cursor)` 补读；游标未知时可从 `since=0` 开始。丢失回复不能证明操作失败，不要直接重发原命令。agent 进程重启属于另一种情况：交互会话不会自动恢复；需要跨 agent 重启继续的非交互工作用 `job_start`，之后以 `job_status` 查询。
-
-### 用 Harmonia 管理密钥
-
-[Harmonia](https://github.com/harmonia-vault/harmonia)（和弦）在手机上管理 API Key，端到端加密后同步到你批准的电脑和服务器；`harmonia exec -- <程序>` 只把密钥交给这一个程序。这台电脑装好 Harmonia 并接入账号后，winhand 会自动配合它：
-
-- **遮挡**：Harmonia 给这台电脑的每个值（所有环境的，同名变量在不同环境里的值也都算），在任何工具结果里都换成 `«redacted:harmonia:变量名»`。手机上新加的变量同步到电脑后，从下一个结果起就被遮挡。winhand 用 `harmonia export` 自己读这些值，值只留在 winhand 进程里。`[redact]` 里写 `harmonia = false` 可以关掉。
-- **保护**：AI 读不到、也改不了 Harmonia 的数据目录（`~/.harmonia`，里面的设备密钥能解开同步到这台电脑的全部变量）；`harmonia manager` 一律拒绝；`harmonia export`、`var list --show`、`var rm`、`logout`、`uninstall` 这类会输出明文或改变设置的命令，要你在电脑上点允许。这几条规则是 winhand 内置的，不用写进 guards.toml，`context()` 里能看到。
-- **使用**：`context()` 列出可用的环境，AI 用 `run(command='harmonia', args=['exec', '--env', 'Cloudflare', '--', 'npx', 'wrangler', 'deploy'])` 这样运行需要密钥的程序。
-- **存新密钥**：`secret_prompt(message, harmonia='Cloudflare/CLOUDFLARE_API_TOKEN')` 在电脑上弹出掩码输入框，输入的值直接写进 Harmonia 的这个环境，再同步到其他设备，AI 看不到。这台电脑对该环境要有读写权限。
-
-接入 Harmonia（按它自己的说明）：
-
-1. 部署服务端：Fork [harmonia-worker](https://github.com/harmonia-vault/harmonia-worker)，在 Cloudflare 控制台 Workers & Pages → Create → Import a repository 选这个 Fork 部署，免费套餐即可。部署后立即用手机 App 注册：默认只有第一个注册的账号能成功。
-2. 手机装 App（Android 直接装 APK；iPhone 需要用 AltStore 这类工具自签），建环境（例如 Cloudflare、GitHub），添加变量。
-3. 电脑上装命令行：在 PowerShell 里运行 `$env:HARMONIA_YES = '0'; irm https://github.com/harmonia-vault/harmonia/releases/download/update-feed/install.ps1 | iex`，再运行 `harmonia login <服务器地址>`，在手机上核对核对码后批准，只勾选需要的环境。
-
-几点建议：
-
-- Windows 上不要开 Harmonia 的“写入用户环境变量”（它的 Shell 集成）：值会以明文写进注册表，之后启动的每个程序都读得到。只用 `harmonia exec`，范围最小。
-- Harmonia 还在 v0.x，作者建议先用于非关键密钥。
-- 遮挡是安全带，不是沙箱：存心绕过的程序可以把值编码后再输出。
-
-## 本机规则与守卫
-
-任何客户端连上 winhand，都能读到这台电脑写好的规矩和技能，并受这台电脑上的规则约束。这一层与客户端无关，只用标准 MCP；没写规则时什么都不拦。
-
-### context：规矩和技能
-
-`context(path)` 按 Codex 和 Claude Code 各自的读法返回规矩，和它们在这台电脑上实际读到的一致：
-
-- **Codex**：
-  - 全局 `~/.codex/AGENTS.override.md`，没有时读 `~/.codex/AGENTS.md`（设了 `CODEX_HOME` 时，从那里读）；
-  - 项目根（最近的 `.git` 所在目录）到 `path` 沿途每一级，各取一份：`AGENTS.override.md` 优先，没有时取 `AGENTS.md`。
-- **Claude Code**：
-  - 管理员策略文件，以及 `~/.claude/CLAUDE.md` 和 `~/.claude/rules/`；
-  - 从磁盘根目录到 `path` 沿途每一级的 `CLAUDE.md`、`.claude/CLAUDE.md`、`CLAUDE.local.md`；
-  - 项目的 `.claude/rules/`：写了 `paths` 的规则只在路径匹配时生效，不生效的列在 `rules_not_applied` 里；
-  - 文件里的 `@路径` 引用会展开，最多 4 跳。
-
-同一个文件只返回一次。比如 CLAUDE.md 里写了 `@AGENTS.md`，AGENTS.md 只出现一次。每份规则都标出来自哪种格式（`format`）。
-
-除了规矩，还返回：
-- **技能列表**：名称、描述、SKILL.md 路径。默认扫 `~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`，以及项目里的 `.agents/skills`、`.claude/skills`，同名时项目优先；
-- 对该目录生效的守卫规则；
-- 本机 MCP 服务。
-
-每次回答都带一个 `digest`。两种省字数的用法：
-
-- `brief=true`：技能只列名字，规矩和守卫照旧给全。复盘时一次回答有 25–45 KB，其中技能清单占 14–17 KB。
-- `since=<上次的 digest>`：内容没变时只回 `unchanged`。只在上次的回答还在对话里时用；压缩上下文以后不要带，回答里也这样提醒。
-
-文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `skill(name)` 取 SKILL.md 正文、技能文件夹和其中的文件清单（SKILL.md 同样先过守卫的 `read` 规则），脚本用 `run` 在这台电脑上执行。
-
-输出经过脱敏，按脱敏后的长度控制在约 6 万字符以内：
-- 技能列表最多占约 2 万字符，其余技能只列名字；
-- 规矩太长时截断，并给出用 `fs_read` 接着读的方法。
-
-**只知道仓库名时**（比如云端会话只知道 `owner/name`），用 `context(repo="owner/name")`。它在以下位置找这个仓库在本机的检出目录：
-- Codex 记录的项目；
-- Claude Code 记录的项目；
-- `repo_roots` 里列出的文件夹。
-
-再给 `path="src"` 时，`path` 相对于检出目录。
-
-**安全**：`context` 读的每个文件，都先过守卫的 `read` 规则，被拒绝的不读。项目里的规矩引用项目外的文件（例如 `@~/.ssh/id_rsa`）时，只有两种情况才会展开：
-- Claude Code 已为这个项目批准过外部引用；
-- 设置了 `external_imports = true`。
-
-项目里指向项目外的符号链接（例如 `CLAUDE.md` 链接到别处）也一样。这样，别人的仓库没法借规矩文件读走你的私密文件。
-
-instructions 会提醒模型：开始在某个目录工作前，以及上下文被压缩后，调用 `context`。经中转和 `winhand http` 连接的客户端会看到这句提醒；本机 stdio 客户端默认不显示，因为它们自己会读规则。读哪些文件可以在 `config.toml` 里改：
-
-```toml
-[context]
-formats = ['codex', 'claude-code']   # 按谁的读法读规矩；['claude-code'] 时与 Claude Code 默认一致
-rules = ['D:\notes\agents.md']       # 写了就代替两种格式的全局规则文件；[] = 不读
-skills = ['~/.agents/skills', '~/.claude/skills', '~/.codex/skills']
-repo_roots = ['D:\code']              # context(repo=...) 还会在这些文件夹和它们的子文件夹里找
-external_imports = false             # true：项目规矩引用项目外文件时，不用等 Claude Code 批准
-stdio_hint = false                   # true：本机 stdio 客户端也显示 context 提醒
-```
-
-Claude Code 只保留 MCP instructions 的前 4096 个字符，所以 instructions 只放要点，完整指南由 `help()` 返回。
-
-### 守卫：动作前先看规则
-
-会读写这台电脑的调用，执行前都会被描述成一个“动作”，按规则裁决。经 `call()` 转发的调用也一样。
-
-| 动作 | 来自 |
-|---|---|
-| `command` | `run`（含 `stdin` 送进去的内容）、`job_start`、`session_start`、`remote_run`（含参数，`host` 为远程主机） |
-| `input` | shell 类会话（pwsh、powershell、cmd、bash、sh、zsh、ssh，或没指定程序的默认 shell）里真正被执行的每一行，见下文。gdb、串口等会话不检查 |
-| `write` | `fs_write`、`fs_write_bytes`、`fs_upload_url`、`secret_prompt` 的 `save_to`、`fs_op` 的 copy/move 目标（目标是已有文件夹时，按放进去的那个文件判断）和 mkdir |
-| `edit` | `fs_edit`、`fs_apply_patch`（补丁涉及的每个文件）。编辑需要看到内容，所以它们同时算对这些文件的 `read`；补丁文件本身也算 `read` |
-| `delete` / `move` | `fs_op`；delete 带 `recursive=true`（整个文件夹）时，还按 `command` 判断，看成 `Remove-Item -Recurse -LiteralPath '<路径>'`，所以禁止批量删除的命令规则也管得到它 |
-| `read` | `fs_read`、`fs_send`、`fs_download_url`、`fs_search`、`fs_op` 的 copy 和 move 来源，以及上面 `edit` 的目标 |
-
-`fs_search` 搜索文件夹时，读取规则拒绝或要求确认的文件不会出现在结果里，结果中的 `guard_hidden` 写明略去了几个文件。
-
-**shell 会话里的一行**：winhand 记住每个 shell 会话里“已输入、还没执行”的内容。之后换行、Enter 键、`submit`、`session_stop`（会输入退出命令并回车）或 `session_prompt_user`（会输入口令并回车）让这一行执行时，守卫判断的是整行。
-- **续行**：可能续行的行（以 `\`、反引号、`^`、`|` 等结尾，或引号、括号没闭合），既单独判断，也和后面的行连起来判断，连起来时分别试“直接相连”和“加一个空格”两种拼法；
-- **删除和清行**：Backspace 删掉最后一个字符；Ctrl+C 清掉这一行（仅限终端会话，管道会话里它只是一个字符）；
-- **无法推断的行**：光标移动、历史记录和历史展开（bash 的 `!!`、`^a^b`）、Tab 补全会让最终执行的内容无法从输入推断。工具出错、按键名写错、口令是否送达不确定、同一会话的输入互相重叠时，winhand 也不再知道已输入了什么。这样的行，任何带 `match` 的 `input` 规则都视为命中，拒绝信息会提示先用 Ctrl+C 清行；
-- **排队**：存在 `input` 规则时，同一 shell 会话的输入按顺序判断和发送。没有 `input` 规则的会话、单独的 Ctrl+C 和 `session_stop(force=true)` 不排队。
-
-规则写在 `~/.winhand/guards.toml`（全局），或项目目录下的 `.winhand/guards.toml`（只管该目录及子目录）。winhand 不自带任何规则，下面是示例：
-
-```toml
-[[guard]]
-on = ["command", "input"]
-match = '(?i)(\brm\b[^|;&\n]*\s-\w*r|\b(remove-item|ri|rm|rmdir|rd|del|erase)\b[^|;&\n]*\s-r(e(c(u(r(s(e)?)?)?)?)?)?\b|\b(rd|rmdir|del|erase)\b[^|;&\n]*\s/s\b)'
-decision = "deny"
-reason = "禁止批量删除：一次只删一个明确路径的文件，或请用户手动删除"
-
-[[guard]]
-on = "read"
-path = ["**/.env", "**/.env.*", "**/secrets/**"]
-decision = "deny"
-
-[[guard]]
-on = "delete"
-decision = "ask"          # 在电脑上弹窗确认
-reason = "删除前先问我"
-timeout_s = 40
-
-[[guard]]
-on = "edit"
-path = ["**/*.c", "**/*.h"]
-decision = "note"         # 照常执行，结果里附上这句提醒
-reason = "改完记得跑单元测试"
-
-[[guard]]
-on = ["write", "edit", "delete", "move"]
-path = ["**/.winhand/guards.toml"]
-decision = "ask"          # 规则文件本身也值得保护
-reason = "要改守卫规则"
-```
-
-- **字段**：
-  - `on`：动作类型：`command`、`input`、`write`、`edit`、`delete`、`move`、`read`、`mcp`。`mcp` 是经 `mcp_call` 调用本机 MCP 服务的工具，`match` 看到的文字是 `<服务>.<工具> <参数 JSON>`，例如 `match = '^pyocd-debug\.(flash|erase) '`；
-  - `match`：在命令行或输入的这一行里搜索的正则；
-  - `path`：glob 列表，支持 `**`，Windows 上不区分大小写。项目文件里的相对模式以该项目目录为基准；全局文件里的相对模式匹配任意位置（`*.pem` 等于 `**/*.pem`）；
-  - `decision`：`deny`、`ask` 或 `note`；
-  - `reason`：拒绝、确认或提醒时显示的说明；
-  - `timeout_s`：ask 等待确认的秒数，默认 40，最多 50。客户端等一个工具调用大约 60 秒就放弃，再晚的“是”会让 AI 以为失败的操作其实执行了。
-- **裁决**：deny 优先于 ask，ask 优先于 note。没有 allow，所以项目规则只能增加限制，不能放宽全局规则。
-- **拒绝**：工具不执行，以工具错误返回，写明规则文件、第几条和理由。这次调用仍出现在 `history` 和桌面端时间线里。
-- **请人确认**：在电脑上弹出置顶的确认框，写明工具、动作和理由。默认按钮是“否”，正在别处打字时误按回车也不会放行。没人应答、点“否”或弹不出窗口，都不执行。
-- **规则文件写错**：解析失败、字段不认识、正则写错时，这个文件管辖的动作一律拒绝，错误里写明文件和位置；改好后下一次调用即恢复。
-- **文件夹**：`secrets/**` 这样的模式同时覆盖文件夹本身，复制或移动整个文件夹也会被拦。
-- **路径**：按工具自己的方式解析路径（`fs_*` 不展开环境变量，一次性链接工具会展开），并同时按真实路径判断：符号链接、目录联接、8.3 短名、`\\?\` 前缀、`::$DATA` 这类写法不会绕过路径规则。
-
-参数格式不对的调用不经守卫判断，直接由工具自己报错，什么也不会执行。
-
-### 本机的 Codex、Claude Code hooks
-
-在本机用 Codex 或 Claude Code 时会运行的 PreToolUse hooks，经 winhand 的调用也会运行。例如项目里 `.codex/hooks.json` 中“这个阶段不许改 src/”的守卫，云端会话通过 winhand 改文件时同样生效。
-
-- **只运行这两个工具自己会运行的**：
-  - Codex：在 Codex 里审核过（`/hooks`，`trusted_hash` 与现在的内容一致）的 hook，项目里的还要求项目被信任；
-  - Claude Code：项目已接受工作区信任时才运行；
-  - 管理员下发的 hooks 总是运行。
-
-  没信任、改过、被关掉的不运行；Codex 自己读不了的 hooks 文件、Codex 的 `[features] hooks = false` 也一样。`context(path)` 的 `hooks` 一项列出每个 hook 的状态和原因，以及读不了的文件。
-- **hook 看到什么**：动作按那个工具自己的样子交给它。
-  - 命令、shell 会话里提交的一行，都是 `Bash`；
-  - 写文件：Claude Code 是 `Write`、`Edit`，Codex 是 `apply_patch`；
-  - 读文件：Claude Code 是 `Read`。Codex 没有读文件工具，读文件不交给 Codex 的 hook。
-- **结论**：
-  - 退出码 2 或 deny：拒绝；
-  - Claude Code 的 ask：弹窗请你确认；
-  - `additionalContext`：作为附注给模型；
-  - hook 想改写这次调用（`updatedInput`）：拒绝，并告诉模型按 hook 的意思改了再发；
-  - hook 超时、出错：照常执行并附注，与两个工具的做法一致。
-- hook 的结论和 `guards.toml` 一起裁决，只会更严：hook 说 allow 也放不过 `guards.toml` 拒绝的动作。
-- **Windows 上的退出码**：Codex 用 `pwsh -NoProfile -Command <命令>` 运行 hook，PowerShell 会把程序的退出码 2 变成 1，Codex 就当 hook 出错而放行，靠退出码 2 拒绝的 hook 在 Codex 里其实拦不住。winhand 也用 PowerShell 运行，但会把程序的退出码传出来，让这类拒绝照常生效。这一点比 Codex 严格，符合 hook 的本意。想让 hook 在 Codex 里也生效，可在命令末尾加 `; exit $LASTEXITCODE`，或改为输出 JSON 的 deny。
-
-`guards.toml` 也可以把判断交给一个命令，协议与 Claude Code 的 PreToolUse hook 相同：
-
-```toml
-[[guard]]
-on = ["command", "input"]
-command = 'python C:\tools\check_command.py'   # 读 stdin 的 JSON，退出码 2 或输出 deny 即拒绝
-```
-
-`command` 只能写在全局的 `~/.winhand/guards.toml` 里。项目里的文件写了，按“写错了”处理：仓库里的文件不能让 winhand 执行命令。
-
-在 `config.toml` 里可以关掉或调整：
-
-```toml
-[hooks]
-sources = ['codex', 'claude-code']   # [] = 这两个工具的 hook 一个都不运行（guards.toml 的 command 规则照常）
-timeout_s = 30                       # 每个 hook 最多等多久
-```
-
-守卫按工具的参数判断，**不是沙箱**。它适合拦住善意的 AI 犯错，挡不住刻意绕路：`run` 里的程序自己去读写什么（例如 `run("type .env")`）、正则没覆盖到的写法、`proc_kill` 和桌面工具，它都管不到。真正需要隔离时，用系统权限或单独的账户。
-
-### 云端会话开场就带上本机规矩
-
-云端 Claude Code 会话本来要靠模型自己想起来调用 `context()`。在仓库里加 SessionStart hook，会话一开始（以及 `/clear`、恢复、压缩上下文之后）就会自动带上这台电脑上的三段内容，每段是一个单独的 hook，各自不超过 9,000 字符（Claude Code 对每个 hook 的上限是 10,000）：
-
-- **规矩**：全局规矩（与 `context()` 的读法相同），以及这个仓库在本机的检出目录里、**没提交到仓库**的规则文件，例如 `CLAUDE.local.md`。已提交的文件云端仓库里有，不重复。放不下的部分列出路径，提示用 `context()` 读；
-- **技能**：每个技能的名字和描述（`description`，有 `when_to_use` 时接在后面），和本机 Claude Code 列技能的方式一样。放不下时均匀缩短每条描述，最短 80 字符；仍放不下时其余的只列名字。要用时调用 `skill(name)`；
-- **本机 MCP 工具**：每个启用的本机 MCP 服务的说明和工具清单，每个工具一行说明。工具多、放不下时，所有说明均匀缩短到同一长度（最短 40 字符），每个工具都留着说明；仍放不下时，最后几个服务只列工具名。内容来自电脑上的工具清单缓存，开场**不会启动任何服务**；从没列出过工具的服务只写“尚未列出”。调用用 `mcp_call`，完整参数用 `mcp_tools(server)`。
-
-电脑不在线时，每段只有一句说明。0.4.7 生成的单个 hook 仍然可用（规矩加技能名单）。升级时先把电脑上的 winhand 更新到 0.4.8，再重新执行 `winhand bridge init --write` 换成三段：电脑还是 0.4.7 时，三段 hook 会各自拿到一份完整的规矩。
-
-设置三步：
-
-1. 生成 hook 令牌，设到中转上：
-
-   ```
-   winhand bridge token                 # 生成令牌，只显示一次
-   npx wrangler secret put HOOK_TOKEN   # 在中转目录执行，粘贴令牌
-   npx wrangler deploy
-   ```
-
-2. 把 hook 放进仓库：`winhand bridge init --write <仓库目录>`，然后提交并推送。它会合并进 `.claude/settings.json`，保留已有内容；只想看片段时去掉 `--write`。所有仓库用同一份配置：仓库由云端的 `git remote get-url origin` 决定，本机按仓库名找到检出目录（同 `context(repo=…)`）。
-3. 在云端环境里放令牌（会话标题栏的云环境菜单 → Edit），`winhand bridge init` 会打印具体做法：
-   - 推荐用 Network secrets（Pro/Max 才有）：网站填中转的域名，Path prefixes 留空（只填 `/hook/` 会挡住一次性文件链接），自定义请求头 `X-Winhand-Hook-Token`，前缀留空。令牌由代理在请求离开容器后加上，不进容器；
-   - 没有 Network secrets 时：Network access 选 Custom，在 Allowed domains 里加上中转的域名并勾上 Also include default list of common package managers，再设环境变量 `WINHAND_HOOK_TOKEN`。使用这个环境的人都能看到这个变量。
-
-hook 令牌只能取开场上下文：中转只为 `/hook/session-start` 认它，不能调用任何工具，也打不开 `/mcp`。生成的配置里写着中转的域名，提交后看得到仓库的人都能看到它，建议只用于私有仓库；没有令牌的请求会被拒绝。内容与 `context()` 一样经过守卫的 `read` 规则和脱敏。本机的 Claude Code 不受影响：hook 只在 `CLAUDE_CODE_REMOTE=true`（云端）时运行，出任何错都安静退出，不打断会话。多仓库的云端会话不读仓库的 hooks，这个功能不生效。
-
-## 本机的其他 MCP 服务
-
-电脑上已有的 MCP 服务（pyocd-debug、usb-camera、FreeCAD …）有两种用法。
-
-**经 winhand 主连接调用**（不用另加连接器）：
-
-- `mcp_tools()`：列出启用的服务、运行状态和缓存里的工具，不启动任何服务；
-- `mcp_tools("pyocd-debug")`：必要时启动它，列出每个工具的说明和参数（inputSchema），并更新缓存；
-- `mcp_call("pyocd-debug", "read_memory", {...})`：必要时启动服务并调用，原样返回文字和图片；服务报错时作为工具错误返回。约 40 秒内没有结果时先返回 `call_id`，用 `mcp_call(call_id=...)` 接着等。`timeout_s`（默认 120 秒）之后放弃这次调用并通知服务取消。
-
-`mcp_call` 和其他工具一样受守卫（动作类型 `mcp`）和本机 hooks 约束；本机 hooks 看到的工具名是 `mcp__<服务>__<工具>`，和 Claude Code、Codex 的命名相同，所以写给它们的 matcher（例如 `mcp__pyocd-debug__.*`）同样生效。守卫拒绝时不会启动服务。`mcp_tools(服务名)` 只列出工具，不受守卫判断：它仍会启动服务。不想让 AI 启动某个服务时，在托盘应用里停用它。
-
-工具清单缓存在 `~/.winhand/cache/mcp-tools.json`，以下三种情况会更新它：任何客户端经下面的独立地址列出工具时、`mcp_tools(服务名)`、托盘应用的“测试”按钮或 `winhand mcp test`。服务的启动命令、参数、地址、工作目录或环境变量改了以后，旧的缓存不再使用。缓存里只有工具清单，没有调用参数和结果。
-
-**各自成为一个独立的远程 MCP 地址**：
-
-```
-https://<你的中转域名>/mcp/<名称>
-```
-
-在 claude.ai 里把每个地址分别添加为自定义连接器即可（授权一次口令；同一个中转下的地址共用授权）。winhand 原样转发，不改工具名，进度通知、图片、服务端发起的请求都能往返；服务在第一次被调用时启动，崩溃后下一次调用自动重启。服务卡住（请求迟迟没有回应，连心跳 ping 也不回）时，新的调用会立刻得到说明而不是一直等待；卡住超过 2 分钟会自动重启，托盘里显示为“无响应”。
-
-在托盘应用的“MCP 服务”页添加、编辑、测试、启停，或从 Codex / Claude Desktop / Claude Code 的配置导入；配置保存在 `~/.winhand/config.toml`：
-
-```toml
-[mcp_servers.pyocd-debug]
-command = "uv"
-args = ["--directory", 'D:\Dev\PYOCD调试MCP', "run", "pyocd-debug-mcp"]
-env = { PYOCD_LOG = "info" }
-
-[mcp_servers.docs]            # 本机已经以 HTTP 提供的 MCP 服务，直接转发
-url = "http://127.0.0.1:8000/mcp"
-```
-
-命令行：`winhand mcp list`、`winhand mcp import [名称…]`、`winhand mcp test [名称…]`。
-
-**Python 环境坏了时自动修好**：用 `uv run` 启动的服务（例如 `uv --directory D:\项目 run 入口`），项目的虚拟环境（`.venv`）记着建它时用的 Python 的完整路径。mise、pyenv 之类的工具升级 Python 后会删掉旧版本，这个环境就坏了：`uv run` 每次都报 `No Python at '…'`，而 uv 自己发现不了。winhand 每次启动这类服务前检查一次：
-- 环境指向的 Python 已不存在时，先在项目目录里运行 `uv venv --clear` 和 `uv sync` 重建它（带上启动参数里的 `--locked`、`--frozen`、`--python` 等），再照常启动；
-- 修复记在服务日志里，服务状态里也有一句说明；修不好时不启动，错误里写明原因和手动修复的命令；
-- 测试按钮、`mcp_tools` / `mcp_call`、经网关的启动都会检查；`sys_info(checks=true)` 也会列出坏掉的环境；
-- 修复只重建 `.venv`，不改项目里的其他文件。不想自动修复的服务在 `config.toml` 里写 `repair_env = false`，这时只报出原因和修法。
-
-npx、uvx 启动的服务，以及直接指定某个虚拟环境里的 python.exe 的服务不自动修复；后者启动失败时同样会说明原因。
-
-本机 MCP 服务可以在 `config.toml` 里设置 `call_timeout_s`。单次工具调用超过这个时间，winhand 会取消这次调用并给客户端回一个错误，避免整个服务被一个卡住的调用拖住。
-
-## Profile
-
-内置的有：`shell` `python` `gdb` `pyocd-gdbserver` `pyocd-commander` `openocd` `jlink` `rtthread-msh` `serial` `telnet` `menuconfig`。
-
-你也可以在 `~/.winhand/profiles/<名称>.toml` 里新增 profile，或覆盖同名的内置 profile：
-
-```toml
-description = "实验室设备的调试控制台"
-transport = "tcp"            # pty | pipe | serial | tcp
-host = "{host}"
-tcp_port = 23
-vars = { host = "192.168.1.50" }
-prompts = ['^LAB# ?$']
-needs_user = ['(?i)login:\s*$']
-exit_command = "exit"
-init = ["terminal length 0"]
-autoreply = [{ pattern = '--More--', keys = ["Space"], submit = false }]
-notes = "给 AI 看的使用提示"
-```
-
-## 示例：多会话联动调试
+在 claude.ai 的「设置 → 连接器 → 添加自定义连接器」里填：
 
 ```text
-session_start(profile="pyocd-gdbserver", args=["-t","hc32f460petb"])   -> gdbsrv-1（等到端口开始监听）
-session_start(profile="gdb", args=["fw.axf"])                           -> gdb-2（已执行 set pagination off 等初始化命令）
-session_send("gdb-2", "target extended-remote :3333", submit=True)
-session_send("gdb-2", "break uart_rx_done", submit=True)
-session_send("gdb-2", "continue", submit=True)                          -> 状态 idle，目标板在运行
-session_start(profile="rtthread-msh", vars={"port":"COM5"})             -> msh-3
-session_send("msh-3", "uart_test", submit=True)
-session_wait(["gdb-2","msh-3"], patterns=['^\(gdb\) ?$', 'PANIC|assert'], timeout_s=50)
-  -> hit: {session: "gdb-2", condition: "pattern"}，同时返回两个会话各自的新输出
+https://<你的域名>/mcp
 ```
 
-## 开发
+用主人口令完成授权，新开一个对话就能用。打开 `https://<你的域名>/` 能看到电脑在不在线。Claude Code 云端会话还要在环境的网络设置里放行这个域名，一次性文件链接和任务结束叫醒才能用。
 
-```bash
-cd agent
-uv run pytest -q          # 用一个模拟交互程序做端到端测试（提示符、密码、浏览器验证、分页器、TUI、串口回环、TCP）
-uv run ruff check src tests
-```
+本机的 Claude Code、Claude Desktop、Codex 不经中转，直接用 stdio：`uv --directory <winhand>\agent run winhand stdio`。
 
-CI 会在 Ubuntu 和 Windows 上同时运行。
+> [!WARNING]
+> 连上的 AI 能在这台电脑上执行命令、读写文件、操作桌面。主人口令和设备令牌都要足够长，不要外传；怀疑泄露时，在状态页输入主人口令退出所有登录，再换掉设备令牌。守卫规则和程序授权只防误操作，不是安全边界。
+
+## 文档
+
+- [使用指南](docs/guide.md)：工具一览、会话、长任务与叫醒、文件进出电脑、桌面操作
+- [规矩与守卫](docs/rules-and-guards.md)：`context`、守卫规则、本机 hooks、云端会话开场带上规矩
+- [本机的其他 MCP 服务](docs/local-mcp.md)
+- [中转：部署与安全设计](docs/relay.md)
+- [桌面端](desktop/README.md)、[开发与命令行](docs/development.md)
+
+## 许可证
+
+[MIT](LICENSE)
