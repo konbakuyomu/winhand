@@ -104,7 +104,14 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "login":
         from . import config
 
-        token = (sys.stdin.readline() if args.token_stdin else args.token or "").strip()
+        if args.token_stdin:
+            # bytes: Windows PowerShell may put a UTF-8 BOM in front of what it pipes to a program
+            raw = (
+                sys.stdin.buffer.readline() if hasattr(sys.stdin, "buffer") else sys.stdin.readline().encode()
+            )
+            token = raw.removeprefix(b"\xef\xbb\xbf").decode("utf-8", "replace").lstrip("\ufeff").strip()
+        else:
+            token = (args.token or "").strip()
         if not token:
             parser.error("give the device token with --token-stdin (on stdin) or --token")
         url = args.url.strip()

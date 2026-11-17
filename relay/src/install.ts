@@ -63,7 +63,9 @@ $dir = if ($installed -and $installed.InstallLocation) { $installed.InstallLocat
 $backend = Join-Path $dir 'current\\backend\\winhand.exe'
 if (-not (Test-Path $backend)) { Fail "没找到 $backend。"; return }
 
-# 4. Save the relay address and device token (the token goes in on stdin, never on a command line).
+# 4. Save the relay address and device token (the token goes in on stdin, never on a command line;
+#    UTF-8 without a BOM, which Windows PowerShell would otherwise put in front of it).
+$OutputEncoding = New-Object System.Text.UTF8Encoding $false
 $pair.token | & $backend login --url $pair.agent_url --token-stdin
 if ($LASTEXITCODE -ne 0) { Fail '保存地址和令牌失败：这个版本的 winhand 太旧，装上新版后再运行一次这条命令。'; return }
 

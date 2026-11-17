@@ -1,6 +1,6 @@
 services:
   relay:
-    image: winhand-relay:20261113
+    image: ${WINHAND_IMAGE:-winhand-relay:local}
     network_mode: host
     restart: unless-stopped
     logging:
@@ -11,7 +11,8 @@ services:
       PUBLIC_ORIGIN: https://${WINHAND_HOST:?set WINHAND_HOST to the relay's domain}
       WINHAND_STATE_DIR: /state
       OWNER_PASSPHRASE_FILE: /run/secrets/owner-passphrase
-      AGENT_TOKEN_FILE: /run/secrets/agent-token
+      # A relay that still serves the computer of the single-computer days: put its device token in
+      # secrets/agent-token and add  AGENT_TOKEN_FILE: /run/secrets/agent-token
       PROXY_TOKEN_FILE: /run/secrets/proxy-token
     volumes:
       - ./secrets:/run/secrets:ro

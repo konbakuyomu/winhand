@@ -48,8 +48,9 @@ try {
   $autostart = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').winhand
   if ($autostart -ne ('"' + (Join-Path $dir 'current\WinhandDesktop.exe') + '" --background')) { throw "autostart entry: $autostart" }
   $config = Get-Content (Join-Path $env:USERPROFILE '.winhand\config.toml') -Raw
-  if ($config -notmatch 'url = "ws://127\.0\.0\.1:8787/pc/ci/agent"') { throw "config.toml has no relay address for ci: $config" }
-  if ($config -notmatch 'device_token = "[A-Za-z0-9_-]{43}"') { throw 'config.toml has no device token' }
+  if ($config -notmatch 'url = [''"]ws://127\.0\.0\.1:8787/pc/ci/agent[''"]') { throw "config.toml has no relay address for ci" }
+  # exactly the 43-character token: nothing in front of it (Windows PowerShell pipes put a BOM there)
+  if ($config -notmatch 'device_token = [''"][A-Za-z0-9_-]{43}[''"]') { throw 'config.toml has no clean device token' }
   if ((Invoke-WebRequest -Method Post -Uri $command -UseBasicParsing -SkipHttpErrorCheck).StatusCode -ne 410) { throw 'the install command worked twice' }
 
   $agent = Start-Process -FilePath $backend -ArgumentList 'connect' -PassThru -WindowStyle Hidden `

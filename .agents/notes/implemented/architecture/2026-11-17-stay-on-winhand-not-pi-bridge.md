@@ -61,6 +61,9 @@ Status: implemented
   - 任务记在磁盘上，更新、重启时不杀；
   - 有任务结束的通知出口，能接叫醒；
   - 电脑的凭证和连接器密钥分开，或者改成 OAuth。
+- **2026-11-18 复查**：pi-bridge v0.5.0（提交 9adacdd）做到了第一条。提交 da7ab3a 让 `call` 触发 `tool_call`、`tool_result` 等钩子，`run` 按 bash 工具触发同样的钩子，扩展可以阻止调用、改参数和结果。
+  - 其余三条还没有：`packages/cli/src/bridge.ts` 里任务仍放在内存的 Map 里，`shutdown()` 仍会结束全部任务；没有任务结束的通知；连接器地址仍是 `/<密钥>/mcp`。
+  - 结论不变。
 
 ## Verification
 

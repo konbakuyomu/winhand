@@ -7,13 +7,13 @@
 让 AI 通过**一个 MCP** 接管一台 Windows 电脑。它能驱动真终端和各种交互式程序，包括调试器、仿真器、REPL、串口和网络控制台、menuconfig 这类全屏界面、需要登录或确认的安装程序；同时提供文件读写、进程管理，还能把本机已有的其他 MCP 服务各自作为独立的远程地址提供出去。
 
 ```
-claude.ai 连接器 ──HTTPS + OAuth──▶ relay（Cloudflare Worker，你的域名）
-                                       │  Durable Object 维持会话，透明转发 HTTP（含 SSE）
+claude.ai 连接器 ──HTTPS + OAuth──▶ relay（Cloudflare Worker 或自己的服务器，你的域名）
+                                       │  每台电脑一个 Durable Object，地址在 /pc/<名称>/ 下，透明转发 HTTP（含 SSE）
                                        ▼  WebSocket（电脑主动连出，不开任何入站端口）
 Claude Desktop / Codex ──stdio──▶ winhand agent（跑在你的电脑上）
                                    ├─ 通用会话引擎：pty | pipe | serial | tcp
                                    ├─ 文件 / 进程 / 系统信息
-                                   └─ 本机 MCP 服务：pyocd-debug、usb-camera … 各自在 /mcp/<名称>
+                                   └─ 本机 MCP 服务：pyocd-debug、usb-camera … 各自在 /pc/<电脑>/mcp/<名称>
 ```
 
 ## 会话：驱动交互程序
@@ -59,7 +59,7 @@ winhand 把这些都当作**会话**，用同一套模型管理：
 
 `job_status` 的 `wait_s` 和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。经中转来的调用（claude.ai 连接器、云端会话）一次最多等 40 秒，等不完就带着游标再问：2026-11-01 实测，云端会话经连接器的调用到 60 秒就被切断，即使请求了进度、进度也发出去了。只有这台电脑上的客户端（stdio，或不经中转的 HTTP）、并且接收进度通知时，一次最多等 1800 秒：开始时立刻发一次进度，之后每 15 秒一次。等待中途，任务弹出新窗口（常常是等人点的对话框）或者长时间没有输出也不占 CPU 时，会提前返回，`matched` 分别是 `window` 和 `stalled`。还在跑的任务带 `activity`：进程数、CPU、内存、多久没输出、是否卡住、弹出的窗口；`files=[…]` 顺便给出其他文件（比如布线器自己的日志）的末尾。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。从同一个游标接着问时只回新的东西：启动命令和日志路径只在第一次回，stderr 只回上次之后新写的部分（给了 `tail` 时照常回末尾）。`run-N` 的编号记在 `~/.winhand/run-counter`，winhand 重启后接着编，不会重复；每个 `run` 一开始就有 id，回复在路上丢了时，`history()` 里能看到它，`job_status` 也能接着等。任务命令里写了 `exit N` 也照常记下退出码 N（命令单独存成 `command.ps1` 运行；以前 `exit` 会把外层的包装脚本一起结束，任务显示为 vanished）。`job_start` 的 `timeout_s` 到时结束整棵进程树（退出码 -1，`timed_out`）；`after=[任务 id]` 让它等前面的任务结束再开始，用来把几步串起来；不写 `shell` 时，装了 PowerShell 7 就用它（`*>`、Out-File 写出的是 UTF-8，不再是 UTF-16）。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容（不检查就别写这个参数，空值也当作没写）；`fs_write` 加 `overwrite=false` 表示只新建、文件已存在就拒绝。可选参数不要写成“有名字没有值”：这样的调用在到达 winhand 之前就会被客户端当作无法解析的 JSON 拒绝。`fs_edit` 的多处修改里，新旧文本一样的那处会跳过并注明，不再连累其他修改；同时给了 `old/new` 和 `edits`、而 `old/new` 正好是其中一处时照常执行。`fs_op` 删除默认进回收站；不递归地删一个空文件夹不算批量删除。`fs_write(append=true)` 和 `fs_edit` 跟着文件原来的换行走：CRLF 文件追加的内容也写成 CRLF（看文件末尾 64 KB 定），只差换行的原文照样找得到，提示也直说只差换行。
 
-**等的时候不花回合（云端会话）。** 经中转的 `job_start` 回复、`run` 回 `still_running` 时，多一个 `wake`：一行 bash。把它放进沙箱后台运行（Claude Code 的 Bash `run_in_background`），任务一结束命令就结束，会话随即被叫醒，带回 `{"done":true,"state":...,"exit_code":...}`；等的时候一个回合也不花，不用 `send_later` 定闹钟。`job_status(id, patterns=[...], wake=true)` 给的命令在新输出匹配时也会结束；`job_status(files=[路径], wake=true)` 等那个文件出现或改动；`job_status(wake=true)` 什么都不带时，等电脑重新在线。命令背后是电脑签发的等待链接 `/t/<令牌>`：每次最多挂 50 秒，只回状态，不回输出；默认 12 小时有效，winhand 重启后照样认得。中转不用改。
+**等的时候不花回合（云端会话）。** 经中转的 `job_start` 回复、`run` 回 `still_running` 时，多一个 `wake`：一行 bash。把它放进沙箱后台运行（Claude Code 的 Bash `run_in_background`），任务一结束命令就结束，会话随即被叫醒，带回 `{"done":true,"state":...,"exit_code":...}`；等的时候一个回合也不花，不用 `send_later` 定闹钟。`job_status(id, patterns=[...], wake=true)` 给的命令在新输出匹配时也会结束；`job_status(files=[路径], wake=true)` 等那个文件出现或改动；`job_status(wake=true)` 什么都不带时，等电脑重新在线。命令背后是电脑签发的等待链接 `/pc/<电脑>/t/<令牌>`（单台电脑的旧部署是 `/t/<令牌>`）：每次最多挂 50 秒，只回状态，不回输出；默认 12 小时有效，winhand 重启后照样认得。中转不用改。
 
 后台任务的几个参数和回复：
 

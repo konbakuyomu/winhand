@@ -74,3 +74,12 @@ def test_login_refuses_a_missing_token_or_a_web_url(monkeypatch):
         cli.main(["login", "--url", "wss://relay.example/pc/home/agent", "--token-stdin"])
     with pytest.raises(SystemExit):
         cli.main(["login", "--url", "https://relay.example/pc/home/mcp", "--token", "t"])
+
+
+def test_login_drops_the_bom_windows_powershell_puts_in_front_of_piped_text(monkeypatch):
+    class Stdin:
+        buffer = io.BytesIO(b"\xef\xbb\xbfabc-TOKEN_123\r\n")
+
+    monkeypatch.setattr(sys, "stdin", Stdin())
+    assert cli.main(["login", "--url", "wss://relay.example/pc/home/agent", "--token-stdin"]) == 0
+    assert config.load().device_token == "abc-TOKEN_123"
