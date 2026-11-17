@@ -132,6 +132,8 @@ uv run winhand connect --url wss://mcp.你的域名/agent --token <AGENT_TOKEN> 
 
 AI 要跨调用留着的文件，放 winhand 自己的暂存目录：默认 `~/.winhand/scratch`，`config.toml` 里 `[scratch] folder = "D:/..."` 可以改。`context()` 会给出这个路径，在电脑上启动的程序可以用 `%WINHAND_SCRATCH%` 找到它。这里的东西不会自动删除；`%TEMP%` 你会手动清理，复盘时有两次暂存在那里的文件因此丢了。
 
+暂存目录每周问你一次：桌面端开着时，距上次问满 7 天，就弹窗列出这里第一层 14 天没动过的文件夹（名字、最后改动日期、大小），你点「是」才逐个移进回收站，可以还原。放了 `.keep` 的文件夹、联接点和符号链接不动；点「否」或两分钟没人答，下周再问；屏幕锁着时不问，等你回来。AI 也可以用 `fs_op(action="clean_scratch")` 当场问一次，同样由你在弹窗里决定。回收站装不下的，Windows 会先警告再永久删除。
+
 要在 Claude Code 云端会话里用这个功能，得在云环境的网络设置里放行中转域名：打开会话标题栏的云环境菜单 → Edit → Network access 选 Custom，在 Allowed domains 里加上 `mcp.你的域名`，并勾上 Also include default list of common package managers（不勾就只剩你填的域名）。改完约一分钟生效，正在运行的会话也会跟着生效。只靠下面“云端会话开场就带上本机规矩”里的 Network secret 放行时，它的 Path prefixes 要留空：填了 `/hook/` 的话，一次性链接（`/t/…`）会被沙箱的代理拦下，curl 报 403。中转更新后要重新执行 `npx wrangler deploy`。
 
 端到端测试（CI 中自动运行）：`relay/test/e2e.py` 在 `wrangler dev` 上模拟 claude.ai，走完注册 → 授权 → 换 token → 经隧道调用 MCP 工具的整个流程。
@@ -153,13 +155,25 @@ AI 要跨调用留着的文件，放 winhand 自己的暂存目录：默认 `~/.
 
 `run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义（解释器不在这几种里时，把它写在 `command`，例如 `run(command=r'.venv\Scripts\python.exe', script=...)`、`command='node'`）；只给 `command` 时整行交给 PowerShell 执行。PowerShell 的输出和管道统一是不带 BOM 的 UTF-8，Windows PowerShell 5.1 也一样，中文不会变成问号，传给原生程序的文本开头也不会多出 BOM。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。
 
-`job_status` 的 `wait_s` 和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。经中转来的调用（claude.ai 连接器、云端会话）一次最多等 40 秒，等不完就带着游标再问：2026-11-01 实测，云端会话经连接器的调用到 60 秒就被切断，即使请求了进度、进度也发出去了。只有这台电脑上的客户端（stdio，或不经中转的 HTTP）、并且接收进度通知时，一次最多等 1800 秒：开始时立刻发一次进度，之后每 15 秒一次。等待中途，任务弹出新窗口（常常是等人点的对话框）或者长时间没有输出也不占 CPU 时，会提前返回，`matched` 分别是 `window` 和 `stalled`。还在跑的任务带 `activity`：进程数、CPU、内存、多久没输出、是否卡住、弹出的窗口；`files=[…]` 顺便给出其他文件（比如布线器自己的日志）的末尾。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。从同一个游标接着问时只回新的东西：启动命令和日志路径只在第一次回，stderr 只回上次之后新写的部分（给了 `tail` 时照常回末尾）。`run-N` 的编号记在 `~/.winhand/run-counter`，winhand 重启后接着编，不会重复；每个 `run` 一开始就有 id，回复在路上丢了时，`history()` 里能看到它，`job_status` 也能接着等。任务命令里写了 `exit N` 也照常记下退出码 N（命令单独存成 `command.ps1` 运行；以前 `exit` 会把外层的包装脚本一起结束，任务显示为 vanished）。`job_start` 的 `timeout_s` 到时结束整棵进程树（退出码 -1，`timed_out`）；`after=[任务 id]` 让它等前面的任务结束再开始，用来把几步串起来；不写 `shell` 时，装了 PowerShell 7 就用它（`*>`、Out-File 写出的是 UTF-8，不再是 UTF-16）。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容（不检查就别写这个参数，空值也当作没写）；`fs_write` 加 `overwrite=false` 表示只新建、文件已存在就拒绝。可选参数不要写成“有名字没有值”：这样的调用在到达 winhand 之前就会被客户端当作无法解析的 JSON 拒绝。`fs_edit` 的多处修改里，新旧文本一样的那处会跳过并注明，不再连累其他修改；同时给了 `old/new` 和 `edits`、而 `old/new` 正好是其中一处时照常执行。`fs_op` 删除默认进回收站。
+`job_status` 的 `wait_s` 和 `patterns` 会一直等到任务结束、新输出匹配或超时，不用循环轮询；参数相同的并发等待共享一次结果。经中转来的调用（claude.ai 连接器、云端会话）一次最多等 40 秒，等不完就带着游标再问：2026-11-01 实测，云端会话经连接器的调用到 60 秒就被切断，即使请求了进度、进度也发出去了。只有这台电脑上的客户端（stdio，或不经中转的 HTTP）、并且接收进度通知时，一次最多等 1800 秒：开始时立刻发一次进度，之后每 15 秒一次。等待中途，任务弹出新窗口（常常是等人点的对话框）或者长时间没有输出也不占 CPU 时，会提前返回，`matched` 分别是 `window` 和 `stalled`。还在跑的任务带 `activity`：进程数、CPU、内存、多久没输出、是否卡住、弹出的窗口；`files=[…]` 顺便给出其他文件（比如布线器自己的日志）的末尾。`id` 也可以是一组 id（后台任务和 `run` 没跑完的命令都行），哪个先结束或先匹配就先返回，`since` 按 id 分别给。从同一个游标接着问时只回新的东西：启动命令和日志路径只在第一次回，stderr 只回上次之后新写的部分（给了 `tail` 时照常回末尾）。`run-N` 的编号记在 `~/.winhand/run-counter`，winhand 重启后接着编，不会重复；每个 `run` 一开始就有 id，回复在路上丢了时，`history()` 里能看到它，`job_status` 也能接着等。任务命令里写了 `exit N` 也照常记下退出码 N（命令单独存成 `command.ps1` 运行；以前 `exit` 会把外层的包装脚本一起结束，任务显示为 vanished）。`job_start` 的 `timeout_s` 到时结束整棵进程树（退出码 -1，`timed_out`）；`after=[任务 id]` 让它等前面的任务结束再开始，用来把几步串起来；不写 `shell` 时，装了 PowerShell 7 就用它（`*>`、Out-File 写出的是 UTF-8，不再是 UTF-16）。`job_start` 给了 `args` 时直接启动程序、不经过 PowerShell，`stdin` 的文本按 UTF-8 交给它（例如 `job_start(command='codex', args=['exec', '-'], stdin=任务说明)`），运行中 `job_status` 能看到它的 stdout 和 stderr。文件工具的写入是原子的（先写临时文件再替换，保留原文件的 ACL 和属性）；`fs_read` 返回 sha256，传给 `fs_write`/`fs_edit` 的 `expected_sha256` 可以防止覆盖别人刚改过的内容（不检查就别写这个参数，空值也当作没写）；`fs_write` 加 `overwrite=false` 表示只新建、文件已存在就拒绝。可选参数不要写成“有名字没有值”：这样的调用在到达 winhand 之前就会被客户端当作无法解析的 JSON 拒绝。`fs_edit` 的多处修改里，新旧文本一样的那处会跳过并注明，不再连累其他修改；同时给了 `old/new` 和 `edits`、而 `old/new` 正好是其中一处时照常执行。`fs_op` 删除默认进回收站；不递归地删一个空文件夹不算批量删除。`fs_write(append=true)` 和 `fs_edit` 跟着文件原来的换行走：CRLF 文件追加的内容也写成 CRLF（看文件末尾 64 KB 定），只差换行的原文照样找得到，提示也直说只差换行。
+
+**等的时候不花回合（云端会话）。** 经中转的 `job_start` 回复、`run` 回 `still_running` 时，多一个 `wake`：一行 bash。把它放进沙箱后台运行（Claude Code 的 Bash `run_in_background`），任务一结束命令就结束，会话随即被叫醒，带回 `{"done":true,"state":...,"exit_code":...}`；等的时候一个回合也不花，不用 `send_later` 定闹钟。`job_status(id, patterns=[...], wake=true)` 给的命令在新输出匹配时也会结束；`job_status(files=[路径], wake=true)` 等那个文件出现或改动；`job_status(wake=true)` 什么都不带时，等电脑重新在线。命令背后是电脑签发的等待链接 `/t/<令牌>`：每次最多挂 50 秒，只回状态，不回输出；默认 12 小时有效，winhand 重启后照样认得。中转不用改。
+
+后台任务的几个参数和回复：
+
+- `job_status()` 不带 id 时，只列最近 20 个任务的状态行（id、名字、状态、退出码、起止时间），不带输出；`prefix='q19-'` 按 id 或名字的开头筛；`files=[...]` 照样给出文件末尾。`job_stop` 只回状态和最后 20 行。
+- `run` 和 `job_status` 的回复带 `now`：电脑的本地时间，带时区。
+- `job_start(stdin_file=路径)`：把电脑上的一个 UTF-8 文件当 stdin，和 `stdin` 二选一，配 `args` 用；守卫按读这个文件来判断。
+- `job_start(keep=true)`：常驻任务。电脑重启、进程被结束，没留下退出码就没了的，桌面端在一分钟内照原来的命令、目录、名字和密钥名再起一个；`job_stop` 停掉的不再拉起。不能配 `stdin`、`elevated`。
+- `job_start(quiet_ok_s=秒数)`：这么久没输出对它是正常的，之前不报「卡住」。
+- 回过 `still_running` 的 `run-N`，结束后至少留 1 小时，不会被别的命令挤掉；超时结束的任务带 `reason`。
+- `sys_info(load=true)`：可用内存、CPU 占用、在跑的后台任务和 `run` 数，起更多任务之前看一眼。
 
 模型常按 Claude Code 内置工具的习惯传参（`file_path`、`old_string`/`new_string`、`-A`/`-B`/`-C`、`head_limit`、按毫秒给的 `timeout` 等）。winhand 把这些换成自己的参数名再执行，结果里用 `args_note` 说明换了什么；认不出的参数，报错时列出这个工具真正的参数。路径里的 `%USERPROFILE%`、`$env:LOCALAPPDATA`、开头的 `~` 都会展开。
 
 任务和命令运行期间电脑不会睡眠（只是不睡，显示器照常可以关）：`run` 由 winhand 自己向系统声明，后台任务由它自己的包装脚本声明，所以 winhand 重启也不影响；做完就撤销，之后照常按空闲时间睡眠。`config.toml` 里写 `[power] keep_awake = false` 可以关掉，单个后台任务可以用 `job_start(keep_awake=false)`。
 
-工具在列表里带着客户端认得的提示：读类工具标 `readOnlyHint`（Claude Code 会把它们并行执行，连接断了还会在新连接上自动补发一次），停止类工具标 `idempotentHint`；`run`、`job_start`、`job_status`、`remote_run`、`fs_*` 等常用工具带 `anthropic/alwaysLoad`，会话开始就加载，不用先搜索工具。
+工具在列表里带着客户端认得的提示：读类工具标 `readOnlyHint`（Claude Code 会把它们并行执行，连接断了还会在新连接上自动补发一次），停止类工具标 `idempotentHint`；`context`、`run`、`job_start`、`job_status`、`job_stop`、`history` 和常用的 `fs_*` 带 `anthropic/alwaysLoad`，会话开始就加载，不用先搜索工具（名单按 11-02 至 11-17 的用量定）。
 
 单次结果有大小上限，按 UTF-8 字节计，约 4 万字节（一个中文字算 3 字节，接近它的 token 成本）。`fs_read`、`fs_list`、`fs_search`、`run`、`job_status` 和会话输出到上限就停，并说明从哪里接着读。以前一次能返回 6 万字左右，中文或密集代码会超过 Claude Code 单个结果 2.5 万 token 的上限，整条结果作废。
 
@@ -252,13 +266,14 @@ AI 第一次点击、输入或操作某个程序时，电脑上会弹出“WinHa
 
 几点说明：
 
-- **要授权的操作**：`input` 的点击、拖动、滚动、按键、输入文字；`ui` 除 inspect 和 wait 以外的动作；`ocr` 的点击；`window` 的切到前台、最小化、最大化、还原、关闭、移动。截图、读字、`ui` inspect、剪贴板不受限制。
+- **要授权的操作**：`input` 的点击、拖动、滚动、按键、输入文字；`ui` 除 inspect 和 wait 以外的动作；`ocr` 的点击；`window` 的切到前台、最小化、最大化、还原、关闭、移动。截图、读字、`ui` inspect、剪贴板不受限制，密码管理器除外（见下）。
 - **按程序算**：按 exe 文件名，例如 `notepad.exe`。鼠标动作看坐标处的窗口，按键看前台窗口，带 Win 键的组合键算 `explorer.exe`。
 - **等你回答**：工具调用最多等约 40 秒；还没回答时先告诉 AI “正在等人允许”，弹窗继续开 2 分钟，你点了允许后，AI 下一次调用直接执行。2 分钟没人回答，这次就算拒绝，不记住。
 - **提醒**：浏览器、密码管理器、聊天软件、系统工具和命令行程序的弹窗里多一行红字，说明允许后 AI 能做什么。
 - **终端**：所有控制台窗口（命令提示符、PowerShell、python 等），以及 Windows Terminal、PuTTY、mintty 等终端程序，不弹窗，直接拒绝，提示 AI 改用 `run` 或会话工具，那里有守卫规则把关。确实要让 AI 在终端窗口里打字时，把它加入“一直允许”。
 - **WinHand 自己的窗口**：授权弹窗、守卫的确认框和桌面端，任何桌面工具都碰不到，即使关掉了授权。
 - **窗口列表**：`window(action="list")` 的每个窗口带 `approval`：`always`、`session`、`denied`、`terminal`、`ask` 或 `winhand`。
+- **密码管理器**（1Password、Bitwarden、KeePass、KeePassXC、Dashlane、Enpass）：默认既不让 AI 看，也不让 AI 操作，关掉授权也一样。按窗口截它、`ui` inspect 它、点它，都先弹窗问你；你选允许（不论哪一种）也只放开 10 分钟，不记进 `desktop-apps.toml`。整屏截图和 `ocr` 时，没放开的密码管理器窗口涂黑，结果里 `masked` 写明。
 
 管理授权：
 
@@ -360,13 +375,13 @@ ipv4 = false          # 是否遮挡所有 IPv4（回环地址除外）
 每次回答都带一个 `digest`。两种省字数的用法：
 
 - `brief=true`：技能只列名字，规矩和守卫照旧给全。复盘时一次回答有 25–45 KB，其中技能清单占 14–17 KB。
-- `since=<上次的 digest>`：内容没变时只回 `unchanged`。只在上次的回答还在对话里时用；压缩上下文以后不要带，回答里也这样提醒。
+- `since=<上次的 digest>`：内容没变时只回 `unchanged`；变了时按文件给：没变的文件只给路径和指纹（`unchanged: true`），只在末尾加了内容的文件只给新加的行（`appended_after_line`）。只在上次的回答还在对话里时用；压缩上下文以后不要带，回答里也这样提醒。
 
 文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `skill(name)` 取 SKILL.md 正文、技能文件夹和其中的文件清单（SKILL.md 同样先过守卫的 `read` 规则），脚本用 `run` 在这台电脑上执行。
 
 输出经过脱敏，按脱敏后的长度控制在约 6 万字符以内：
 - 技能列表最多占约 2 万字符，其余技能只列名字；
-- 规矩太长时截断，并给出用 `fs_read` 接着读的方法。
+- 规矩太长时，给 `#` 标题目录（最多 60 条）加文件的最后一段，`truncated` 写明给了哪几行、前面的用哪条 `fs_read` 读。以前截掉的是后面，正好是最新追加的那几段。
 
 **只知道仓库名时**（比如云端会话只知道 `owner/name`），用 `context(repo="owner/name")`。它在以下位置找这个仓库在本机的检出目录：
 - Codex 记录的项目；
@@ -457,7 +472,9 @@ reason = "要改守卫规则"
   - `reason`：拒绝、确认或提醒时显示的说明；
   - `timeout_s`：ask 等待确认的秒数，默认 40，最多 50。客户端等一个工具调用大约 60 秒就放弃，再晚的“是”会让 AI 以为失败的操作其实执行了。
 - **裁决**：deny 优先于 ask，ask 优先于 note。没有 allow，所以项目规则只能增加限制，不能放宽全局规则。
-- **拒绝**：工具不执行，以工具错误返回，写明规则文件、第几条和理由。这次调用仍出现在 `history` 和桌面端时间线里。
+- **拒绝**：工具不执行，以工具错误返回，第一行就写明规则文件、第几条和理由。这次调用仍出现在 `history` 和桌面端时间线里。
+- **引号里的搜索模式不算命令**：判断 `command`、`input` 规则前，`Select-String -Pattern '…'`、`rg`/`grep`/`findstr` 的模式和 `-e` 后的引号内容换成 `x`，所以 `-Pattern '…|rm'` 这样的搜索不会被当成删除。双引号里带 `$(` 或反引号的、`rg --pre` 之后的照旧判断。
+- **内置保护登录信息**（`winhand (built in)` 第 7 条）：colab、gcloud、git、docker、gh 的登录文件，`~/.ssh` 的私钥，Chrome、Edge、Firefox 的用户资料和 1Password 的本地目录，读、写、改、删、移都拒；规矩文件引用它们也不读。
 - **请人确认**：在电脑上弹出置顶的确认框，写明工具、动作和理由。默认按钮是“否”，正在别处打字时误按回车也不会放行。没人应答、点“否”或弹不出窗口，都不执行。
 - **规则文件写错**：解析失败、字段不认识、正则写错时，这个文件管辖的动作一律拒绝，错误里写明文件和位置；改好后下一次调用即恢复。
 - **文件夹**：`secrets/**` 这样的模式同时覆盖文件夹本身，复制或移动整个文件夹也会被拦。

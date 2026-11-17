@@ -81,6 +81,14 @@ Quick rules
   every call stops at 40 s: a connector ends a call at 60 s. A client on this machine (stdio) that
   shows progress may wait up to 1800 s per call. Never sleep or poll in a loop to wait:
   job_status(wait_s=..., patterns=[...]) does it.
+- Waiting without spending turns (cloud sessions, through the relay): job_start, and a run that comes
+  back still_running, also return `wake`, one bash line. Run it in your sandbox in the background
+  (Claude Code: Bash run_in_background, timeout 7200000 ms): it ends when the job ends and you are
+  woken with its last line ({"done":true,"state":...,"exit_code":...}); if it is stopped at 2 h, run it
+  again. job_status(id, patterns=[...], wake=true) gives one that also ends when new output matches;
+  job_status(files=[path], wake=true) when that file appears or changes; job_status(wake=true) alone
+  when this PC is online again. Prefer it to send_later reminders: a wake costs nothing while waiting.
+  Replies of run and job_status carry `now`, this PC's local time.
 - Scripts for another machine over SSH: remote_run(host, script) uses this machine's keys and ssh
   config and says whether a failure was the connection, host key, key or the script. Prefer it to
   run('ssh', ...): the script goes in on stdin with LF line ends, nothing to quote; secrets=[...]
@@ -121,11 +129,13 @@ Quick rules
   pyocd-commander, openocd, jlink, rtthread-msh, serial, telnet, ssh, menuconfig, python, shell.
 - Files: fs_read (numbered; tail=N for logs) / fs_edit (exact replace, several edits at once) /
   fs_write / fs_search (content) / fs_find (names) / fs_list (sort='mtime', newer_than='2h') /
-  fs_stat (hash='sha256') / fs_op (copy, move, delete to the Recycle Bin, mkdir) /
+  fs_stat (hash='sha256') / fs_op (copy, move, delete to the Recycle Bin, mkdir, clean_scratch) /
   fs_apply_patch (a unified diff onto a work tree: encoding, CRLF and -p handled, all or nothing).
   Prefer these over shell commands for files. fs_read returns sha256: pass it as expected_sha256
   to fs_write/fs_edit when someone else may change the file meanwhile. fs_write(overwrite=false)
-  only creates a file that is not there yet.
+  only creates a file that is not there yet. fs_write(append=true) and fs_edit keep the file's own
+  line endings (CRLF or LF). fs_op(action='delete') of an empty folder (recursive=false) is no batch
+  delete.
   fs_read also shows images and reads PDF (scans as page images), Word, PowerPoint and Excel.
   fs_send hands any file (<= 20 MB) to you as-is in one call (Claude Code saves it in your sandbox);
   fs_write_bytes writes binary content here;
@@ -137,7 +147,9 @@ Quick rules
   (all or nothing). Over about 8 MB pass size=<bytes>: one link per part, so no single request
   runs into a sandbox's 30 s limit. fs_read(paths=[...]) reads up to 20 files in one call.
   Keep files you need later in winhand's scratch folder (context() names it; programs see
-  %WINHAND_SCRATCH%), not in %TEMP%, which the owner clears.
+  %WINHAND_SCRATCH%), not in %TEMP%, which the owner clears. A folder there with a .keep file stays:
+  once a week winhand asks the owner whether to move folders unchanged for 14 days to the Recycle Bin
+  (fs_op(action='clean_scratch') asks now).
 - The desktop like a person: screenshot (desktop, monitor, region or a window) -> input
   (click/type/keys/scroll/drag in the screenshot's pixels) or, more reliably, ui (inspect a
   window's controls, then invoke/set_value/toggle/expand/select by name: buttons, fields, lists,
@@ -182,13 +194,21 @@ Quick rules
   (always | session | denied | terminal | ask | winhand). Terminals (console windows, Windows
   Terminal, PuTTY ...) are refused: use run or a session, where the guard rules apply. WinHand's own
   windows (its dialogs, its app) are never operated. Reading (screenshot, ocr read, ui inspect) is
-  never asked about.
+  not asked about, except password managers (1Password, Bitwarden, KeePass, KeePassXC, Dashlane,
+  Enpass): their windows are neither shown nor operated until the person allows it, for 10 minutes
+  each time; other screenshots and ocr black them out (`masked` names them).
 - job_start runs PowerShell in the background, independent of winhand (long work, anything that
   restarts or reinstalls winhand, and elevated=true for admin tasks after the person approves UAC);
   follow it with job_status(id, wait_s=40). With args it starts the program directly and stdin= gives
   it text as UTF-8, never through a PowerShell pipe (Codex: command='codex', args=['exec', '-'],
-  stdin=brief); job_status shows its stdout and stderr while it runs. job_status(id=[a, b])
-  waits on several jobs, or `run` ids, at once: it answers when the first finishes or matches.
+  stdin=brief); stdin_file=<path> feeds it a UTF-8 file instead. job_status shows its stdout and
+  stderr while it runs. job_status(id=[a, b]) waits on several jobs, or `run` ids, at once: it
+  answers when the first finishes or matches. job_status() lists recent jobs, one status line each
+  (prefix='q19-' narrows it); job_stop(id) answers with the state and the last 20 lines.
+  keep=true: a job that vanishes without an exit code (the PC restarted, it was killed) is started
+  again within a minute by the winhand app; job_stop ends that. quiet_ok_s=<s>: that long without
+  output is normal for it (no stall warning before). sys_info(load=true): free memory, CPU, running
+  jobs before starting more.
 - Something odd about this machine (garbled text, a shim that fails, missing tools)?
   sys_info(checks=true) lists the usual suspects with fixes.
 - A tool named here but missing from your tool list (winhand was updated after the conversation
@@ -219,10 +239,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
     run(command='...')                        one command line for PowerShell
   Never nest `powershell -Command "..."` in a command line; use script= or args=. `run` answers within
   ~40 s; if still going you get `still_running` + an id: job_status(id, since=cursor, wait_s=40)
-  waits for the rest in one call (Claude Code backgrounds it after 2 min and tells you when it ends;
-  other clients: 40 s per call). Never sleep or poll in a loop.
-- Another machine over SSH -> remote_run(host, script): this machine's ssh config and keys, script on
-  stdin, says whether a failure was the connection or the script. Not run('ssh', ...).
+  waits for the rest (through the relay 40 s per call). Never sleep or poll in a loop.
+- Another machine over SSH -> remote_run(host, script) with this machine's ssh config and keys, not
+  run('ssh', ...).
 - Interactive or stateful programs (shells, REPLs, gdb, serial/telnet consoles, TUIs, installers) -> a
   session: session_start -> session_send / session_wait -> session_read / session_screen -> session_stop
   (profile_list: gdb, pyocd, serial ...). Results carry `state` + `next`; `needs_user` (a password, code
@@ -234,16 +253,17 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
 - The desktop: take a screenshot yourself instead of asking the person for one. To operate a program
   prefer its own CLI/API, then ui (controls and menus by name), then keys; without controls (canvases,
   self-drawn apps) ocr(action='click', text=...) finds text on screen; input pixel clicks come last.
-  screenshot(wait='change' | 'stable') waits for the screen instead of sleeping. Locked screens and
-  administrator windows cannot be operated (the error says so). The first click, key or ui action on a
-  program waits for the person's OK there (window list: `approval`); terminals: use run or a session.
+  screenshot(wait='change' | 'stable') waits for the screen instead of sleeping. The first click, key
+  or ui action on a program waits for the person's OK there (window list: `approval`); terminals: use
+  run or a session.
 - job_start runs in the background, independent of winhand (long work, winhand restarts, elevated=true
-  for admin); args= runs a program directly, stdin= feeds it text (Codex: command='codex',
-  args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
+  for admin); args= runs a program directly, stdin= or stdin_file= feeds it text (Codex:
+  command='codex', args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
+  Through the relay, job_start and a run still going also return `wake`: run it in your sandbox with
+  Bash run_in_background and you are woken when the job ends. Waiting then costs no turns.
 - Odd behaviour (garbled text, a failing shim)? sys_info(checks=true). A tool missing from your list:
   call(tool, arguments) reaches it.
-- Skills here: skill(name) loads one (SKILL.md + files). Local MCP servers: mcp_tools() lists their
-  tools, mcp_call(server, tool, arguments) calls one.
+- Skills here: skill(name). Local MCP servers: mcp_tools(), mcp_call(server, tool, arguments).
 - After a connection error, call history() before resending anything.
 """
 
