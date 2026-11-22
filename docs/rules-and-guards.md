@@ -20,20 +20,78 @@
 同一个文件只返回一次。比如 CLAUDE.md 里写了 `@AGENTS.md`，AGENTS.md 只出现一次。每份规则都标出来自哪种格式（`format`）。
 
 除了规矩，还返回：
-- **技能列表**：名称、描述、SKILL.md 路径。默认扫 `~/.agents/skills`、`~/.claude/skills`、`~/.codex/skills`，以及项目里的 `.agents/skills`、`.claude/skills`，同名时项目优先；
+- **技能**：只给这个项目自己的技能（10 个以内带描述，其余只给 id 和名字），以及一张技能地图（`skill_map`），见下面的「技能：找全、摆少、要用时搜」；
 - 对该目录生效的守卫规则；
 - 本机 MCP 服务。
 
 每次回答都带一个 `digest`。两种省字数的用法：
 
-- `brief=true`：技能只列名字，规矩和守卫照旧给全。复盘时一次回答有 25–45 KB，其中技能清单占 14–17 KB。
+- `brief=true`：技能只给 id 和名字，地图不带例子；规矩和守卫照旧给全。
 - `since=<上次的 digest>`：内容没变时只回 `unchanged`；变了时按文件给：没变的文件只给路径和指纹（`unchanged: true`），只在末尾加了内容的文件只给新加的行（`appended_after_line`）。只在上次的回答还在对话里时用；压缩上下文以后不要带，回答里也这样提醒。
 
-文件都是现读的，改完规矩，下一次调用就生效。模型按技能描述挑中技能后，用 `skill(name)` 取 SKILL.md 正文、技能文件夹和其中的文件清单（SKILL.md 同样先过守卫的 `read` 规则），脚本用 `run` 在这台电脑上执行。
+文件都是现读的，改完规矩，下一次调用就生效。
 
-输出经过脱敏，按脱敏后的长度控制在约 6 万字符以内：
-- 技能列表最多占约 2 万字符，其余技能只列名字；
-- 规矩太长时，给 `#` 标题目录（最多 60 条）加文件的最后一段，`truncated` 写明给了哪几行、前面的用哪条 `fs_read` 读。以前截掉的是后面，正好是最新追加的那几段。
+输出经过脱敏，按脱敏后的长度控制在约 6 万字符以内。规矩太长时，给 `#` 标题目录（最多 60 条）加文件的最后一段，`truncated` 写明给了哪几行、前面的用哪条 `fs_read` 读。以前截掉的是后面，正好是最新追加的那几段。
+
+## 技能：找全、摆少、要用时搜
+
+技能多了以后，全部平铺给模型反而难用。winhand 把三件事分开：
+
+- **找全**：一张来源表，按每家工具自己的读法读。
+  - **项目**：从当前目录逐级往上到项目根（最近的 `.git`）。
+    - 每一级看 `.agents/skills`、`.claude/skills`、`.codex/skills`；
+    - `.pi/skills` 只看当前目录；
+    - 没有 `.git` 时只看当前目录本身。
+  - **用户**：`~/.agents/skills`、Claude Code 的 `skills`（`CLAUDE_CONFIG_DIR`，默认 `~/.claude`）、Codex 的 `skills`（`CODEX_HOME`，默认 `~/.codex`）、`~/.pi/agent/skills`。设了 `[context] skills` 时，改为读设的那些。
+  - **插件**：
+    - Claude Code：`installed_plugins.json` 加上用户、项目、本地三层设置里 `enabledPlugins` 打开的插件，读它声明的技能目录，默认读 `skills/`；
+    - Codex：`config.toml` 里 `enabled = true` 的插件，以及从主人账号装的插件（带 `.codex-remote-plugin-install.json`，且没有被显式关掉）。有多个版本时，优先 `local`，其次版本号最大的。
+  - **遍历方式**：
+    - Codex 式目录：往下 6 层，收集每一个 SKILL.md；
+    - Claude Code 式目录：只看第一层；
+    - Pi：碰到 SKILL.md 就停。
+    - 点开头的目录和 `synced` 一律跳过；一次调用最多走 4000 个目录、2 秒。
+- **命名**：每个技能有一个说明它在哪里的 id：
+
+  - `project:.codex/skills/openspec-flow`
+  - `user:~/.codex/skills/officecli/officecli-docx`
+  - `plugin:figma@claude-plugins-official/figma-use`
+
+  同一个文件经链接出现在两处时，只算一个，`also` 里列出另一个 id。只给名字时的查找顺序：离当前目录最近的项目、用户、插件。插件技能也可以写成 `figma:figma-use`。
+- **摆少**：
+  - **能力地图**：主人钉住的技能（`pinned_skills`），8 个中英双语领域的计数和例子，带专属技能的项目，再加一句「要用专门工具时先搜」。
+  - 它出现在三处：`context()`、云端会话开场 hook 的技能段、MCP instructions（只有一句）。
+  - `context(path)` 另外列出这个项目自己的技能。
+- **要用时搜**：`skill(query=['烧录固件', 'flash firmware'])`。
+  - 搜索范围：当前项目、用户目录、插件，以及 Codex 和 Claude Code 记录的其他项目里的技能。
+  - 中英文都能搜：内置一张别名表（烧录↔flash 等）。
+  - 当前项目的结果最多占一半，其余位置留给别处得分最高的。
+  - 每个结果给出 `load`（`name`，项目技能还有 `path`），照着调用 `skill(name=..., path=...)` 即可。`skill(area='hardware')` 列出一个领域的技能。
+  - 别的项目的技能带 `cross_project`；加载时会提醒，先核对路径，再运行它的脚本。
+
+`skill(name)` 取 SKILL.md 正文、技能文件夹和其中的文件清单，SKILL.md 同样先过守卫的 `read` 规则；脚本用 `run` 在这台电脑上执行。项目技能要带 `path`，即它所在的目录；不带 `path` 的 `project:` id 会直接报错，不会去猜。
+
+**信任**：项目技能来自仓库，刚克隆的仓库可能并不可信。
+
+- `project_skills = "warn"`（默认）：照常列出，没有受信的项目标上 `trusted: false`，加载时附一句提醒。这样的技能不能顶替同名的用户技能，但能用 id 指定加载。
+- `"trusted"`：只列受信项目的技能。
+- `"off"`：不列项目技能。
+
+受信的依据，依次是：
+
+1. Codex 的 `trust_level`。一旦显式写了 `untrusted`，任何模式下都不列，`trusted_roots` 也放不开；
+2. `[context] trusted_roots`；
+3. Claude Code 接受过工作区信任。
+
+**宿主开关**：Claude Code 的 `skillOverrides` 设为 `off` 或 `user-invocable-only`、Codex 的 `[[skills.config]] enabled = false` 时，winhand 不隐藏这个技能，因为那是各家给自己的设置。这样的技能标上 `host_off`，不放进地图的例子，搜索时排在后面。
+
+**主人的报告**：`winhand skills` 列出这些内容：
+- 各来源的个数；
+- 每个技能落在哪个领域；
+- 没归到任何领域的、描述太短的、被宿主关掉的技能；
+- winhand 日志里每个技能被 `skill()` 调用的天数。
+
+领域分错了，就在 `[context] skill_areas` 里按 id 或名字改正。
 
 **只知道仓库名时**（比如云端会话只知道 `owner/name`），用 `context(repo="owner/name")`。它在以下位置找这个仓库在本机的检出目录：
 - Codex 记录的项目；
@@ -54,7 +112,11 @@ instructions 会提醒模型：开始在某个目录工作前，以及上下文�
 [context]
 formats = ['codex', 'claude-code']   # 按谁的读法读规矩；['claude-code'] 时与 Claude Code 默认一致
 rules = ['D:\notes\agents.md']       # 写了就代替两种格式的全局规则文件；[] = 不读
-skills = ['~/.agents/skills', '~/.claude/skills', '~/.codex/skills']
+skills = ['~/.agents/skills', '~/.claude/skills', '~/.codex/skills', '~/.pi/agent/skills']  # 不写时就是这四个
+pinned_skills = ['smart-search-cli', 'officecli']   # 地图里常驻、带描述的技能（id 或名字）
+project_skills = 'warn'               # 'warn' | 'trusted' | 'off'，见上文「信任」
+trusted_roots = ['D:\Dev\20_个人项目'] # 这些文件夹下的项目算受信（Codex 显式 untrusted 的除外）
+skill_areas = { 'template-creator' = ['agents'] }  # 改正领域：hardware docs visual code agents search project ops
 repo_roots = ['D:\code']              # context(repo=...) 还会在这些文件夹和它们的子文件夹里找
 external_imports = false             # true：项目规矩引用项目外文件时，不用等 Claude Code 批准
 stdio_hint = false                   # true：本机 stdio 客户端也显示 context 提醒
@@ -182,7 +244,7 @@ timeout_s = 30                       # 每个 hook 最多等多久
 云端 Claude Code 会话本来要靠模型自己想起来调用 `context()`。在仓库里加 SessionStart hook，会话一开始（以及 `/clear`、恢复、压缩上下文之后）就会自动带上这台电脑上的三段内容，每段是一个单独的 hook，各自不超过 9,000 字符（Claude Code 对每个 hook 的上限是 10,000）：
 
 - **规矩**：全局规矩（与 `context()` 的读法相同），以及这个仓库在本机的检出目录里、**没提交到仓库**的规则文件，例如 `CLAUDE.local.md`。已提交的文件云端仓库里有，不重复。放不下的部分列出路径，提示用 `context()` 读；
-- **技能**：每个技能的名字和描述（`description`，有 `when_to_use` 时接在后面），和本机 Claude Code 列技能的方式一样。放不下时均匀缩短每条描述，最短 80 字符；仍放不下时其余的只列名字。要用时调用 `skill(name)`；
+- **技能**：这个仓库在本机检出里的项目技能（带 id 和描述），以及技能地图：钉住的技能、各领域的计数和例子、带专属技能的项目，还有一句「要用专门工具时先 `skill(query=…)` 搜」。其余技能不平铺，搜得到。总共几 KB，以前是把全部技能平铺成约 9 KB；
 - **本机 MCP 工具**：每个启用的本机 MCP 服务的说明和工具清单，每个工具一行说明。工具多、放不下时，所有说明均匀缩短到同一长度（最短 40 字符），每个工具都留着说明；仍放不下时，最后几个服务只列工具名。内容来自电脑上的工具清单缓存，开场**不会启动任何服务**；从没列出过工具的服务只写“尚未列出”。调用用 `mcp_call`，完整参数用 `mcp_tools(server)`。
 
 电脑不在线时，每段只有一句说明。0.4.7 生成的单个 hook 仍然可用（规矩加技能名单）。升级时先把电脑上的 winhand 更新到 0.4.8，再重新执行 `winhand bridge init --write` 换成三段：电脑还是 0.4.7 时，三段 hook 会各自拿到一份完整的规矩。

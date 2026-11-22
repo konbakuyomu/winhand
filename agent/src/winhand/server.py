@@ -32,6 +32,7 @@ from . import (
     profiles,
     remote,
     secret_store,
+    skills,
     tools_desktop,
     transfer,
     venv_repair,
@@ -213,8 +214,12 @@ Quick rules
   sys_info(checks=true) lists the usual suspects with fixes.
 - A tool named here but missing from your tool list (winhand was updated after the conversation
   started): call(tool, arguments) reaches every current tool; help() lists them.
-- Skills on this machine (listed by context(), or at the start of a cloud session): when one fits the
-  task, skill(name) loads its SKILL.md and lists its files; follow it, and run its scripts here.
+- Skills on this machine are not all listed: the pinned ones and a short map come at the start (and in
+  context()), context(path) lists a project's own. For anything that needs a dedicated tool, search
+  first with the task's own words: skill(query=['烧录固件', 'flash firmware']) searches every folder,
+  project and enabled Claude Code / Codex plugin; skill(area='hardware') lists an area. Load one with
+  skill(<id or name>, path=<the folder you work in>) for its SKILL.md and files; follow it, and run its
+  scripts here. A project's skill found from another project: check its paths before running it.
 - Local MCP servers set up in the winhand app (pyocd-debug, a camera ...): mcp_tools() lists them and
   their tools, mcp_tools(server) gives a server's tools with parameters (starting it if need be), and
   mcp_call(server, tool, arguments) calls one; a call still going after ~40 s returns a call_id for
@@ -260,10 +265,9 @@ winhand drives the Windows machine it runs on. help() has the full guide: read i
   for admin); args= runs a program directly, stdin= or stdin_file= feeds it text (Codex:
   command='codex', args=['exec', '-'], stdin=brief). job_status(id, wait_s=40) follows one or several.
   Through the relay, job_start and a run still going also return `wake`: run it in your sandbox with
-  Bash run_in_background and you are woken when the job ends. Waiting then costs no turns.
-- Odd behaviour (garbled text, a failing shim)? sys_info(checks=true). A tool missing from your list:
-  call(tool, arguments) reaches it.
-- Skills here: skill(name). Local MCP servers: mcp_tools(), mcp_call(server, tool, arguments).
+  Bash run_in_background and you are woken when the job ends.
+- Odd behaviour? sys_info(checks=true). A tool not in your list: call(tool, arguments).
+{skills}
 - After a connection error, call history() before resending anything.
 """
 
@@ -317,9 +321,10 @@ def instructions(cfg: Config, local_stdio: bool = False) -> str:
     are filled in (refreshed when it changes, see _live)."""
     flag = (cfg.context or {}).get("stdio_hint")
     hint = not local_stdio or flag is True or str(flag).strip().lower() in ("true", "1", "yes", "on")
-    rest = GUIDE.replace("{secrets}\n", "") + (GUIDE_CONTEXT if hint else "")
+    guide = GUIDE.replace("{skills}", skills.instructions_line(cfg))
+    rest = guide.replace("{secrets}\n", "") + (GUIDE_CONTEXT if hint else "")
     secrets = _secrets_line(INSTRUCTIONS_MAX - len(rest) - 1)
-    text = GUIDE.replace("{secrets}", secrets)
+    text = guide.replace("{secrets}", secrets)
     return text + GUIDE_CONTEXT if hint else text
 
 
@@ -535,7 +540,7 @@ def build_server(
             ),
         ] = None,
         brief: Annotated[
-            bool, Field(description="Skills by name only (skill(name) loads one): a much shorter answer")
+            bool, Field(description="Skills by id and name only (skill(name) loads one): a shorter answer")
         ] = False,
         since: Annotated[
             str | None,
@@ -547,9 +552,9 @@ def build_server(
     ) -> dict:
         """This machine's rules and skills for agents, read the way Codex and Claude Code read them:
         the global rule files, AGENTS.md / CLAUDE.md / .claude/rules from the project down to `path`
-        (with their @imports), the skills here (read a SKILL.md with fs_read when one fits), the guard
-        rules in force and the local MCP servers. Call it before working in a folder and again after
-        the conversation is compacted."""
+        (with their @imports), the project's own skills, the pinned ones and a map of the rest (search
+        them with skill(query=...)), the guard rules in force and the local MCP servers. Call it before
+        working in a folder and again after the conversation is compacted."""
         full = await asyncio.to_thread(workspace.context, cfg, path, repo, since)
         mark = full["digest"]
         if since and since.strip() == mark:
@@ -564,18 +569,51 @@ def build_server(
 
     @mcp.tool
     async def skill(
-        name: Annotated[str, Field(description="The skill's name, as listed at the start or by context()")],
+        name: Annotated[
+            str | None,
+            Field(
+                description="Load this skill: its id (project:..., user:..., plugin:...) or its name, as the "
+                "map, context() or a search gave it"
+            ),
+        ] = None,
+        query: Annotated[
+            str | list[str] | None,
+            Field(
+                description="Search instead: one to four words of the task, in the person's language and in "
+                "English (['烧录固件', 'flash firmware']); every folder, project and enabled plugin is searched"
+            ),
+        ] = None,
         path: Annotated[
-            str | None, Field(description="The folder you work in: its project's own skills come first")
+            str | None,
+            Field(
+                description="The folder you work in: its project's own skills come first (and a project's "
+                "skill needs it: the load.path a search gave)"
+            ),
         ] = None,
         repo: Annotated[
             str | None, Field(description="owner/name of the repository you work on, instead of path")
         ] = None,
+        area: Annotated[
+            str | None,
+            Field(description="Search within one area of the map: " + ", ".join(skills.AREA_KEYS)),
+        ] = None,
+        limit: Annotated[
+            int, Field(description="How many search results (at most 30)")
+        ] = skills.SEARCH_LIMIT,
     ) -> dict:
-        """Load one of this machine's skills, as Claude Code's Skill tool does: its SKILL.md (the
-        instructions to follow), its folder and the files in it. Use it when a listed skill fits the
-        task; the scripts it names run on this machine."""
-        return await asyncio.to_thread(workspace.skill, cfg, name, path, repo)
+        """This machine's skills. With name: load one, as Claude Code's Skill tool does: its SKILL.md
+        (the instructions to follow), its folder and the files in it; the scripts it names run on this
+        machine. With query (or area): search them all, those of the folder you work in first, and get
+        each one's id and how to load it. Search before working on anything that needs a dedicated tool:
+        not every skill is listed at the start."""
+        if name and name.strip():
+            return await asyncio.to_thread(workspace.skill, cfg, name, path, repo)
+        queries = [query] if isinstance(query, str) else list(query or [])
+        if not any(q.strip() for q in queries) and not area:
+            raise ValueError("give name= to load a skill, or query= (or area=) to search them")
+        if area and area not in skills.AREA_KEYS:
+            raise ValueError(f"area is one of {', '.join(skills.AREA_KEYS)}")
+        return await asyncio.to_thread(skills.search_folder, cfg, queries, path, repo, area, limit)
 
     @mcp.tool
     async def mcp_tools(

@@ -52,6 +52,11 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
     - 变了的话，没变的文件只给路径、行数和指纹（`unchanged: true`）；只在末尾追加了内容的文件，给 `appended_after_line` 和新加的行；
     - digest 按没截断的全文算。电脑上记最近 64 份，winhand 重启后对不上，就给全文。
   - 超过预算的文件给 `#` 标题目录（最多 60 条）加文件的最后一段；`truncated` 写明给了哪几行，剩下的用哪条 `fs_read` 读。以前截掉的是后面，正好是主人最新追加的授权。取舍见 `.agents/notes/implemented/feature/2026-11-17-context-per-file-delta.md`。
+  - 技能分三步：找全、摆少、要用时搜（`agent/src/winhand/skills.py`）。
+    - 找全：一张来源表，按各家自己的读法读项目链、用户目录，以及已启用的 Claude Code 和 Codex 插件。每个技能有一个说明它在哪里的 id。
+    - 摆少：开场、context() 和 instructions 只给一张能力地图，包括钉住的技能、8 个领域、带专属技能的项目，以及「先搜」的约定。context(path) 另外列出这个项目自己的技能。
+    - 要用时搜：skill(query=…) 用中英文词在全机检索。没受信的项目不能顶替同名的用户技能。
+    - 细节见 `docs/rules-and-guards.md`，取舍见 `.agents/notes/implemented/feature/2026-11-23-skill-sources-map-and-search.md`。
   - 会读写电脑的调用，执行前先被描述成一个动作（`command`、`input`、`write`、`edit`、`delete`、`move`、`read`、`mcp`），按 `~/.winhand/guards.toml`（以及项目目录里的 .winhand/guards.toml）裁决：拒绝、问人或附注。
   - `fs_op` 整个删文件夹时，同时按命令判断，看成 `Remove-Item -Recurse`，所以写给命令的“禁止批量删除”规则也管得到它。
   - 认命令时，引号里的搜索模式不算数：`Select-String -Pattern '…'`，以及 `rg`、`grep`、`findstr` 的模式参数和 `-e` 后面的引号内容，判断前换成 `x`。这样 `-Pattern '…|rm'` 这类搜索不会被当成删除命令。以下照旧看：

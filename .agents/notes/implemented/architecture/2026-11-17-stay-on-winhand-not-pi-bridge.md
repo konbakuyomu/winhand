@@ -64,6 +64,12 @@ Status: implemented
 - **2026-11-18 复查**：pi-bridge v0.5.0（提交 9adacdd）做到了第一条。提交 da7ab3a 让 `call` 触发 `tool_call`、`tool_result` 等钩子，`run` 按 bash 工具触发同样的钩子，扩展可以阻止调用、改参数和结果。
   - 其余三条还没有：`packages/cli/src/bridge.ts` 里任务仍放在内存的 Map 里，`shutdown()` 仍会结束全部任务；没有任务结束的通知；连接器地址仍是 `/<密钥>/mcp`。
   - 结论不变。
+- **2026-11-22 复查**：pi-bridge v0.11.0（提交 df822c7）。
+  - 第 4 条做到了：有 OAuth，每台电脑一把独立密钥。
+  - 另外新增：R2 临时文件链接（50 MB，24 小时）、多用户、委派给本机 Pi 的模型。
+  - 第 2、3 条还没有：任务在内存 Map 里，`shutdown()` 全部结束；没有任务结束的通知，只能每 25 秒 `wait`。
+  - 这次也比了「技能获取」：机制和 winhand 一样，都是先列名字和描述，再读 SKILL.md；Pi 不读 Claude 和 Codex 的插件目录。所以没有迁移，而是在 winhand 里补齐来源。见 [skill-sources-map-and-search](../feature/2026-11-23-skill-sources-map-and-search.md)。
+  - 结论不变。
 
 ## Verification
 

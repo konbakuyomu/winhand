@@ -297,10 +297,13 @@ async def test_many_skills_leave_the_rules_whole(tmp_path, home):
     out = workspace.context(cfg, str(root))
     assert len(json.dumps(out, ensure_ascii=False)) <= workspace.BUDGET_CHARS
     assert out["rules"][0]["content"] == text and "truncated" not in out["rules"][0]
-    assert len(json.dumps(out["skills"], ensure_ascii=False)) <= workspace.SKILLS_BUDGET_CHARS
-    more = out["skills_more"]
-    assert len(out["skills"]) + more["count"] == 300 and more["names"][0] == f"skill-{len(out['skills']):03d}"
-    assert more["folders"] == [str(folder)]
+    assert out["skills"] == [] and out["skill_map"]["total"] == 300  # found by search, not listed
+    assert len(json.dumps(out["skill_map"], ensure_ascii=False)) < 3_000
+    for i in range(15):
+        skill(root / ".agents" / "skills", f"own-{i:02d}", "d" * 320)
+    own = workspace.context(cfg, str(root))
+    assert [s["name"] for s in own["skills"]] == [f"own-{i:02d}" for i in range(10)]
+    assert own["skills_more"]["count"] == 5 and own["skills_more"]["skills"][0]["name"] == "own-10"
     async with Client(build_server(cfg)) as client:
         result = await client.call_tool("context", {"path": str(root)})
     assert sum(len(b.text) for b in result.content) <= workspace.BUDGET_CHARS

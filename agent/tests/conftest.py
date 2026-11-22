@@ -28,6 +28,15 @@ def _no_agent_config_of_this_machine(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_skill_caches(monkeypatch):
+    """The projects-with-skills list is remembered for ten minutes: never from an earlier test."""
+    from winhand import skills
+
+    monkeypatch.setattr(skills, "_radar_cache", {})
+    monkeypatch.setattr(skills, "_others_cache", {})
+
+
+@pytest.fixture(autouse=True)
 def _no_hooks_of_this_machine(tmp_path, monkeypatch):
     """The machine's own Codex / Claude Code hooks never run in tests; test_hooks.py turns its own on."""
     from winhand import hooks
