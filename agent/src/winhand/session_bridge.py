@@ -16,7 +16,7 @@ import os
 import socket
 import subprocess
 
-from . import config, redact, workspace
+from . import config, redact, skills, workspace
 
 EVENTS = ("session-start",)
 BUDGET_CHARS = 9_000  # Claude Code keeps 10,000 characters of additionalContext
@@ -133,19 +133,19 @@ def session_start(repo: str | None, cfg: config.Config | None = None, with_skill
         why = str(item.get("skipped") or item.get("error") or "")
         sections.append((mask(item["path"]), None if text is None else mask(text), mask(why)))
 
-    names = (
-        [
-            mask(n)
-            for n in sorted({s["name"] for s in workspace.skills(cfg, root, rules.refused)}, key=str.lower)
-        ]
-        if with_skill_names
-        else []
-    )
+    if (
+        with_skill_names
+    ):  # a hook from 0.4.7: the checkout's own skills and the pinned ones, then the map's line
+        index = skills.build(cfg, checkout, root, rules.refused, with_plugins=False)
+        wanted = {p.lower() for p in skills.pinned(cfg)}
+        names = [mask(s.name) for s in index.skills if s.layer == "project" or s.short.lower() in wanted]
+    else:
+        names = []
 
     budget = BUDGET_CHARS - _size(intro) - 2
     parts = [intro]
     skills_room = min(_size(_skills_line(names, 10**9)), SKILLS_CHARS)  # held back for now
-    budget -= skills_room + 2 if names else 0
+    budget -= skills_room + 400 if with_skill_names else 0
     left_out_room = min(LEFT_OUT_CHARS, max(budget, 0))  # kept for naming what does not fit
     budget -= left_out_room
 
@@ -182,16 +182,18 @@ def session_start(repo: str | None, cfg: config.Config | None = None, with_skill
         budget += left_out_room - _size(parts[-1]) - 2
     else:
         budget += left_out_room
-    if names:
-        parts.append(_skills_line(names, skills_room + max(budget, 0)))  # whatever room is left
+    if names or with_skill_names:
+        line = _skills_line(list(dict.fromkeys(names)), skills_room + max(budget, 0))  # whatever room is left
+        hint = mask(skills.map_line(cfg))
+        parts.append(f"{line}\n{hint}" if line else hint)
     text = "\n\n".join(p for p in parts if p)
     while _size(text) > BUDGET_CHARS:  # never past the budget, whatever the arithmetic above
         text = text[: -max(1, _size(text) - BUDGET_CHARS)]
     return text
 
 
-SKILL_DESC_CHARS = workspace.SKILL_DESC_LIMIT  # as Claude Code cuts description + when_to_use
-MIN_DESC_CHARS = 80
+MAP_CHARS = 2_500  # the map part of the skills hook
+PROJECT_DESC_CHARS = 400
 
 
 def _checkout(repo: str | None, cfg: config.Config) -> tuple[str | None, str | None]:
@@ -206,8 +208,9 @@ def _checkout(repo: str | None, cfg: config.Config) -> tuple[str | None, str | N
 
 
 def skills_text(repo: str | None, cfg: config.Config | None = None, budget: int = BUDGET_CHARS) -> str:
-    """The skills part of a session's start: each skill's name and description, as Claude Code lists
-    them; descriptions shortened evenly when they do not all fit."""
+    """The skills part of a session's start: the checkout's own skills with their descriptions, then the
+    map (pinned skills, skills by area, projects with skills of their own, when to search). The rest is
+    found with skill(query=...), not listed."""
     cfg = cfg or config.load()
     redactor = redact.current()
 
@@ -215,49 +218,24 @@ def skills_text(repo: str | None, cfg: config.Config | None = None, budget: int 
         text = workspace._sendable(text)
         return text if redactor.empty else redactor.data(text)[0]
 
-    root, _ = _checkout(repo, cfg)
+    root, named = _checkout(repo, cfg)
     rules = workspace._collect(cfg, root, root, root)  # for the guard's read rules
-    found = workspace.skills(cfg, root, rules.refused, desc_chars=SKILL_DESC_CHARS)
-    listed = [(mask(s["name"]), mask(s["description"])) for s in found if s.get("model_invocable", True)]
-    on_request = [mask(s["name"]) for s in found if not s.get("model_invocable", True)]
+    index = skills.build(cfg, root, root, rules.refused, desc_chars=PROJECT_DESC_CHARS)
     machine = socket.gethostname() or "this PC"
     head = mask(
-        f"Skills on the PC {machine!r}. They and their scripts are on that PC: when one fits the task, call "
-        "skill(name) for its SKILL.md and files, follow it, and run its scripts there with run."
+        f"Skills on the PC {machine!r}. They and their scripts are on that PC: load one with "
+        "skill(<id or name>, path=<the folder>), follow it, and run its scripts there with run."
     )
-    if not found:
-        return head + "\n(no skills found)"
-    tail = f"Used only when asked for by name: {', '.join(on_request)}" if on_request else ""
-    room = budget - _size(head) - (_size(tail) + 2 if tail else 0) - 2
-
-    def render(cap: int, described: int) -> list[str]:
-        out = []
-        for i, (name, desc) in enumerate(listed):
-            if i < described and desc:
-                short = desc if len(desc) <= cap else desc[: cap - 1] + "…"
-                out.append(f"- {name}: {short}")
-            else:
-                out.append(f"- {name}")
-        return out
-
-    def size(lines: list[str]) -> int:
-        return sum(_size(x) + 1 for x in lines)
-
-    lines = render(SKILL_DESC_CHARS, len(listed))
-    if size(lines) > room:
-        low, high = MIN_DESC_CHARS, SKILL_DESC_CHARS  # the longest cap that fits
-        while low < high:
-            mid = (low + high + 1) // 2
-            if size(render(mid, len(listed))) <= room:
-                low = mid
-            else:
-                high = mid - 1
-        lines = render(low, len(listed))
-        described = len(listed)
-        while size(lines) > room and described > 0:  # still too much: the last ones by name only
-            described -= 1
-            lines = render(MIN_DESC_CHARS, described)
-    text = "\n".join([head, *lines] + ([tail] if tail else []))
+    parts = [head]
+    own = [s for s in index.skills if s.layer == "project"]
+    if own:
+        lines = [f"Skills of {named}'s checkout ({root}):"]
+        for s in own:
+            lines.append(f"- {s.name} [{s.id}]" + (f": {s.description}" if s.description else ""))
+        parts.append(mask("\n".join(lines)))
+    room = budget - sum(_size(p) + 2 for p in parts)
+    parts.append(mask(skills.map_text(cfg, index, max(400, min(MAP_CHARS, room)))))
+    text = "\n\n".join(parts)
     while _size(text) > budget:
         text = text[: -max(1, (_size(text) - budget + 1) // 2)]
     return text

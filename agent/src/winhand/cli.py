@@ -78,6 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     apps.add_argument("action", nargs="?", choices=["list", "allow", "revoke", "on", "off"], default="list")
     apps.add_argument("exe", nargs="?", help="the program's file name, e.g. notepad.exe")
     sub.add_parser("doctor", help="show environment diagnostics")
+    skills_cmd = sub.add_parser(
+        "skills", help="the skills here: by source and area, vague or switched off, how often used"
+    )
+    skills_cmd.add_argument("--path", help="also a project's own skills (the folder you work in)")
+    skills_cmd.add_argument("--json", action="store_true", help="the whole report as JSON")
     sub.add_parser("profiles", help="list session profiles")
     sub.add_parser("desktop-backend", help="engine for the tray app (JSON lines over stdio)")
     dialog = sub.add_parser("secret-dialog")  # internal: masked input dialog for session_prompt_user
@@ -214,6 +219,34 @@ def main(argv: list[str] | None = None) -> int:
         except FileBroken as exc:
             print(f"winhand apps {args.action}: {exc}", file=sys.stderr)
             return 1
+    if cmd == "skills":
+        import json as _json
+
+        from . import config, skills
+
+        data = skills.report(config.load(), args.path)
+        if args.json:
+            print(_json.dumps(data, ensure_ascii=False, indent=1))
+            return 0
+        print(f"{data['total']} skills; pinned: {', '.join(data['pinned']) or 'none'}")
+        for source, n in sorted(data["by_source"].items()):
+            print(f"  {source}: {n}")
+        print("most used (days with a skill() call in winhand's log):")
+        for row in [r for r in data["skills"] if r["days_used"]][:20]:
+            print(f"  {row['days_used']:4d}  {row['name']}  [{', '.join(row['areas']) or 'no area'}]")
+        for key, title in (
+            ("unsorted", "no area"),
+            ("vague", "description under 40 characters"),
+            ("host_off", "off in Claude Code or Codex"),
+        ):
+            if data[key]:
+                print(
+                    f"{title} ({len(data[key])}): "
+                    + ", ".join(data[key][:30])
+                    + (" ..." if len(data[key]) > 30 else "")
+                )
+        print(data["note"])
+        return 0
     if cmd == "doctor":
         from . import config, proc
 

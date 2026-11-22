@@ -376,7 +376,8 @@ def _skills(folder, count):
 async def test_context_brief_lists_skills_by_name_and_says_when_nothing_changed(tmp_path):
     folder = tmp_path / "skills"
     _skills(folder, 12)
-    async with Client(build_server(Config(context={"skills": [str(folder)]}))) as client:
+    cfg = Config(context={"skills": [str(folder)], "pinned_skills": ["skill-07", "skill-00"]})
+    async with Client(build_server(cfg)) as client:
         full = (await client.call_tool("context", {})).structured_content
         brief = (await client.call_tool("context", {"brief": True})).structured_content
         same = (await client.call_tool("context", {"since": full["digest"]})).structured_content
@@ -386,10 +387,11 @@ async def test_context_brief_lists_skills_by_name_and_says_when_nothing_changed(
         changed = (
             await client.call_tool("context", {"since": full["digest"], "brief": True})
         ).structured_content
-    assert isinstance(full["skills"][0], dict) and len(full["digest"]) == 16
-    assert brief["digest"] == full["digest"] and "skill-07" in brief["skills"]
-    assert all(isinstance(s, str) for s in brief["skills"])
-    assert len(str(brief)) < len(str(full)) / 2
+    assert full["skill_map"]["pinned"][0]["description"].startswith("does a long thing")
+    assert len(full["digest"]) == 16 and full["skill_map"]["total"] == 12
+    assert brief["digest"] == full["digest"]
+    assert brief["skill_map"]["pinned"][0] == {"id": full["skill_map"]["pinned"][0]["id"], "name": "skill-07"}
+    assert len(str(brief)) < len(str(full))
     assert same == {"unchanged": True, "digest": full["digest"], "note": same["note"]}
     assert "without since" in same["note"]
     assert "unchanged" not in changed and changed["digest"] != full["digest"]

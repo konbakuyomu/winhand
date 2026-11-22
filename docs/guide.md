@@ -52,7 +52,7 @@ winhand 把这些都当作**会话**，用同一套模型管理：
 | 文件交接 | `fs_send` `fs_write_bytes` `fs_pick` `fs_upload_url` `fs_download_url` `fs_apply_patch`；`fs_read` 也能看图片（`region` 可放大局部）、PDF、Word、PowerPoint、Excel |
 | 后台任务 | `job_start` `job_status` `job_stop` |
 | 本机规则 | `context`：这台电脑写给 AI 的规矩（按 Codex、Claude Code 的读法：AGENTS.md、CLAUDE.md、`.claude/rules`、`@` 引用）、可用的技能（SKILL.md）、生效的守卫规则和本机 MCP 服务；`repo=owner/name` 可按仓库名找到本机目录。见[规矩与守卫](rules-and-guards.md) |
-| 技能和本机 MCP | `skill(name)`：取一个技能的 SKILL.md 和文件清单（相当于 Claude Code 的 Skill 工具）；`mcp_tools` 列出本机 MCP 服务和它们的工具，`mcp_call` 调用其中的工具。见[本机的其他 MCP 服务](local-mcp.md) |
+| 技能和本机 MCP | `skill(query=[...])`：用任务原话（中文、英文都行）搜全机技能，范围包括项目、用户目录、已启用的 Claude Code / Codex 插件；`skill(area=...)` 按领域列；`skill(<id 或名字>, path=...)`：取一个技能的 SKILL.md 和文件清单（相当于 Claude Code 的 Skill 工具），详见[技能：找全、摆少、要用时搜](rules-and-guards.md#技能找全摆少要用时搜)；`mcp_tools` 列出本机 MCP 服务和它们的工具，`mcp_call` 调用其中的工具。见[本机的其他 MCP 服务](local-mcp.md) |
 | 其他 | `help`：给 AI 的使用指南和本机工具清单；`call`：按名字调用任意 winhand 工具（客户端缓存了旧工具列表时用）；`history`：最近处理过的调用（掉线后核对用） |
 
 `run` 有三种用法：`command` + `args` 直接启动程序，不经过 shell；`script` + `shell`（pwsh、powershell、cmd、python、bash、wsl）把多行脚本写成临时文件执行，引号、`$变量` 和中文都不用转义（解释器不在这几种里时，把它写在 `command`，例如 `run(command=r'.venv\Scripts\python.exe', script=...)`、`command='node'`）；只给 `command` 时整行交给 PowerShell 执行。PowerShell 的输出和管道统一是不带 BOM 的 UTF-8，Windows PowerShell 5.1 也一样，中文不会变成问号，传给原生程序的文本开头也不会多出 BOM。输出默认去掉 ANSI 颜色码，混合 UTF-8 和本地代码页的输出按行解码，退出码按有符号数返回，常见崩溃码会附说明。`lang="en"` 让 dotnet、MSBuild 输出英文。

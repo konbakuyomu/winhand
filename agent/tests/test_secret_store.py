@@ -199,7 +199,7 @@ def test_many_names_still_fit_in_what_claude_code_keeps(winhand_home):
     flat = " ".join(text.split())  # the line is wrapped
     more = re.search(r"(\d+) more \(context\(\) lists them\)", flat)
     assert names[0] in flat and more and names[-1] not in flat
-    assert 0 < int(more.group(1)) <= 37  # 0.7.4's shorter guide leaves room for at least as many names
+    assert 0 < int(more.group(1)) <= 39  # 0.13.0's line on searching skills costs two names
 
 
 async def test_asked_again_for_a_stored_name_the_person_can_just_cancel(monkeypatch, winhand_home):

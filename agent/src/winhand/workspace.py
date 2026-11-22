@@ -14,8 +14,8 @@ project file to a file outside the project is followed only when Claude Code app
 imports for that project, or [context] external_imports is true: a cloned repository must not
 be able to hand ~/.ssh to the model.
 
-Skills are folders with a SKILL.md, from the user's skill folders ([context] skills) and the
-project's .agents/skills and .claude/skills; the project's win on a name clash.
+Skills (found, named and shown by skills.py): context() gives the project's own skills, the pinned
+ones and a short map; skill(query=...) searches the rest.
 
 context(repo="owner/name") finds the local checkout of a repository from Codex's and Claude
 Code's project lists and the folders in [context] repo_roots.
@@ -25,7 +25,6 @@ Files are read as they are now, so a rule edited a minute ago is what the next c
 
 from __future__ import annotations
 
-import difflib
 import json
 import os
 import re
@@ -38,10 +37,7 @@ from pathlib import Path
 from . import config, fs, guard, redact
 from .actions import Action
 from .config import Config
-from .session.text import fitting, width
 
-DEFAULT_SKILLS = ["~/.agents/skills", "~/.claude/skills", "~/.codex/skills"]
-PROJECT_SKILLS = [".agents/skills", ".claude/skills"]
 FORMATS = ("codex", "claude-code")
 CODEX_FILES = ("AGENTS.override.md", "AGENTS.md")
 CLAUDE_FILES = ("CLAUDE.md", os.path.join(".claude", "CLAUDE.md"), "CLAUDE.local.md")
@@ -55,10 +51,6 @@ ERROR_CHARS = 500
 OMITTED_CHARS = 2_500
 MAX_FILE_BYTES = 2_000_000
 BUDGET_CHARS = 60_000  # the rules are the owner's and are kept whole up to this
-SKILLS_BUDGET_CHARS = 20_000
-SKILLS_FULL_CHARS = 16_000  # full entries; names of the rest fill up to SKILLS_BUDGET_CHARS
-DESCRIPTION_CHARS = 300
-SKILL_DESC_LIMIT = 1_536  # Claude Code's cut of description + when_to_use
 
 
 def _encoded(text: str) -> int:
@@ -908,147 +900,16 @@ def _collect(cfg: Config, root: str | None, start: str | None, target: str | Non
     return rules
 
 
-# ------------------------------------------------------------------ skills
+# ------------------------------------------------------------------ skills (skills.py)
 
 
-def _skills_in(
-    folder: str, scope: str, refused=None, desc_chars: int = DESCRIPTION_CHARS, mask=None
-) -> list[dict]:
-    try:
-        entries = sorted(os.scandir(folder), key=lambda e: e.name.lower())
-    except OSError:
-        return []
-    out = []
-    for entry in entries:
-        if entry.name.startswith(".") or not _plain_text(entry.name) or not entry.is_dir():
-            continue
-        skill_md = os.path.join(entry.path, "SKILL.md")
-        if not os.path.isfile(skill_md) or (refused and refused(skill_md)):
-            continue
-        try:
-            head, _ = fs.read_text(skill_md)
-        except (OSError, ValueError, fs.FsError):
-            head = ""
-        meta = _frontmatter(head[:20_000])
-        # as Claude Code lists a skill: its description, then when_to_use, cut together
-        description = " ".join(" ".join([meta.get("description", ""), meta.get("when_to_use", "")]).split())
-        if len(description) > desc_chars:
-            # masked before the cut: a secret cut in two would no longer be recognised
-            description = (mask or redact.mask)(description)
-            if len(description) > desc_chars:
-                description = description[: desc_chars - 1] + "…"
-        skill = {
-            "name": meta.get("name") or entry.name,
-            "description": description,
-            "path": skill_md,
-            "scope": scope,
-        }
-        if meta.get("disable-model-invocation", "").strip().lower() == "true":
-            skill["model_invocable"] = False  # Claude Code leaves it out of the list the model sees
-        out.append(skill)
-    return out
+def skill(
+    cfg: Config, name: str, path: str | None = None, repo: str | None = None, scope: str | None = None
+) -> dict:
+    """One skill by id or name (see skills.load)."""
+    from . import skills
 
-
-def skill_folders(cfg: Config, root: str | None) -> list[tuple[str, str]]:
-    folders = [(os.path.join(root, p), "project") for p in PROJECT_SKILLS] if root else []
-    return folders + [(_expand(p), "user") for p in _setting(cfg, "skills", DEFAULT_SKILLS)]
-
-
-def skills(
-    cfg: Config, root: str | None, refused=None, desc_chars: int = DESCRIPTION_CHARS, mask=None
-) -> list[dict]:
-    """`mask`: masks a long description before it is cut (default: redact.mask)."""
-    found: dict[str, dict] = {}
-    for folder, scope in skill_folders(cfg, root):
-        for skill in _skills_in(folder, scope, refused, desc_chars, mask):
-            found.setdefault(skill["name"].lower(), skill)
-    return sorted(found.values(), key=lambda s: (s["scope"] != "project", s["name"].lower()))
-
-
-SKILL_FILES = 50  # files listed from a skill's folder
-
-
-def _skill_files(folder: str) -> tuple[list[dict], bool]:
-    """The files in a skill's folder (relative path and size), up to SKILL_FILES; whether more exist."""
-    out: list[dict] = []
-    for here, dirs, files in os.walk(folder):
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in fs._SKIP_DIRS)
-        for name in sorted(files):
-            if len(out) >= SKILL_FILES:
-                return out, True
-            full = os.path.join(here, name)
-            try:
-                size = os.stat(full).st_size
-            except OSError:
-                continue
-            out.append({"path": os.path.relpath(full, folder).replace(os.sep, "/"), "bytes": size})
-    return out, False
-
-
-def skill(cfg: Config, name: str, path: str | None = None, repo: str | None = None) -> dict:
-    """One skill by name: its SKILL.md, its folder and the files in it (what Claude Code's Skill tool
-    loads). A project's skills (path or repo) come before the user's."""
-    root = None
-    if repo:
-        root = project_root(find_repo(cfg, repo)["checkout"])
-    elif path:
-        root = project_root(guard._start_dir(_expand(path)))
-    rules = _Rules(cfg, root, root, root)
-    every = skills(cfg, root, desc_chars=SKILL_DESC_LIMIT)
-    want = name.strip().lower()
-    found = next((s for s in every if s["name"].lower() == want), None) or next(
-        (s for s in every if os.path.basename(os.path.dirname(s["path"])).lower() == want), None
-    )
-    if found is None:
-        names = [s["name"] for s in every]
-        close = difflib.get_close_matches(name, names, n=8, cutoff=0.5)
-        close += [n for n in names if want and want in n.lower() and n not in close][: 8 - len(close)]
-        raise ValueError(
-            f"no skill named {name!r} here"
-            + (f"; close: {', '.join(close)}" if close else "")
-            + f" ({len(names)} skills; context() lists them all)"
-        )
-    folder = os.path.dirname(found["path"])
-    out = {"name": found["name"], "scope": found["scope"], "folder": folder, "skill_md": found["path"]}
-    why = rules.refused(found["path"])
-    if why:  # its description comes from the same file: withheld too
-        out["content"] = None
-        out["refused"] = why
-    else:
-        if found.get("description"):
-            out["description"] = found["description"]
-        try:
-            text, _ = fs.read_text(found["path"])
-        except (OSError, ValueError, fs.FsError) as exc:
-            raise ValueError(f"cannot read {found['path']}: {exc}") from None
-        budget = fs.READ_MAX_CHARS  # what one result holds, as fs_read counts it (width)
-        if width(text) > budget:
-            lines = text.splitlines(keepends=True)
-            kept, used = 0, 0
-            while kept < len(lines) and used + width(lines[kept]) <= budget:
-                used += width(lines[kept])
-                kept += 1
-            if kept:
-                out["truncated"] = _truncated(found["path"], kept, len(lines))
-                text = "".join(lines[:kept])
-            else:
-                shown = fitting(text, budget)
-                out["truncated"] = (
-                    f"showing the first {shown} characters of its first line, which is longer "
-                    f"(the whole file: {found['path']})"
-                )
-                text = text[:shown]
-        out["content"] = text
-    out["files"], more = _skill_files(folder)
-    if more:
-        out["files_more"] = f"more than {SKILL_FILES} files; fs_list(path={folder!r}) lists the rest"
-    out["note"] = (
-        "Follow the instructions in content. Paths in it are relative to folder; scripts run on this "
-        "machine (run / session_start with cwd=folder), read other files with fs_read."
-    )
-    redactor = redact.current()
-    out = _sendable(out)
-    return out if redactor.empty else redactor.data(out)[0]
+    return skills.load(cfg, name, path, repo, scope)
 
 
 # ------------------------------------------------------------------ repo -> local checkout
@@ -1378,38 +1239,10 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None, since
         if unchecked:
             out["rules_not_applied_note"] += f"; {unchecked} of them were not checked (too many patterns)"
 
-    every_skill = mask(skills(cfg, root, rules.refused, mask=mask))  # counted in `redacted`
-    shown, used = [], 2
-    for skill in every_skill:
-        cost = _json_len(skill) + 2
-        if used + cost > SKILLS_FULL_CHARS:
-            break
-        shown.append(skill)
-        used += cost
-    out["skills"] = shown
-    rest = every_skill[len(shown) :]
-    if rest:
-        names = []
-        for skill in rest:
-            cost = _encoded(skill["name"]) + 3
-            if used + cost > SKILLS_BUDGET_CHARS:
-                break
-            names.append(skill["name"])
-            used += cost
-        out["skills_more"] = {
-            "count": len(rest),
-            "names": names,
-            "note": (
-                f"{len(rest)} more skills only by name"
-                + (f" ({len(rest) - len(names)} not even named)" if len(names) < len(rest) else "")
-                + ": each is <folder>/<name>/SKILL.md in one of these folders; fs_list or fs_find them"
-            ),
-            "folders": mask([f for f, _ in skill_folders(cfg, root) if os.path.isdir(f)]),
-        }
-    out["skills_note"] = (
-        "When a skill fits the task, load it with skill(name) (its SKILL.md and files) and follow it; "
-        "run the scripts it names on this machine with run."
-    )
+    from . import skills as skills_mod
+
+    index = skills_mod.build(cfg, start, root, rules.refused, mask=mask)
+    out.update(mask(skills_mod.for_context(cfg, index, target)))  # counted in `redacted`
     out["guards"] = guards = mask(guard.rules_for(start))
     errors, used = [], 0
     for error in guards.get("errors", []):
@@ -1584,21 +1417,11 @@ def context(cfg: Config, path: str | None = None, repo: str | None = None, since
 
 
 def briefed(answer: dict) -> dict:
-    """context(brief=true): the same answer with skills by name only (they were 14-17 KB of the
-    25-45 KB of each answer in the 2026-11-01 review). Rules and guards stay whole: they are
-    what the AI must follow."""
-    out = dict(answer)
-    names = [s.get("name") for s in answer.get("skills") or [] if isinstance(s, dict)]
-    more = answer.get("skills_more") or {}
-    names += list(more.get("names") or [])
-    unnamed = int(more.get("count") or 0) - len(more.get("names") or [])
-    out["skills"] = names
-    out.pop("skills_more", None)
-    out["skills_note"] = (
-        "skill(name) loads one (its SKILL.md says when to use it); context() without brief describes each"
-        + (f"; {unnamed} more are not named here" if unnamed > 0 else "")
-    )
-    return out
+    """context(brief=true): skills by id and name only (see skills.briefed). Rules and guards stay
+    whole: they are what the AI must follow."""
+    from . import skills
+
+    return skills.briefed(answer)
 
 
 def _sendable(value):

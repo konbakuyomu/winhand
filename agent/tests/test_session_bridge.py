@@ -100,7 +100,7 @@ async def test_a_session_starts_with_the_rules_the_cloud_lacks(checkout):
         assert "GLOBAL CODEX RULE" in text and "GLOBAL CLAUDE RULE" in text
         assert "UNTRACKED LOCAL RULE" in text
         assert "TRACKED PROJECT RULE" not in text
-        assert "Skills on the PC: deploy, pdf" in text
+        assert "skill(query=" in text and "deploy" not in text  # the user's are searched, not listed
         assert str(checkout) in text
         assert len(text) <= session_bridge.BUDGET_CHARS
 
@@ -125,7 +125,7 @@ def test_rules_too_long_are_cut_and_named(checkout, home):
     text = session_bridge.session_start("owner/name", Config())
     assert len(text) <= session_bridge.BUDGET_CHARS
     assert "[cut here" in text
-    assert "Skills on the PC:" in text
+    assert "skill(query=" in text
     assert "Not included for lack of room" in text and "CLAUDE.local.md" in text
 
 
@@ -296,14 +296,16 @@ def test_tracked_imported_rules_are_left_out_too(checkout):
     assert "TRACKED IMPORTED RULE" not in text and "UNTRACKED LOCAL RULE" in text
 
 
-def test_many_skills_all_named_when_there_is_room(checkout, home):
+def test_the_rules_part_names_the_pinned_and_the_checkouts_skills_only(checkout, home):
     for i in range(150):
         write(
             home / ".agents" / "skills" / f"skill-{i:03}" / "SKILL.md",
             f"---\nname: skill-{i:03}\ndescription: d\n---\n",
         )
-    text = session_bridge.session_start("owner/name", Config())
-    assert "skill-149" in text and "more)" not in text
+    write(checkout / ".agents" / "skills" / "build" / "SKILL.md", "---\nname: build\ndescription: b\n---\n")
+    text = session_bridge.session_start("owner/name", Config(context={"pinned_skills": ["skill-149"]}))
+    assert "Skills on the PC: build, skill-149" in text and "skill-000" not in text
+    assert "skill(query=" in text
 
 
 def test_the_budget_counts_as_claude_code_does(checkout, home):
@@ -353,40 +355,29 @@ def skill(home, name, description, extra=""):
     )
 
 
-def test_the_skills_part_has_each_description(checkout, home):
+def test_the_skills_part_has_the_checkouts_skills_and_the_map(checkout, home):
     skill(home, "pdf", "Fill and split PDF files.", "when_to_use: when a PDF is mentioned\n")
+    skill(home, "kicad-local", "Edit KiCad schematics and PCB layouts.")
     skill(home, "secret-step", "Only by name.", "disable-model-invocation: true\n")
     write(
         checkout / ".claude" / "skills" / "build" / "SKILL.md",
         "---\nname: build\ndescription: Build it.\n---\n",
     )
-    text = session_bridge.skills_text("owner/name", Config())
+    text = session_bridge.skills_text("owner/name", Config(context={"pinned_skills": ["pdf"]}))
     lines = text.splitlines()
-    assert "skill(name)" in lines[0]
-    assert lines[1] == "- build: Build it."  # the project's first
-    assert "- pdf: Fill and split PDF files. when a PDF is mentioned" in lines
-    assert "- secret-step" not in text and lines[-1] == "Used only when asked for by name: secret-step"
+    assert "skill(<id or name>" in lines[0]
+    assert "- build [project:.claude/skills/build]: Build it." in lines  # the checkout's own, described
+    assert "- pdf: Fill and split PDF files. when a PDF is mentioned" in lines  # pinned
+    assert any(x.startswith("- 硬件固件 Hardware & firmware (1): kicad-local") for x in lines)
+    assert "skill(query=" in text and "secret-step" not in text
 
 
-def test_long_descriptions_are_shortened_evenly(checkout, home):
-    for i in range(40):
-        skill(home, f"skill-{i:02}", f"{i:02} " + "word " * 60)  # ~300 characters each, ~12,000 in all
-    text = session_bridge.skills_text("owner/name", Config())
-    assert session_bridge._size(text) <= session_bridge.BUDGET_CHARS
-    described = [x for x in text.splitlines() if x.startswith("- skill-")]
-    assert len(described) == 40
-    lengths = {len(x.split(": ", 1)[1]) for x in described}
-    assert len(lengths) == 1 and lengths.pop() >= session_bridge.MIN_DESC_CHARS
-    assert all(x.endswith("…") for x in described)
-
-
-def test_too_many_skills_are_still_all_named(checkout, home):
+def test_many_skills_make_a_short_map(checkout, home):
     for i in range(150):
         skill(home, f"skill-{i:03}", "word " * 60)
     text = session_bridge.skills_text("owner/name", Config())
-    assert session_bridge._size(text) <= session_bridge.BUDGET_CHARS
-    assert all(f"- skill-{i:03}" in text for i in range(150))
-    assert "- skill-000: word" in text and "- skill-149\n" in text + "\n"  # the last by name only
+    assert session_bridge._size(text) <= 3_000
+    assert "Skills on this PC: 152." in text and "skill-100" not in text  # and pdf, deploy
 
 
 async def test_each_part_is_asked_for_by_its_header(checkout, home):
@@ -399,12 +390,12 @@ async def test_each_part_is_asked_for_by_its_header(checkout, home):
         return response.json()["hookSpecificOutput"]["additionalContext"]
 
     rules = await context_of(part("rules"))
-    assert "GLOBAL CODEX RULE" in rules and "pdf" not in rules
+    assert "GLOBAL CODEX RULE" in rules and "skill(query=" not in rules
     skills = await context_of(part("skills"))
-    assert "- pdf: d" in skills and "GLOBAL CODEX RULE" not in skills
+    assert "Skills on this PC: 2." in skills and "GLOBAL CODEX RULE" not in skills
     tools = await context_of(part("tools"))
     assert tools.startswith("Local MCP servers on this PC") and "GLOBAL" not in tools
     legacy = await context_of({"x-winhand-repo": "github.com/owner/name"})  # a hook written by 0.4.7
-    assert "GLOBAL CODEX RULE" in legacy and "pdf" in legacy
+    assert "GLOBAL CODEX RULE" in legacy and "skill(query=" in legacy
     unknown = await post("/hook/session-start", "hook", headers=part("everything"))
     assert unknown.status_code == 404

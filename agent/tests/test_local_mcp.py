@@ -111,9 +111,26 @@ async def test_a_projects_skill_comes_first(home, tmp_path):
     write(
         project / ".claude" / "skills" / "officecli" / "SKILL.md", "---\nname: officecli\n---\nPROJECT COPY\n"
     )
-    async with Client(build_server(Config())) as c:
+    trusted = Config(context={"trusted_roots": [str(project)]})
+    async with Client(build_server(trusted)) as c:
         found = (await c.call_tool("skill", {"name": "officecli", "path": str(project)})).structured_content
     assert found["scope"] == "project" and "PROJECT COPY" in found["content"]
+    assert found["id"] == "project:.claude/skills/officecli"
+
+
+async def test_an_untrusted_projects_skill_does_not_stand_in_for_the_users(home, tmp_path):
+    write(home / ".agents" / "skills" / "officecli" / "SKILL.md", OFFICE)
+    project = tmp_path / "cloned"
+    (project / ".git").mkdir(parents=True)
+    write(project / ".claude" / "skills" / "officecli" / "SKILL.md", "---\nname: officecli\n---\nCLONED\n")
+    async with Client(build_server(Config())) as c:
+        by_name = (await c.call_tool("skill", {"name": "officecli", "path": str(project)})).structured_content
+        by_id = (
+            await c.call_tool("skill", {"name": "project:.claude/skills/officecli", "path": str(project)})
+        ).structured_content
+    assert by_name["scope"] == "user" and "Run scripts/office.py" in by_name["content"]
+    assert by_id["scope"] == "project" and by_id["trusted"] is False and "CLONED" in by_id["content"]
+    assert "not marked trusted" in by_id["note"]
 
 
 # ------------------------------------------------------------------ A3 the tools part
@@ -344,11 +361,12 @@ async def test_waiting_on_an_earlier_call_is_not_judged_again(services, winhand_
 
 
 def test_guide_mentions_the_new_tools():
-    from winhand import server
+    from winhand import server, skills
 
-    assert len(server.GUIDE + server.GUIDE_CONTEXT) <= 4096
-    for name in ("skill(name)", "mcp_tools()", "mcp_call(server, tool, arguments)"):
-        assert name in server.GUIDE and name in server.GUIDE_FULL
+    guide = server.GUIDE.replace("{skills}", skills.instructions_line(Config()))
+    assert len(guide + server.GUIDE_CONTEXT) <= 4096
+    for name in ("skill(query=", "mcp_tools()", "mcp_call(server, tool, arguments)"):
+        assert name in guide and name in server.GUIDE_FULL
 
 
 async def test_the_tasks_left_behind_do_not_leak(services):
@@ -403,11 +421,12 @@ def test_a_secret_in_a_long_skill_description_is_counted(home):
     )
     redact.remember("appleng-secret-value")
     try:
-        out = workspace.context(Config())
+        out = workspace.context(Config(context={"pinned_skills": ["long"]}))
     finally:
         redact.reset()
-    (skill,) = [s for s in out["skills"] if s["name"] == "long"]
-    assert "appleng" not in skill["description"] and out["redacted"] >= 1 and out["redaction_note"]
+    (skill,) = [s for s in out["skill_map"]["pinned"] if s["name"] == "long"]
+    assert "appleng" not in json.dumps(out) and out["redacted"] >= 1 and out["redaction_note"]
+    assert skill["description"].startswith("xxx")
 
 
 async def test_mcp_tools_returns_what_it_just_listed_even_if_the_cache_cannot_be_written(

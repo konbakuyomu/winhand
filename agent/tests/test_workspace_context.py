@@ -55,16 +55,19 @@ async def test_context_returns_rules_skills_guards_and_servers(tmp_path):
             ("project", "sub rules"),
         ]
         skills = {s["name"]: s for s in out["skills"]}
-        assert set(skills) == {"demo", "other"}
-        assert skills["demo"]["scope"] == "project" and skills["demo"]["description"] == "the project's demo"
-        assert skills["other"]["description"] == "it's another"
-        assert skills["demo"]["path"].endswith("SKILL.md")
+        assert set(skills) == {"demo"}  # the project's own; the user's are found by skill(query=...)
+        assert skills["demo"]["id"] == "project:.agents/skills/demo"
+        assert skills["demo"]["description"] == "the project's demo"
+        assert out["skill_map"]["total"] == 3 and "skill(query=" in out["skill_map"]["how"]
+        assert f"path={str(root / 'sub' / 'x.c')!r}" in out["skills_note"]
+        found = (await client.call_tool("skill", {"query": "another"})).structured_content
+        assert found["results"][0]["name"] == "other" and found["results"][0]["description"] == "it's another"
         assert any(r["reason"] == "project note" for r in out["guards"]["rules"])
         assert out["local_mcp_servers"]["names"] == ["pyocd-debug"]
 
         bare = (await client.call_tool("context", {})).structured_content
         assert [r["content"] for r in bare["rules"]] == ["global rules"]
-        assert {s["scope"] for s in bare["skills"]} == {"user"} and "path=" in bare["next"]
+        assert bare["skills"] == [] and bare["skill_map"]["total"] == 2 and "path=" in bare["next"]
         assert all(r.get("reason") != "project note" for r in bare["guards"]["rules"])
 
 
@@ -80,12 +83,12 @@ def test_defaults_read_the_usual_files_when_they_exist(tmp_path, monkeypatch):
         "name: eide-builder\ndescription: >\n  builds\n  EIDE projects",
     )
     skill(home / ".agents" / "skills", "comet", 'name: comet\ndescription: "Comet \\u5165\\u53e3"')
-    out = workspace.context(Config())
+    out = workspace.context(Config(context={"pinned_skills": ["comet", "eide-builder"]}))
     assert [r["content"] for r in out["rules"]] == ["codex global"]
-    found = {s["name"]: s["description"] for s in out["skills"]}
+    found = {s["name"]: s["description"] for s in out["skill_map"]["pinned"]}
     assert found == {"comet": "Comet 入口", "eide-builder": "builds EIDE projects"}
     none = workspace.context(Config(context={"rules": [], "skills": []}))
-    assert none["rules"] == [] and none["skills"] == []
+    assert none["rules"] == [] and none["skills"] == [] and none["skill_map"]["total"] == 0
 
 
 def test_project_root_without_git_is_the_folder_itself(tmp_path):
