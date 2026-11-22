@@ -315,3 +315,15 @@ def test_the_owners_report(home, winhand_home):
     assert data["total"] == 2 and data["pinned"] == ["smart-search-cli"]
     assert data["skills"][0]["name"] == "smart-search-cli" and data["skills"][0]["days_used"] == 1
     assert data["vague"] == ["user:~/.agents/skills/tiny"]
+
+
+async def test_search_leaves_out_what_the_read_rules_protect(home, winhand_home):
+    skill(home / ".agents" / "skills", "private-flow", "Deploy the private service")
+    skill(home / ".agents" / "skills", "public-flow", "Deploy the public service")
+    write(
+        winhand_home / "guards.toml",
+        f'[[guard]]\non = "read"\ndecision = "deny"\npath = [{json.dumps(str(home / ".agents" / "skills" / "private-flow") + "/**")}]\n',
+    )
+    async with Client(build_server(Config())) as c:
+        found = (await c.call_tool("skill", {"query": "deploy"})).structured_content
+    assert [r["name"] for r in found["results"]] == ["public-flow"]

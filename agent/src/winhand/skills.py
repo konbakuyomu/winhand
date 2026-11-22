@@ -487,6 +487,7 @@ class Skill:
     model_invocable: bool = True
     also: list[str] = field(default_factory=list)
     host_off: list[str] = field(default_factory=list)
+    digest: str = ""
 
     @property
     def folder(self) -> str:
@@ -592,6 +593,7 @@ def build(
         if short.lower() in off_names or os.path.normcase(os.path.abspath(md)) in off_paths:
             offs.append("codex")
         skill.host_off = offs
+        skill.digest = meta.get("_digest", "")
         by_file[key] = skill
         by_copy.setdefault(copy, skill)
         found.append(skill)
@@ -698,17 +700,17 @@ AREAS = (
      "latex office officecli letter memo translate translation "
      "文档 表格 幻灯片 演示 报告 排版 公文 翻译 文稿 论文"),
     ("visual", "视觉界面", "Visual & UI",
-     "image diagram chart figma design ui ux frontend css icon mermaid svg render visualize animation motion "
-     "video drawing canvas theme impeccable "
-     "图片 绘图 画图 图表 示意图 界面 设计 前端 图标 可视化 动画 视频 配色"),
+     "image diagram chart figma ui ux frontend css icon mermaid svg render visualize animation motion "
+     "video drawing canvas impeccable @design "
+     "图片 绘图 画图 图表 示意图 界面 界面设计 前端 图标 可视化 动画 视频 配色"),
     ("code", "代码工程", "Software engineering",
      "code refactor test tdd bug debug review lint build compile api sdk library typescript python rust "
      "architecture codebase domain module interface prototype "
      "代码 重构 测试 调试 评审 审查 编译 架构 接口 原型"),
     ("agents", "智能体自动化", "Agents & automation",
-     "agent skill prompt claude codex gemini mcp subagent llm model context harness automation workflow hook "
-     "orchestrat session "
-     "智能体 技能 提示词 自动化 工作流 子代理 模型 会话"),
+     "agent prompt claude codex gemini mcp subagent llm harness automation hook @skill @context @model @workflow "
+     "orchestrat "
+     "智能体 提示词 自动化 子代理"),
     ("search", "检索知识", "Search & knowledge",
      "search web fetch crawl research knowledge note obsidian memory retrieval context7 wiki docs lookup "
      "搜索 检索 联网 抓取 研究 资料 知识 笔记 复习 查找"),
@@ -783,9 +785,9 @@ def areas_of(cfg: Config, skill: Skill) -> list[str]:
                 break
     if result is None:
         t = _text(skill)
-        scores = {
-            key: sum(3 for w in words if _has(w, t.name, t.name_words))
-            + sum(1 for w in words if _has(w, t.desc, t.desc_words))
+        scores = {  # an @word counts only in the name: "skill" or "context" is in most descriptions
+            key: sum(3 for w in words if _has(w.lstrip("@"), t.name, t.name_words))
+            + sum(1 for w in words if not w.startswith("@") and _has(w, t.desc, t.desc_words))
             for key, words in _AREA_WORDS.items()
         }
         best = max(scores.values(), default=0)
@@ -1000,7 +1002,7 @@ def _terms(queries: list[str]) -> list[list[str]]:
 
 _AREA_TEXT = {a[0]: f"{a[1]} {a[2]} {a[3]}".lower() for a in AREAS}
 _AREA_TOKENS = {k: set(_TOKEN.findall(v)) for k, v in _AREA_TEXT.items()}
-MIN_RELATIVE_SCORE = 0.3  # of the best: weaker matches only pad the list
+MIN_RELATIVE_SCORE = 0.35  # of the best: weaker matches only pad the list
 
 
 def _score(cfg: Config, skill: Skill, groups: list[list[str]]) -> float:
@@ -1009,19 +1011,21 @@ def _score(cfg: Config, skill: Skill, groups: list[list[str]]) -> float:
     short, name = skill.short.lower(), skill.name.lower()
     total, matched = 0.0, 0
     for group in groups:
-        best = 0.0
+        hits = []
         for i, term in enumerate(group):
             weight = 1.0 if i == 0 else 0.7
             if term in (short, name):
-                best = max(best, 8 * weight)
+                hits.append(8 * weight)
             elif _has(term, t.name, t.name_words):
-                best = max(best, 4 * weight)
+                hits.append(4 * weight)
             elif _has(term, t.desc, t.desc_words):
-                best = max(best, 2 * weight)
+                hits.append(2 * weight)
             elif _has(term, t.ident, set()):
-                best = max(best, 1.5 * weight)
+                hits.append(1.5 * weight)
             elif any(_has(term, _AREA_TEXT[a], _AREA_TOKENS[a]) for a in areas):
-                best = max(best, 1 * weight)
+                hits.append(1 * weight)
+        hits.sort(reverse=True)
+        best = hits[0] + 0.3 * sum(hits[1:4]) if hits else 0.0  # the other words of it count a little
         if best:
             matched += 1
         total += best
@@ -1043,6 +1047,7 @@ def search(
     scope: str | None = None,
     limit: int = SEARCH_LIMIT,
     others: list[Skill] | None = None,
+    refused=None,
 ) -> dict:
     """Skills that match the words best: at most half of them from the project worked in (`scope`), the
     rest from everywhere; with only `area`, that area's skills."""
@@ -1059,6 +1064,19 @@ def search(
         scored = [(s, 1.0) for s in pool]
     scored.sort(key=lambda sv: (-sv[1], sv[0].layer != "project", sv[0].name.lower()))
     here = os.path.normcase(scope) if scope else None
+    seen_copies: set[tuple[str, str]] = set()
+    kept = []
+    for skill, value in scored:  # the guard's read rules, and one of several identical copies
+        copy = (skill.short.lower(), skill.digest)
+        if skill.digest and copy in seen_copies:
+            continue
+        if refused and refused(skill.path):
+            continue
+        seen_copies.add(copy)
+        kept.append((skill, value))
+        if len(kept) >= limit * 3:
+            break
+    scored = kept
     picked: list[Skill] = []
     local = 0
     for skill, _ in scored:
@@ -1087,7 +1105,6 @@ def search(
         results.append(item)
     return {
         "results": results,
-        "matched": len(scored),
         "note": "load one with skill(name=<load.name>, path=<load.path when given>); a skill of another "
         "project is that project's: check paths before running its scripts for yours",
     }
@@ -1125,11 +1142,10 @@ def search_folder(
 
     start, root = scope_of(cfg, path, repo)
     rules = workspace._Rules(cfg, root, start, start)
-    index = build(cfg, start, root, rules.refused)
-    others = [s for s in other_projects(cfg, root) if not rules.refused(s.path)]
+    index = build(cfg, start, root)  # the guard's read rules are checked for what is shown, below
     known = {os.path.normcase(os.path.realpath(s.path)) for s in index.skills}
-    others = [s for s in others if os.path.normcase(os.path.realpath(s.path)) not in known]
-    out = search(cfg, index, queries, area, root, limit, others)
+    others = [s for s in other_projects(cfg, root) if os.path.normcase(os.path.realpath(s.path)) not in known]
+    out = search(cfg, index, queries, area, root, limit, others, rules.refused)
     if path and not root:
         out["scope_warning"] = f"{path} is not a folder here; searched every project"
     if root:
