@@ -213,11 +213,14 @@ def walk(root: str, mode: str, budget: _Budget) -> list[str]:
 # ------------------------------------------------------------------ what a SKILL.md says
 
 _meta_cache: dict[str, tuple[tuple[int, int], dict]] = {}
+MAX_SKILL_BYTES = 2_000_000
 
 
 def _meta(path: str) -> dict:
-    """name, description, when_to_use, disable-model-invocation from a SKILL.md header (cached by size
-    and time)."""
+    """name, description, when_to_use, disable-model-invocation from a SKILL.md header, and `_digest`,
+    a hash of the whole file (cached by size and time)."""
+    import hashlib
+
     from .workspace import _frontmatter
 
     try:
@@ -231,11 +234,12 @@ def _meta(path: str) -> dict:
         return cached[1]
     try:
         with open(path, "rb") as fh:
-            head = fh.read(HEAD_BYTES)
-        text = head.decode("utf-8-sig", "replace")
+            data = fh.read(MAX_SKILL_BYTES)
+        text = data[:HEAD_BYTES].decode("utf-8-sig", "replace")
     except OSError:
-        text = ""
-    meta = _frontmatter(text)
+        data, text = b"", ""
+    meta = dict(_frontmatter(text))
+    meta["_digest"] = hashlib.sha256(data).hexdigest()
     if len(_meta_cache) > 4_000:
         _meta_cache.clear()
     _meta_cache[key] = (stamp, meta)
@@ -558,6 +562,7 @@ def build(
     budget = budget or _Budget()
     found: list[Skill] = []
     by_file: dict[str, Skill] = {}
+    by_copy: dict[tuple[str, str, str], Skill] = {}  # (layer, name, digest): one tool's copy of another's
     off_claude, off_names, off_paths = _host_off(cfg, root)
 
     def add(md: str, make) -> None:
@@ -574,6 +579,11 @@ def build(
         if key in by_file:
             by_file[key].also.append(skill.id)
             return
+        copy = (skill.layer, short.lower(), meta.get("_digest", ""))
+        if skill.layer != "project" and copy in by_copy:  # cc-switch copies a skill to each tool's folder
+            by_copy[copy].also.append(skill.id)
+            by_file[key] = by_copy[copy]
+            return
         skill.description = _describe(meta, desc_chars, mask)
         skill.model_invocable = meta.get("disable-model-invocation", "").strip().lower() != "true"
         offs = []
@@ -583,6 +593,7 @@ def build(
             offs.append("codex")
         skill.host_off = offs
         by_file[key] = skill
+        by_copy.setdefault(copy, skill)
         found.append(skill)
 
     trust = None
@@ -680,16 +691,16 @@ def find(index: Index, want: str) -> Skill | None:
 AREAS = (
     ("hardware", "硬件固件", "Hardware & firmware",
      "kicad pcb schematic footprint firmware flash mcu rp2350 stm32 esp32 jlc lcsc component datasheet eda "
-     "easyeda quilter pyocd probe uart serial eide keil jitx freecad oscilloscope rigol scope board chip "
+     "easyeda quilter pyocd probe uart serial eide keil jitx freecad oscilloscope rigol chip "
      "硬件 固件 烧录 电路 原理图 封装 元件 器件 芯片 数据手册 嵌入式 单片机 示波器 焊接 板子"),
     ("docs", "文档表格", "Docs & sheets",
-     "docx word excel xlsx pptx powerpoint slides pdf spreadsheet csv document report markdown visio ocr "
+     "docx word excel xlsx pptx powerpoint slides pdf spreadsheet csv document markdown visio ocr "
      "latex office officecli letter memo translate translation "
      "文档 表格 幻灯片 演示 报告 排版 公文 翻译 文稿 论文"),
     ("visual", "视觉界面", "Visual & UI",
      "image diagram chart figma design ui ux frontend css icon mermaid svg render visualize animation motion "
      "video drawing canvas theme impeccable "
-     "图 图片 绘图 画图 界面 设计 前端 图标 可视化 动画 视频 配色"),
+     "图片 绘图 画图 图表 示意图 界面 设计 前端 图标 可视化 动画 视频 配色"),
     ("code", "代码工程", "Software engineering",
      "code refactor test tdd bug debug review lint build compile api sdk library typescript python rust "
      "architecture codebase domain module interface prototype "
@@ -718,37 +729,70 @@ def _words(text: str) -> list[str]:
 
 
 _AREA_WORDS = {key: _words(words) for key, _, _, words in AREAS}
+_CJK = re.compile(r"[\u3400-\u9fff]")
+_TOKEN = re.compile(r"[a-z0-9+#.]+")
 
 
-def _hits(term: str, text: str) -> bool:
+@dataclass
+class _Text:
+    """A skill's name, description and id in lower case, with their words (computed once)."""
+
+    name: str
+    desc: str
+    ident: str
+    name_words: set[str]
+    desc_words: set[str]
+
+
+def _text(skill: Skill) -> _Text:
+    cached = skill.__dict__.get("_text")
+    if cached is None:
+        name = f"{skill.short} {skill.name}".lower()
+        desc = skill.description.lower()
+        cached = _Text(name, desc, skill.id.lower(), set(_TOKEN.findall(name)), set(_TOKEN.findall(desc)))
+        skill.__dict__["_text"] = cached
+    return cached
+
+
+def _has(term: str, text: str, words: set[str]) -> bool:
+    """`term` in a text: Chinese as a substring; an English word as a word, or the start of one when it is
+    five letters or more (orchestrat -> orchestrate); anything with other characters as a substring."""
     if not term:
         return False
-    if re.search(r"[㐀-鿿]", term):
+    if _CJK.search(term) or not _TOKEN.fullmatch(term):
         return term in text
-    if len(term) <= 3:
-        return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
-    return term in text
+    if term in words:
+        return True
+    return len(term) >= 5 and any(w.startswith(term) for w in words)
 
 
 def areas_of(cfg: Config, skill: Skill) -> list[str]:
     """The skill's areas: the owner's correction in [context] skill_areas (by id or name) when there is
-    one, else the one or two areas its name and description match best."""
+    one, else the one or two areas its name and description match best (computed once per skill)."""
     fixed = (cfg.context or {}).get("skill_areas")
+    marker = id(fixed)
+    cached = skill.__dict__.get("_areas")
+    if cached is not None and cached[0] == marker:
+        return cached[1]
+    result: list[str] | None = None
     if isinstance(fixed, dict):
         for key in (skill.id, skill.name, skill.short):
             value = fixed.get(key)
             if value is not None:
-                return [v for v in _entries(value) if v in AREA_KEYS]
-    name = f"{skill.short} {skill.name}".lower().replace("-", " ")
-    desc = skill.description.lower()
-    scores = {}
-    for key, words in _AREA_WORDS.items():
-        scores[key] = sum(3 for w in words if _hits(w, name)) + sum(1 for w in words if _hits(w, desc))
-    best = max(scores.values(), default=0)
-    if best <= 0:
-        return []
-    ranked = sorted((k for k in scores if scores[k] > 0), key=lambda k: -scores[k])
-    return [k for k in ranked[:2] if scores[k] >= best * 0.75]
+                result = [v for v in _entries(value) if v in AREA_KEYS]
+                break
+    if result is None:
+        t = _text(skill)
+        scores = {
+            key: sum(3 for w in words if _has(w, t.name, t.name_words))
+            + sum(1 for w in words if _has(w, t.desc, t.desc_words))
+            for key, words in _AREA_WORDS.items()
+        }
+        best = max(scores.values(), default=0)
+        ranked = sorted((k for k in scores if scores[k] > 0), key=lambda k: -scores[k])
+        result = [k for k in ranked[:2] if scores[k] >= best * 0.75] if best > 0 else []
+    skill.__dict__["_areas"] = (marker, result)
+    return result
 
 
 # ------------------------------------------------------------------ the map
@@ -823,13 +867,15 @@ def skill_map(cfg: Config, index: Index, with_projects: bool = True) -> dict:
         members = by_area[key]
         if not members:
             continue
-        examples = [s for s in members if s.model_invocable and not s.host_off][:MAP_EXAMPLES]
+        examples = list(dict.fromkeys(s.name for s in members if s.model_invocable and not s.host_off))[
+            :MAP_EXAMPLES
+        ]
         areas.append(
             {
                 "area": key,
                 "label": f"{zh} {en}",
                 "count": len(members),
-                "examples": [s.name for s in examples],
+                "examples": examples,
             }
         )
     out = {
@@ -864,7 +910,11 @@ def map_text(cfg: Config, index: Index, room: int) -> str:
         lines.append("By area (count: examples), search to see the rest:")
         lines += [f"- {a['label']} ({a['count']}): {', '.join(a['examples'])}" for a in data["areas"]]
     if data.get("projects"):
-        names = [f"{os.path.basename(p['project'])} ({p['skills']})" for p in data["projects"]]
+        bases = [os.path.basename(p["project"]) for p in data["projects"]]
+        names = [
+            f"{os.path.basename(os.path.dirname(p['project'])) + '/' if bases.count(b) > 1 else ''}{b} ({p['skills']})"
+            for p, b in zip(data["projects"], bases, strict=True)
+        ]
         more = f" and {data['projects_more']} more" if data.get("projects_more") else ""
         lines.append(
             "Projects with skills of their own (context(path) lists them): " + ", ".join(names) + more
@@ -948,26 +998,29 @@ def _terms(queries: list[str]) -> list[list[str]]:
     return out
 
 
+_AREA_TEXT = {a[0]: f"{a[1]} {a[2]} {a[3]}".lower() for a in AREAS}
+_AREA_TOKENS = {k: set(_TOKEN.findall(v)) for k, v in _AREA_TEXT.items()}
+MIN_RELATIVE_SCORE = 0.3  # of the best: weaker matches only pad the list
+
+
 def _score(cfg: Config, skill: Skill, groups: list[list[str]]) -> float:
-    name = f"{skill.name} {skill.short}".lower()
-    name_spaced = name.replace("-", " ").replace("_", " ").replace(":", " ")
-    ident = skill.id.lower()
-    desc = skill.description.lower()
-    area_words = " ".join(f"{a[1]} {a[2]} {a[3]}".lower() for a in AREAS if a[0] in areas_of(cfg, skill))
+    t = _text(skill)
+    areas = areas_of(cfg, skill)
+    short, name = skill.short.lower(), skill.name.lower()
     total, matched = 0.0, 0
     for group in groups:
         best = 0.0
         for i, term in enumerate(group):
             weight = 1.0 if i == 0 else 0.7
-            if term == skill.short.lower() or term == skill.name.lower():
+            if term in (short, name):
                 best = max(best, 8 * weight)
-            elif _hits(term, name_spaced) or _hits(term, name):
+            elif _has(term, t.name, t.name_words):
                 best = max(best, 4 * weight)
-            elif _hits(term, desc):
+            elif _has(term, t.desc, t.desc_words):
                 best = max(best, 2 * weight)
-            elif _hits(term, ident):
+            elif _has(term, t.ident, set()):
                 best = max(best, 1.5 * weight)
-            elif _hits(term, area_words):
+            elif any(_has(term, _AREA_TEXT[a], _AREA_TOKENS[a]) for a in areas):
                 best = max(best, 1 * weight)
         if best:
             matched += 1
@@ -1000,7 +1053,8 @@ def search(
     groups = _terms([q for q in queries if q and q.strip()])
     if groups:
         scored = [(s, _score(cfg, s, groups)) for s in pool]
-        scored = [(s, v) for s, v in scored if v > 0]
+        top = max((v for _, v in scored), default=0.0)
+        scored = [(s, v) for s, v in scored if v > 0 and v >= top * MIN_RELATIVE_SCORE]
     else:
         scored = [(s, 1.0) for s in pool]
     scored.sort(key=lambda sv: (-sv[1], sv[0].layer != "project", sv[0].name.lower()))

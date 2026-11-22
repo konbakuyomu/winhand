@@ -212,15 +212,15 @@ def test_codex_plugins_from_config_or_the_owners_account(home):
 
 
 def test_what_claude_code_or_codex_turned_off_is_marked_not_hidden(home):
-    skill(home / ".agents" / "skills", "legacy", "Old flow for PDF files")
-    skill(home / ".agents" / "skills", "pdf", "Fill PDF files")
+    skill(home / ".agents" / "skills", "legacy", "Fill PDF forms")
+    skill(home / ".agents" / "skills", "forms", "Fill PDF forms")
     write(home / ".claude" / "settings.json", json.dumps({"skillOverrides": {"legacy": "off"}}))
     write(home / ".codex" / "config.toml", '[[skills.config]]\nname = "legacy"\nenabled = false\n')
     index = skills.build(Config(), None, None)
     legacy = skills.find(index, "legacy")
     assert legacy.host_off == ["claude", "codex"]
     found = skills.search(Config(), index, ["pdf"])["results"]
-    assert [r["name"] for r in found] == ["pdf", "legacy"] and found[1]["host_off"] == ["claude", "codex"]
+    assert [r["name"] for r in found] == ["forms", "legacy"] and found[1]["host_off"] == ["claude", "codex"]
 
 
 def test_the_map_has_pins_areas_and_projects(home, repo):
