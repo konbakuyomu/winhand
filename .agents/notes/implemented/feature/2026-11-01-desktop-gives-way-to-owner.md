@@ -72,6 +72,7 @@ Status: implemented
   - 截最小化窗口时，窗口会在屏幕上出现约半秒。
   - 急停键只有一个进程能持有。其他进程靠停止文件跟着停；持有的进程退出后，要等别的进程下一次桌面动作才会重新注册。
   - 这些都在 Linux 上靠模拟测试，真正的窗口行为要靠 CI 的 Windows 任务和在电脑上实测。
+- **2026-11-24 的实测与后续提议**：让路只能保证 AI 不在主人用电脑时动手，换来的是主人在用电脑时 AI 什么也做不了。而且 UI Automation 的控件操作本身就会抢焦点：主人打字时，12 轮抢了 24 次。提议先加防抢焦点守卫；经守卫执行、确认不碰前台的后台动作，以后不再等主人停手；`input` 的按键和坐标点击照旧让路。见 [windows-control-own-backend](../../proposed/architecture/2026-11-24-windows-control-own-backend.md)。
 
 ## Verification
 
