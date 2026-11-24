@@ -4,90 +4,106 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
     Title="winhand">
-  <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-    <muxc:NavigationView x:Name="RootNavigation"
-                         PaneDisplayMode="Left"
-                         OpenPaneLength="216"
-                         IsPaneToggleButtonVisible="False"
-                         IsTitleBarAutoPaddingEnabled="False"
-                         AlwaysShowHeader="False"
-                         IsBackButtonVisible="Collapsed"
-                         IsSettingsVisible="False"
-                         SelectionChanged="OnNavigationSelectionChanged">
-      <muxc:NavigationView.PaneFooter>
-        <Grid Height="160" />
-      </muxc:NavigationView.PaneFooter>
-      <muxc:NavigationView.MenuItems>
-        <muxc:NavigationViewItem Content="概览" Tag="overview" IsSelected="True">
-          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;" /></muxc:NavigationViewItem.Icon>
-        </muxc:NavigationViewItem>
-        <muxc:NavigationViewItem Content="活动" Tag="activity">
-          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE81C;" /></muxc:NavigationViewItem.Icon>
-        </muxc:NavigationViewItem>
-        <muxc:NavigationViewItem Content="会话" Tag="sessions">
-          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE756;" /></muxc:NavigationViewItem.Icon>
-        </muxc:NavigationViewItem>
-        <muxc:NavigationViewItem Content="MCP 服务" Tag="mcp">
-          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE71B;" /></muxc:NavigationViewItem.Icon>
-        </muxc:NavigationViewItem>
-        <muxc:NavigationViewItem Content="设置" Tag="settings">
-          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE713;" /></muxc:NavigationViewItem.Icon>
-        </muxc:NavigationViewItem>
-      </muxc:NavigationView.MenuItems>
-      <Grid Background="{ThemeResource LayerFillColorDefaultBrush}">
-        <Grid.RowDefinitions>
-          <RowDefinition Height="52" />
-          <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
-        <Border BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1" Padding="24,0">
-          <Grid ColumnSpacing="12">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*" />
-              <ColumnDefinition Width="Auto" />
-              <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <TextBlock x:Name="PageTitle" Text="概览" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
-            <!-- Operation messages live behind this button: they never push the page content around. -->
-            <Button x:Name="FeedbackButton" Grid.Column="1" Style="{StaticResource ToolbarIconButtonStyle}"
-                    IsEnabled="False" AutomationProperties.Name="操作提示" ToolTipService.ToolTip="操作提示">
-              <FontIcon x:Name="FeedbackIcon" Glyph="&#xE8BD;" FontSize="16" />
-              <Button.Flyout>
-                <Flyout x:Name="FeedbackFlyout" Placement="BottomEdgeAlignedRight">
-                  <StackPanel Width="360" Spacing="8">
-                    <TextBlock x:Name="FeedbackTitle" Style="{StaticResource LabelCopyStyle}" />
-                    <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto">
-                      <TextBlock x:Name="FeedbackMessage" Style="{StaticResource BodyCopyStyle}" IsTextSelectionEnabled="True" />
-                    </ScrollViewer>
-                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                      <Button x:Name="FeedbackAction" Style="{StaticResource AccentButtonStyle}" Visibility="Collapsed" />
-                      <Button x:Name="FeedbackClear" Content="清除提示" />
-                    </StackPanel>
-                  </StackPanel>
-                </Flyout>
-              </Button.Flyout>
-            </Button>
-            <ContentControl x:Name="HeaderStatus" Grid.Column="2" Style="{StaticResource StatusNeutralStyle}" Content="启动中" />
-          </Grid>
-        </Border>
-        <ContentControl x:Name="PageHost" Grid.Row="1"
-                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
-      </Grid>
-    </muxc:NavigationView>
-    <Grid Width="216" Height="160" HorizontalAlignment="Left" VerticalAlignment="Bottom">
-      <Grid IsHitTestVisible="False">
-        <Grid.Clip><RectangleGeometry Rect="0,0,216,160" /></Grid.Clip>
-        <Image Source="ms-appx:///Assets/mascot.png" Width="168" Height="168"
-               HorizontalAlignment="Left" VerticalAlignment="Bottom" Stretch="Uniform"
-               AutomationProperties.AccessibilityView="Raw">
-          <Image.RenderTransform><TranslateTransform Y="16" /></Image.RenderTransform>
-        </Image>
-      </Grid>
-      <Grid Width="24" Height="24" Margin="0,0,8,8" HorizontalAlignment="Right" VerticalAlignment="Bottom" Background="Transparent">
-        <ToolTipService.ToolTip>
-          <ToolTip x:Name="ConnectionToolTip" Placement="Top" />
-        </ToolTipService.ToolTip>
-        <Ellipse x:Name="ConnectionDot" Style="{StaticResource ConnectionIdleStyle}" HorizontalAlignment="Center" />
+  <Window.SystemBackdrop><MicaBackdrop Kind="Base" /></Window.SystemBackdrop>
+  <Grid x:Name="RootGrid" SizeChanged="OnRootSizeChanged">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="40" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+    <Grid Padding="6,0,140,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+      <Button x:Name="PaneToggleButton" Width="36" Height="32" Style="{StaticResource IconGhostButtonStyle}"
+              Click="OnPaneToggleClick" ToolTipService.ToolTip="折叠或展开导航栏 (Ctrl+B)"
+              AutomationProperties.Name="折叠或展开导航栏">
+        <Button.KeyboardAccelerators><KeyboardAccelerator Key="B" Modifiers="Control" /></Button.KeyboardAccelerators>
+        <FontIcon Glyph="&#xE700;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14" />
+      </Button>
+      <Grid x:Name="TitleBarDragRegion" Grid.Column="1" Background="{ThemeResource WinhandTransparentBrush}" Padding="8,0,0,0">
+        <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
+          <Image Source="ms-appx:///Assets/winhand.png" Width="16" Height="16" />
+          <TextBlock Text="winhand" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+        </StackPanel>
       </Grid>
     </Grid>
+    <muxc:NavigationView x:Name="RootNavigation" Grid.Row="1"
+                         PaneDisplayMode="Left" IsPaneOpen="True" OpenPaneLength="212" CompactPaneLength="48"
+                         IsPaneToggleButtonVisible="False" IsTitleBarAutoPaddingEnabled="False"
+                         AlwaysShowHeader="False" IsBackButtonVisible="Collapsed" IsSettingsVisible="False"
+                         SelectionChanged="OnNavigationSelectionChanged">
+      <muxc:NavigationView.Resources>
+        <Thickness x:Key="NavigationViewContentGridBorderThickness">0</Thickness>
+      </muxc:NavigationView.Resources>
+      <muxc:NavigationView.MenuItems>
+        <muxc:NavigationViewItem Content="概览" Tag="overview" IsSelected="True">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+        </muxc:NavigationViewItem>
+        <muxc:NavigationViewItem Content="活动" Tag="activity">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE81C;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+        </muxc:NavigationViewItem>
+        <muxc:NavigationViewItem x:Name="NavSessions" Content="会话" Tag="sessions" Visibility="Collapsed">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE756;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+          <muxc:NavigationViewItem.InfoBadge><InfoBadge x:Name="SessionsBadge" Value="0" /></muxc:NavigationViewItem.InfoBadge>
+        </muxc:NavigationViewItem>
+        <muxc:NavigationViewItem Content="MCP 服务" Tag="mcp">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE71B;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+        </muxc:NavigationViewItem>
+        <muxc:NavigationViewItemSeparator />
+        <muxc:NavigationViewItemHeader Content="安全与连接" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        <muxc:NavigationViewItem Content="密钥" Tag="secrets">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE8D7;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+        </muxc:NavigationViewItem>
+        <muxc:NavigationViewItem Content="程序授权" Tag="apps">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xEA18;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+        </muxc:NavigationViewItem>
+        <muxc:NavigationViewItem Content="中转" Tag="relay">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE753;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+        </muxc:NavigationViewItem>
+      </muxc:NavigationView.MenuItems>
+      <muxc:NavigationView.FooterMenuItems>
+        <muxc:NavigationViewItem Content="设置" Tag="settings">
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE713;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+          <muxc:NavigationViewItem.InfoBadge><InfoBadge x:Name="UpdateBadge" Visibility="Collapsed" /></muxc:NavigationViewItem.InfoBadge>
+        </muxc:NavigationViewItem>
+      </muxc:NavigationView.FooterMenuItems>
+      <muxc:NavigationView.PaneFooter>
+        <Button x:Name="MascotStatusButton" Style="{StaticResource GhostButtonStyle}" Click="OnMascotStatusClick"
+                Margin="6,12,6,10" Padding="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                AutomationProperties.Name="连接状态，返回概览">
+          <ToolTipService.ToolTip><ToolTip x:Name="ConnectionToolTip" Placement="Top" /></ToolTipService.ToolTip>
+          <Grid>
+            <Grid x:Name="MascotExpandedGrid" ColumnSpacing="4">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="88" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <Image Source="ms-appx:///Assets/mascot.png" Width="88" Height="88" Stretch="Uniform"
+                     AutomationProperties.AccessibilityView="Raw" />
+              <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Bottom" Margin="0,0,0,8">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <Ellipse x:Name="ConnectionDot" Style="{StaticResource ConnectionIdleStyle}" />
+                  <TextBlock x:Name="ConnectionLabel" Text="启动中" Style="{StaticResource ConnectionLabelNeutralStyle}" />
+                </StackPanel>
+                <TextBlock x:Name="ConnectionMeta" FontSize="11.5" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Typography.NumeralAlignment="Tabular" TextTrimming="CharacterEllipsis" />
+              </StackPanel>
+            </Grid>
+            <Ellipse x:Name="CompactConnectionDot" Style="{StaticResource ConnectionIdleStyle}" Visibility="Collapsed"
+                     HorizontalAlignment="Center" />
+          </Grid>
+        </Button>
+      </muxc:NavigationView.PaneFooter>
+      <Grid Background="{ThemeResource WinhandCanvasBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="1,1,0,0" CornerRadius="8,0,0,0">
+        <ContentControl x:Name="PageHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+        <Border x:Name="OverlayNoticeHost" Style="{StaticResource OverlayNoticeHostStyle}"
+                CornerRadius="8" Visibility="Collapsed" MaxWidth="440"
+                HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="24,0,24,20">
+          <Border.Shadow><ThemeShadow /></Border.Shadow>
+          <InfoBar x:Name="OverlayNotice" IsOpen="False" IsClosable="True">
+            <InfoBar.ActionButton><Button x:Name="NoticeAction" Visibility="Collapsed" /></InfoBar.ActionButton>
+          </InfoBar>
+        </Border>
+      </Grid>
+    </muxc:NavigationView>
   </Grid>
 </Window>

@@ -228,7 +228,7 @@ def _write(entries: dict[str, str], ask: bool) -> None:
     file.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# 程序授权：AI 用桌面工具（点击、输入、控件操作）操作一个程序前，先在电脑上问你。",
-        "# 由 WinHand 的授权弹窗、桌面端设置页（程序授权）或 `winhand apps` 写入；AI 的文件工具改不了它。",
+        "# 由 WinHand 的授权弹窗、桌面端的「程序授权」页或 `winhand apps` 写入；AI 的文件工具改不了它。",
         "",
         "# false：不再问（WinHand 自己的窗口和管理员窗口仍然不能操作）",
         f"ask = {'true' if ask else 'false'}",

@@ -10,18 +10,25 @@ namespace Winhand.Desktop;
 /// <summary>Shared page structure, following Smart Search's Windows layout: one 24 px content edge,
 /// a 920 px reading width, sections (18 px heading, 12 px to content, 24 px apart), setting rows
 /// with the description left and the control right, resizable list/detail splits, and operation
-/// messages in a header flyout so they never move the page.</summary>
+/// messages in a floating InfoBar so they never move the page.</summary>
 public sealed partial class MainWindow
 {
     private const double PageInset = 24;
-    private const double ContentMaxWidth = 920;
+    private const double ContentMaxWidth = 880;
     private Action? _feedbackAction;
     private string? _noticeTitle;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _noticeTimer;
     private bool _uiErrorShown;
 
     // ------------------------------------------------------------------ pages
 
     private static StackPanel PagePanel() => new() { Spacing = PageInset, MaxWidth = ContentMaxWidth, HorizontalAlignment = HorizontalAlignment.Left };
+
+    /// <summary>Development previews only (WINHAND_DESKTOP_INSTANCE set): whether WINHAND_DESKTOP_STATE, a
+    /// comma-separated list, asks a page to show a state for its screenshot (revealed, selected, collapsed ...).</summary>
+    private static bool PreviewState(string flag) =>
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE"))
+        && (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_STATE") ?? "").Split(',').Contains(flag);
 
     /// <summary>A vertically scrolling page whose content keeps the 24 px edge and fits the width.</summary>
     private static ScrollViewer PageScroll(FrameworkElement content, double inset = PageInset)
@@ -29,7 +36,7 @@ public sealed partial class MainWindow
         var scroll = new ScrollViewer
         {
             Content = content,
-            Padding = new Thickness(inset),
+            Padding = new Thickness(inset, 20, inset, 28),
             HorizontalScrollMode = ScrollMode.Disabled,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
@@ -43,6 +50,47 @@ public sealed partial class MainWindow
         scroll.SizeChanged += (_, _) => Fit();
         scroll.Loaded += (_, _) => Fit();
         return scroll;
+    }
+
+    private static Grid PageControlRow(FrameworkElement leading, FrameworkElement trailing)
+    {
+        var row = new Grid { ColumnSpacing = 16 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        leading.VerticalAlignment = trailing.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(trailing, 1);
+        row.Children.Add(leading);
+        row.Children.Add(trailing);
+        return row;
+    }
+
+    private static Button PageGlyphButton(string label, string glyph, Action action, string style = "GhostButtonStyle")
+    {
+        var button = ActionButton(label, action);
+        button.Style = Resource<Style>(style);
+        button.Content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 6,
+            Children =
+            {
+                new FontIcon { Glyph = glyph, FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontSize = 14 },
+                new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center }
+            }
+        };
+        AutomationProperties.SetName(button, label);
+        return button;
+    }
+
+    private static Grid PageHelpButton(string title, string description)
+    {
+        var button = Named(new Button
+        {
+            Style = Resource<Style>("FieldHelpButtonStyle"),
+            Content = new FontIcon { Glyph = "\uE897", FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontSize = 14 }
+        }, $"{title}帮助");
+        var tip = new TeachingTip { Target = button, Title = title, Content = Text(description, "BodyTextStyle"), IsLightDismissEnabled = true };
+        button.Click += (_, _) => tip.IsOpen = true;
+        return new Grid { Children = { button, tip } };
     }
 
     private static StackPanel Section(string title, string subtitle, params UIElement[] content)
@@ -89,19 +137,6 @@ public sealed partial class MainWindow
             control.HorizontalAlignment = stacked ? HorizontalAlignment.Left : HorizontalAlignment.Right;
         };
         return row;
-    }
-
-    /// <summary>Rows inside one bordered panel, separated by hairlines.</summary>
-    private static ContentControl RowsPanel(params UIElement[] rows)
-    {
-        var stack = new StackPanel { Spacing = 12 };
-        for (var i = 0; i < rows.Length; i++)
-        {
-            if (i > 0)
-                stack.Children.Add(Divider());
-            stack.Children.Add(rows[i]);
-        }
-        return Card(stack);
     }
 
     /// <summary>A key/value fact list (label column aligned across rows).</summary>
@@ -160,9 +195,10 @@ public sealed partial class MainWindow
     // ------------------------------------------------------------------ split view
 
     /// <summary>List on the left, detail on the right; the divider is draggable and keyboard
-    /// adjustable, its position is remembered per page, and narrow windows stack the two.</summary>
+    /// adjustable, its position is remembered per page. A window too narrow for both shows the list, then the item
+    /// clicked in it with a way back.</summary>
     private static Grid SplitWorkspace(string key, FrameworkElement leading, FrameworkElement detail,
-        double initialWidth, double minimumWidth, double maximumWidth, double detailMinimum = 420)
+        double initialWidth, double minimumWidth, double maximumWidth, double detailMinimum, ListView list, string backLabel)
     {
         const double dividerWidth = 8;
         var width = double.TryParse(Preferences.ReadString("split:" + key), NumberStyles.Float, CultureInfo.InvariantCulture, out var saved)
@@ -172,15 +208,31 @@ public sealed partial class MainWindow
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(dividerWidth) });
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0) });
         var divider = new Thumb { Style = Resource<Style>("PaneDividerStyle") };
+        var detailHost = new Grid();
+        detailHost.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        detailHost.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var back = new Button { Style = Resource<Style>("GhostButtonStyle") };
+        back.Content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 8,
+            Children = { new FontIcon { Glyph = "\uE72B", FontSize = 14 }, Text(backLabel) }
+        };
+        back.HorizontalAlignment = HorizontalAlignment.Left;
+        back.Margin = new Thickness(14, 10, 14, 0);
+        back.Visibility = Visibility.Collapsed;
+        AutomationProperties.SetName(back, backLabel);
+        detailHost.Children.Add(back);
+        Grid.SetRow(detail, 1);
+        detailHost.Children.Add(detail);
         AutomationProperties.SetName(divider, "调整分栏宽度");
         ToolTipService.SetToolTip(divider, "拖动调整宽度；方向键微调");
         layout.Children.Add(leading);
         Grid.SetColumn(divider, 1);
         layout.Children.Add(divider);
-        layout.Children.Add(detail);
+        layout.Children.Add(detailHost);
         var compact = false;
+        var drilledIn = false;
         void Arrange()
         {
             if (layout.ActualWidth <= 0)
@@ -190,10 +242,10 @@ public sealed partial class MainWindow
                 : new GridLength(Math.Clamp(width, minimumWidth, Math.Min(maximumWidth, layout.ActualWidth - detailMinimum - dividerWidth)));
             layout.ColumnDefinitions[1].Width = new GridLength(compact ? 0 : dividerWidth);
             layout.ColumnDefinitions[2].Width = compact ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
-            layout.RowDefinitions[0].Height = new GridLength(compact ? 0.4 : 1, GridUnitType.Star);
-            layout.RowDefinitions[1].Height = compact ? new GridLength(0.6, GridUnitType.Star) : new GridLength(0);
-            Grid.SetColumn(detail, compact ? 0 : 2);
-            Grid.SetRow(detail, compact ? 1 : 0);
+            Grid.SetColumn(detailHost, compact ? 0 : 2);
+            leading.Visibility = compact && drilledIn ? Visibility.Collapsed : Visibility.Visible;
+            detailHost.Visibility = compact && !drilledIn ? Visibility.Collapsed : Visibility.Visible;
+            back.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
             divider.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         }
         void Resize(double delta)
@@ -215,6 +267,19 @@ public sealed partial class MainWindow
             Persist();
             args.Handled = true;
         };
+        list.IsItemClickEnabled = true;
+        list.ItemClick += (_, _) =>
+        {
+            if (!compact)
+                return;
+            drilledIn = true;
+            Arrange();
+        };
+        back.Click += (_, _) =>
+        {
+            drilledIn = false;
+            Arrange();
+        };
         layout.SizeChanged += (_, _) => Arrange();
         return layout;
     }
@@ -227,7 +292,7 @@ public sealed partial class MainWindow
         pane.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         if (toolbar is not null)
         {
-            toolbar.Margin = new Thickness(PageInset, PageInset, PageInset, 12);
+            toolbar.Margin = new Thickness(14, 18, 14, 10);
             pane.Children.Add(toolbar);
         }
         list.Padding = new Thickness(12, toolbar is null ? 12 : 0, 12, 12);
@@ -239,7 +304,8 @@ public sealed partial class MainWindow
     private static Style DotStyle(Tone tone) => Resource<Style>(tone switch
     {
         Tone.Success => "ConnectionReadyStyle",
-        Tone.Warning or Tone.Active => "ConnectionPendingStyle",
+        Tone.Active => "ConnectionActiveStyle",
+        Tone.Warning => "ConnectionPendingStyle",
         Tone.Error => "ConnectionFailedStyle",
         _ => "ConnectionIdleStyle"
     });
@@ -303,38 +369,24 @@ public sealed partial class MainWindow
     /// <summary>The detail side of a split: a scrolling page with the standard edge.</summary>
     private static ScrollViewer DetailPane(FrameworkElement content) => PageScroll(content);
 
-    /// <summary>Header of a detail page: title with a status pill, optional control at the right.</summary>
-    private static Grid DetailHeader(string title, string subtitle, ContentControl? pill, FrameworkElement? trailing)
-    {
-        var heading = new StackPanel { Spacing = 4 };
-        var titleLine = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        titleLine.Children.Add(new TextBlock { Text = title, Style = Resource<Style>("PageHeadingStyle"), TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis });
-        if (pill is not null)
-            titleLine.Children.Add(pill);
-        heading.Children.Add(titleLine);
-        if (subtitle.Length > 0)
-            heading.Children.Add(Text(subtitle, "SecondaryCopyStyle"));
-        var grid = new Grid { ColumnSpacing = 16 };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.Children.Add(heading);
-        if (trailing is not null)
-        {
-            trailing.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(trailing, 1);
-            grid.Children.Add(trailing);
-        }
-        return grid;
-    }
-
     /// <summary>What a list side says when it has nothing: what goes here and how to add it.</summary>
     private static StackPanel EmptyState(string title, string body, params UIElement[] actions)
     {
         var panel = new StackPanel { Spacing = 12, MaxWidth = 520, HorizontalAlignment = HorizontalAlignment.Left };
-        panel.Children.Add(Text(title, "SectionHeadingStyle"));
-        panel.Children.Add(Text(body, "SecondaryCopyStyle"));
+        var heading = Text(title, "SectionHeadingStyle");
+        heading.TextAlignment = TextAlignment.Center;
+        heading.HorizontalAlignment = HorizontalAlignment.Center;
+        panel.Children.Add(heading);
+        var description = Text(body, "SecondaryCopyStyle");
+        description.TextAlignment = TextAlignment.Center;
+        description.HorizontalAlignment = HorizontalAlignment.Center;
+        panel.Children.Add(description);
         if (actions.Length > 0)
-            panel.Children.Add(ActionRow(actions));
+        {
+            var row = ActionRow(actions);
+            row.HorizontalAlignment = HorizontalAlignment.Center;
+            panel.Children.Add(row);
+        }
         return panel;
     }
 
@@ -342,49 +394,60 @@ public sealed partial class MainWindow
 
     private void InitializeFeedback()
     {
-        FeedbackClear.Click += (_, _) => HideNotice();
-        FeedbackAction.Click += (_, _) =>
+        var hovered = false;
+        _noticeTimer = DispatcherQueue.CreateTimer();
+        _noticeTimer.Interval = TimeSpan.FromSeconds(4);
+        _noticeTimer.IsRepeating = false;
+        _noticeTimer.Tick += (_, _) => { if (!hovered) HideNotice(); };
+        OverlayNotice.PointerEntered += (_, _) => { hovered = true; _noticeTimer.Stop(); };
+        OverlayNotice.PointerExited += (_, _) =>
         {
-            FeedbackFlyout.Hide();
-            _feedbackAction?.Invoke();
+            hovered = false;
+            if (OverlayNotice.IsOpen && OverlayNotice.Severity is InfoBarSeverity.Success or InfoBarSeverity.Informational)
+                _noticeTimer.Start();
+        };
+        OverlayNotice.Closed += (_, _) =>
+        {
+            OverlayNoticeHost.Visibility = Visibility.Collapsed;
+            _noticeTimer.Stop();
+            _noticeTitle = null;
+            _feedbackAction = null;
+        };
+        NoticeAction.Click += (_, _) =>
+        {
+            var action = _feedbackAction;
+            HideNotice();
+            action?.Invoke();
         };
     }
 
-    /// <summary>Show an operation message in the header flyout (reachable again until cleared).</summary>
-    private void ShowNotice(string title, string message, InfoBarSeverity severity, string? actionText = null, Action? action = null)
+    /// <summary>Show an operation message at the bottom right without moving page content.</summary>
+    private void ShowNotice(string title, string message, InfoBarSeverity severity, string? actionText = null, Action? action = null, TimeSpan? duration = null)
     {
         _noticeTitle = title;
-        FeedbackTitle.Text = title;
-        FeedbackMessage.Text = message;
-        FeedbackIcon.Glyph = severity switch
-        {
-            InfoBarSeverity.Error or InfoBarSeverity.Warning => "",
-            InfoBarSeverity.Success => "",
-            _ => ""
-        };
-        FeedbackIcon.Foreground = severity switch
-        {
-            InfoBarSeverity.Error => Resource<Microsoft.UI.Xaml.Media.Brush>("SystemFillColorCriticalBrush"),
-            InfoBarSeverity.Warning => Resource<Microsoft.UI.Xaml.Media.Brush>("SystemFillColorCautionBrush"),
-            _ => Resource<Microsoft.UI.Xaml.Media.Brush>("TextFillColorPrimaryBrush")
-        };
+        OverlayNotice.Title = title;
+        OverlayNotice.Message = message;
+        OverlayNotice.Severity = severity;
         _feedbackAction = action;
-        FeedbackAction.Content = actionText ?? "";
-        FeedbackAction.Visibility = action is null ? Visibility.Collapsed : Visibility.Visible;
-        FeedbackButton.IsEnabled = true;
-        ToolTipService.SetToolTip(FeedbackButton, title);
-        if (FeedbackButton.XamlRoot is not null && IsWindowVisible(_hwnd))
-            FeedbackFlyout.ShowAt(FeedbackButton);
+        NoticeAction.Content = actionText ?? "";
+        NoticeAction.Visibility = action is null ? Visibility.Collapsed : Visibility.Visible;
+        OverlayNotice.IsOpen = true;
+        OverlayNoticeHost.Visibility = Visibility.Visible;
+        _noticeTimer!.Stop();
+        if (severity is InfoBarSeverity.Success or InfoBarSeverity.Informational)
+        {
+            _noticeTimer.Interval = duration ?? TimeSpan.FromSeconds(4);
+            _noticeTimer.Start();
+        }
     }
 
     private void HideNotice()
     {
         _noticeTitle = null;
-        FeedbackFlyout.Hide();
-        FeedbackTitle.Text = FeedbackMessage.Text = "";
+        _noticeTimer!.Stop();
+        OverlayNotice.IsOpen = false;
+        OverlayNoticeHost.Visibility = Visibility.Collapsed;
         _feedbackAction = null;
-        FeedbackButton.IsEnabled = false;
-        ToolTipService.SetToolTip(FeedbackButton, "操作提示");
     }
 
     /// <summary>After the window recovered from an error (see <see cref="CrashGuard"/>): say so once per run.</summary>

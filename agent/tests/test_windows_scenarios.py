@@ -578,6 +578,65 @@ def test_background_controls_keep_notepad_foreground(test_form):
         notepad.wait(timeout=10)
 
 
+_OPENER_FORM = r"""
+Add-Type -AssemblyName System.Windows.Forms
+$f = New-Object Windows.Forms.Form -Property @{ Text = 'winhand-opener-test'; Width = 360; Height = 200 }
+$open = New-Object Windows.Forms.Button -Property @{ Text = 'Open other'; Left = 20; Top = 20; Width = 160; Height = 40 }
+$ask = New-Object Windows.Forms.Button -Property @{ Text = 'Ask'; Left = 20; Top = 80; Width = 160; Height = 40 }
+$open.Add_Click({ (New-Object Windows.Forms.Form -Property @{ Text = 'winhand-marker-7f3a'; Width = 300; Height = 150 }).Show() })
+$ask.Add_Click({ [void][Windows.Forms.MessageBox]::Show($f, 'Sure?', 'winhand-confirm') })
+$f.Controls.AddRange(@($open, $ask))
+[void]$f.ShowDialog()
+"""
+
+
+@pytest.fixture
+def opener_form(tmp_path):
+    script = tmp_path / "opener.ps1"
+    script.write_text(_OPENER_FORM, encoding="utf-8-sig")
+    proc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)])
+    from winhand import desktop
+
+    try:
+        for _ in range(240):  # PowerShell loading WinForms on a fresh CI runner has taken over 15 s
+            try:
+                window = desktop.find_window("winhand-opener-test")
+                break
+            except desktop.DesktopError:
+                time.sleep(0.25)
+        else:
+            pytest.fail("opener test form did not appear")
+        yield window
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+async def test_a_window_the_target_does_not_own_stays_out_of_the_reply(opener_form):
+    """Epic 004 ticket 3: a second, unowned window (here of the same program, as a person's own
+    second window would be) is counted, not named, stops the steps and is not their picture; the
+    form's own dialog is named."""
+    from fastmcp import Client
+
+    from winhand import desktop
+
+    steps = [{"action": "invoke", "name": "Open other"}, {"action": "invoke", "name": "Ask"}]
+    async with Client(build_server(Config())) as client:
+        out = (
+            await client.call_tool("ui", {"window": "winhand-opener-test", "steps": steps})
+        ).structured_content
+        assert desktop.find_window("winhand-marker-7f3a")  # it did open
+        assert out["stopped"].startswith("UNEXPECTED_DIALOG: during step 1"), out
+        assert [s["step"] for s in out["steps"]] == [1] and out["steps"][0]["other_windows"] == 1, out
+        assert out["screenshot"]["window"]["hwnd"] == opener_form["hwnd"], out
+        assert "winhand-marker" not in json.dumps(out, ensure_ascii=False)
+        asked = (
+            await client.call_tool("ui", {"window": "winhand-opener-test", "action": "invoke", "name": "Ask"})
+        ).structured_content
+    assert [w["title"] for w in asked.get("new_windows", [])] == ["winhand-confirm"], asked
+    assert "other_windows" not in asked and "winhand-marker" not in json.dumps(asked, ensure_ascii=False)
+
+
 async def test_real_mouse_click_lands_where_the_screenshot_shows(test_form):
     from winhand import desktop
 

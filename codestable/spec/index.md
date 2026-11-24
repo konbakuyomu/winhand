@@ -91,7 +91,10 @@ claude.ai 连接器 / 云端会话 ──HTTPS + OAuth──▶ 中转（Cloudfl
   - agent 不需要知道自己的名字：链接和 hook 的前缀取自它连接的地址去掉末尾的 `/agent`（`config.relay_base`）。
   - 首页列出每台电脑和它的连接器地址；在首页填电脑名称和主人口令，得到一条一次性安装命令，在那台电脑的 PowerShell 里运行即装好、配好、连上。
   - 部署：Cloudflare 用 Deploy 按钮，只要主人口令；自己的服务器用 `relay/selfhost/install.sh` 一条命令，再运行就是升级，先构建再换容器，检查不过自动回退。
-- **桌面端**（`desktop/`）：日常就用它。安装包由 `vX.Y.Z` 标签触发 `.github/workflows/release.yml` 构建并签名。AI 碰不到 WinHand 自己的窗口，所以更新要主人在桌面端里点。发版和部署的步骤见 `codestable/notes/001-发版与部署.md`。
+- **桌面端**（`desktop/`）：日常就用它。
+  - 侧栏：概览、活动、MCP 服务，有会话时多一个会话（带计数）；「安全与连接」一组是密钥、程序授权、中转；页脚是设置（启动、更新、本机数据、关于）。
+  - 改界面先读视觉规范 `desktop/DESIGN.md`。颜色只在 `desktop/windows/App.xaml` 里定义，坑点见 `codestable/notes/002-桌面端的主题画刷.md`。`desktop/scripts/Capture-Preview.ps1` 用假后端按页截图，深浅色都能截。
+  - 安装包由 `vX.Y.Z` 标签触发 `.github/workflows/release.yml` 构建并签名。AI 碰不到 WinHand 自己的窗口，所以更新要主人在桌面端里点。发版和部署的步骤见 `codestable/notes/001-发版与部署.md`。
 
 ## 统一语言
 

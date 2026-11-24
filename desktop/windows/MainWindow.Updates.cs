@@ -161,41 +161,47 @@ public sealed partial class MainWindow
 
     private UIElement BuildUpdateCard()
     {
-        _updateSummary = Text("", "LabelCopyStyle");
-        _updateFacts = Text("", "SecondaryCopyStyle");
-        _updateDetail = Text("", "SecondaryCopyStyle");
+        _updateSummary = Text("", "RowTitleStyle");
+        _updateFacts = Text("", "CaptionTextStyle");
+        _updateDetail = Text("", "CaptionTextStyle");
         _updateProgress = new ProgressBar { Minimum = 0, Maximum = 100, Visibility = Visibility.Collapsed };
         _updateNotes = new StackPanel { Spacing = 6 };
         _updateNotesBox = new Border
         {
             Child = new ScrollViewer { Content = _updateNotes, MaxHeight = 220 },
-            Padding = new Thickness(12),
-            CornerRadius = new CornerRadius(6),
-            Background = Resource<Microsoft.UI.Xaml.Media.Brush>("ControlFillColorSecondaryBrush"),
+            Style = Resource<Style>("CodeBlockStyle"),
             Visibility = Visibility.Collapsed
         };
         _updateAction = ActionButton("检查更新", () => _ = UpdateActionAsync(), accent: true);
-        _updateCancel = ActionButton("取消下载", () => _downloadCancellation?.Cancel());
+        _updateCancel = ActionButton("取消", () => _downloadCancellation?.Cancel());
+        _updateCancel.Style = Resource<Style>("GhostButtonStyle");
         var history = new HyperlinkButton { Content = "所有版本与更新记录", NavigateUri = new Uri(AppUpdater.RepositoryUrl + "/releases") };
-        history.Padding = new Thickness(8, 0, 8, 0);
-        var buttons = ActionRow(_updateAction, _updateCancel, history);
+        history.Padding = new Thickness(0);
 
         _autoCheckSwitch = CompactSwitch("自动检查更新", Preferences.AutoCheckUpdates);
+        _autoCheckSwitch.VerticalAlignment = VerticalAlignment.Center;
         _autoCheckSwitch.Toggled += (_, _) =>
         {
             Preferences.AutoCheckUpdates = _autoCheckSwitch.IsOn;
             if (_autoCheckSwitch.IsOn)
                 _ = CheckAutomaticallyAsync();
         };
-        var autoRow = SettingRow("自动检查更新", "启动后和每 6 小时检查一次。发现新版本只会提醒你，确认后才下载。", _autoCheckSwitch);
+        ToolTipService.SetToolTip(_autoCheckSwitch, "启动后和每 6 小时检查一次。发现新版本只会提醒你，确认后才下载。");
+        var autoCheckText = Text("自动检查更新", "BodyTextStyle");
+        autoCheckText.VerticalAlignment = VerticalAlignment.Center;
+        var autoRow = PageControlRow(ActionRow(autoCheckText, _autoCheckSwitch), history);
 
         RenderUpdate();
         var summary = new StackPanel { Spacing = 4, Children = { _updateSummary, _updateFacts } };
-        return Card(new StackPanel
+        return new ContentControl
         {
-            Spacing = 12,
-            Children = { summary, _updateNotesBox, _updateProgress, buttons, _updateDetail, Divider(), autoRow }
-        });
+            Style = Resource<Style>("SettingsRowCardStyle"),
+            Content = new StackPanel
+            {
+                Spacing = 8,
+                Children = { PageControlRow(summary, _updateAction), PageControlRow(_updateProgress, _updateCancel), _updateNotesBox, _updateDetail, Divider(), autoRow }
+            }
+        };
     }
 
     private void RenderUpdate()

@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace Winhand.Desktop;
@@ -15,12 +17,25 @@ public sealed partial class MainWindow
     private ListView? _mcpList;
     private ContentControl? _mcpDetail;
     private bool _renderingMcpList;
+    private bool _mcpPreviewError;
+    private Grid? _mcpWorkspace;
+    private StackPanel? _mcpEmpty;
     private readonly HashSet<string> _mcpBusy = [];
 
     private UIElement BuildMcp()
     {
-        var add = ActionButton("添加服务", () => _ = EditMcpAsync(null), accent: true);
+        var add = ActionButton("", () => _ = EditMcpAsync(null), accent: true);
+        add.Content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 5,
+            Children = { new FontIcon { Glyph = "\uE710", FontSize = 14 }, new TextBlock { Text = "添加" } }
+        };
+        Named(add, "添加 MCP 服务");
+        add.MinHeight = add.Height = 30;
+        add.Padding = new Thickness(8, 4, 8, 4);
         var import = ActionButton("导入…", () => _ = ImportMcpAsync());
+        import.MinHeight = import.Height = 30;
+        import.Padding = new Thickness(8, 4, 8, 4);
         ToolTipService.SetToolTip(import, "从 Codex、Claude Desktop、Claude Code 的配置导入");
         Named(import, "从其他客户端导入");
         _mcpList = new ListView { SelectionMode = ListViewSelectionMode.Single };
@@ -33,8 +48,18 @@ public sealed partial class MainWindow
             RenderMcpDetail();
         };
         _mcpDetail = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
+        var toolbar = new StackPanel { Spacing = 8, Children = { Text("MCP 服务", "SectionTitleStyle"), ActionRow(add, import) } };
+        _mcpWorkspace = SplitWorkspace("mcp", ListPane(toolbar, _mcpList), _mcpDetail, 200, 180, 260, 380, _mcpList, "返回服务列表");
+        _mcpEmpty = EmptyState("还没有 MCP 服务",
+            "把这台电脑上的其他 MCP 服务交给 winhand，即可通过远程地址调用。",
+            ActionButton("从其他客户端导入…", () => _ = ImportMcpAsync(), accent: true),
+            ActionButton("手动添加", () => _ = EditMcpAsync(null)));
+        _mcpEmpty.HorizontalAlignment = HorizontalAlignment.Center;
+        _mcpEmpty.VerticalAlignment = VerticalAlignment.Center;
+        _mcpEmpty.Margin = new Thickness(24);
+        var root = new Grid { Children = { _mcpWorkspace, _mcpEmpty } };
         RenderMcp();
-        return SplitWorkspace("mcp", ListPane(ActionRow(add, import), _mcpList), _mcpDetail, 260, 220, 360);
+        return root;
     }
 
     private void ApplyMcp(JsonElement? state)
@@ -50,6 +75,11 @@ public sealed partial class MainWindow
     {
         RenderMcpList();
         RenderMcpDetail();
+        if (_mcpWorkspace is not null)
+        {
+            _mcpWorkspace.Visibility = McpServers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            _mcpEmpty!.Visibility = McpServers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     /// <summary>What a service's state means to a person, in one label and one line.</summary>
@@ -87,13 +117,30 @@ public sealed partial class MainWindow
         _renderingMcpList = true;
         _mcpList.Items.Clear();
         var servers = McpServers;
+        if (!_mcpPreviewError && PreviewState("error") && servers.Count > 0)
+        {
+            _mcpPreviewError = true;
+            var error = servers.FirstOrDefault(s => Json.Str(Json.Obj(s, "status"), "error") is { Length: > 0 });
+            if (error.ValueKind == JsonValueKind.Object)
+                _mcpSelection = Json.Str(error, "name");
+        }
         if (_mcpSelection is null || servers.All(s => Json.Str(s, "name") != _mcpSelection))
             _mcpSelection = servers.Select(s => Json.Str(s, "name")).FirstOrDefault();
         foreach (var server in servers)
         {
             var name = Json.Str(server, "name") ?? "";
-            var (label, detail, tone) = McpState(server);
-            var item = ListRow(name, name, $"{label} · {detail}", tone);
+            var (label, _, tone) = McpState(server);
+            var dot = new Ellipse { Style = DotStyle(tone), Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 6, 0, 0) };
+            var text = new StackPanel { Spacing = 2 };
+            text.Children.Add(new TextBlock { Text = name, Style = Resource<Style>("MonoTitleStyle"), TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.NoWrap });
+            text.Children.Add(Text(label, "CaptionTextStyle"));
+            var row = new Grid { ColumnSpacing = 9 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.Children.Add(dot);
+            Grid.SetColumn(text, 1);
+            row.Children.Add(text);
+            var item = Named(new ListViewItem { Content = row, Tag = name, Padding = new Thickness(10, 9, 10, 9), HorizontalContentAlignment = HorizontalAlignment.Stretch }, $"{name}，{label}");
             _mcpList.Items.Add(item);
             if (name == _mcpSelection)
                 _mcpList.SelectedItem = item;
@@ -108,20 +155,15 @@ public sealed partial class MainWindow
         var servers = McpServers;
         if (servers.Count == 0)
         {
-            var page = PagePanel();
-            page.Children.Add(EmptyState(
-                "还没有 MCP 服务",
-                "把这台电脑上的其他 MCP 服务（调试器、摄像头、CAD …）交给 winhand，它们就各自有一个远程地址，" +
-                "在 claude.ai 里添加为自定义连接器即可使用。winhand 原样转发，不改工具名，也不和 winhand 自己的工具混在一起。",
-                ActionButton("从其他客户端导入…", () => _ = ImportMcpAsync(), accent: true),
-                ActionButton("手动添加", () => _ = EditMcpAsync(null))));
-            _mcpDetail.Content = DetailPane(page);
+            _mcpDetail.Content = null;
             return;
         }
         var selected = servers.FirstOrDefault(s => Json.Str(s, "name") == _mcpSelection);
         if (selected.ValueKind != JsonValueKind.Object)
             selected = servers[0];
-        _mcpDetail.Content = DetailPane(McpDetail(selected));
+        var scroll = DetailPane(McpDetail(selected));
+        scroll.Padding = new Thickness(22, 18, 24, 28);
+        _mcpDetail.Content = scroll;
     }
 
     private StackPanel McpDetail(JsonElement server)
@@ -130,121 +172,148 @@ public sealed partial class MainWindow
         var enabled = Json.Bool(server, "enabled");
         var http = Json.Str(server, "kind") == "http";
         var status = Json.Obj(server, "status");
-        var (label, detail, tone) = McpState(server);
+        var (label, _, tone) = McpState(server);
         var busy = _mcpBusy.Contains(name);
         var page = PagePanel();
+        page.Spacing = 20;
 
-        page.Children.Add(DetailHeader(name, Json.Str(server, "description") ?? "", Pill(label, tone), null));
+        var title = Text(name, "MonoTitleStyle");
+        title.FontSize = 20;
+        title.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
+        title.TextWrapping = TextWrapping.NoWrap;
+        title.TextTrimming = TextTrimming.CharacterEllipsis;
+        var titleLine = new Grid { ColumnSpacing = 9 };
+        titleLine.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        titleLine.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        titleLine.Children.Add(title);
+        var pill = Pill(label, tone);
+        pill.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(pill, 1);
+        titleLine.Children.Add(pill);
+        var heading = new StackPanel { Spacing = 4, Children = { titleLine, Text(Json.Str(server, "description") ?? "", "CaptionTextStyle") } };
+        heading.SizeChanged += (_, _) => title.MaxWidth = Math.Max(0, heading.ActualWidth - pill.ActualWidth - 9);
+        var edit = Named(ActionButton("编辑", () => _ = EditMcpAsync(server)), $"编辑 {name}");
+        var more = new Button { Style = Resource<Style>("IconGhostButtonStyle"), Content = new FontIcon { Glyph = "\uE712", FontSize = 14 } };
+        Named(more, $"{name} 的更多操作");
+        var delete = new MenuFlyoutItem { Text = "删除服务…", Style = Resource<Style>("DangerMenuFlyoutItemStyle") };
+        delete.Click += (_, _) => _ = DeleteMcpAsync(name);
+        more.Flyout = new MenuFlyout { Items = { delete } };
+        var actions = ActionRow(edit, more);
+        var head = new Grid { ColumnSpacing = 12 };
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        head.Children.Add(heading);
+        Grid.SetColumn(actions, 1);
+        head.Children.Add(actions);
+        page.Children.Add(head);
 
-        // ---- remote access
         var offered = CompactSwitch($"对外提供 {name}", enabled);
         offered.Toggled += async (_, _) =>
         {
             offered.IsEnabled = false;
             ApplyMcp(await RequestAsync("mcp_set_enabled", new Dictionary<string, object?> { ["name"] = name, ["enabled"] = offered.IsOn }));
         };
+        var offerRow = SettingRow("对外提供", enabled
+            ? "远程客户端可通过下方地址调用它。"
+            : "已关闭：远程客户端无法调用，正在运行的进程已停止。", offered);
+        offerRow.Padding = new Thickness(16, 13, 16, 13);
         var publicUrl = Json.Str(server, "public_url");
         var address = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
-        address.Children.Add(Text("远程地址", "LabelCopyStyle"));
-        if (publicUrl is not null)
-        {
-            var url = Text(publicUrl, "DataCopyStyle");
-            url.FontSize = 13;
-            address.Children.Add(url);
-        }
-        else
-            address.Children.Add(Text("在设置里配置中转后生成。", "SecondaryCopyStyle"));
-        FrameworkElement addressAction = publicUrl is not null
-            ? Named(ActionButton("复制", () => CopyText(publicUrl, $"已复制 {name} 的地址",
-                "在 claude.ai 的“设置 → 连接器 → 添加自定义连接器”里粘贴；第一次连接时输入 winhand 口令授权。")), $"复制 {name} 的远程地址")
-            : ActionButton("去设置", () => ShowPage("settings"));
-        var addressRow = new Grid { ColumnSpacing = 20 };
+        address.Children.Add(Text("远程地址", "RowTitleStyle"));
+        var url = Text(publicUrl ?? "配置中转后生成", publicUrl is null ? "CaptionTextStyle" : "MonoDataStyle");
+        url.TextWrapping = TextWrapping.NoWrap;
+        url.TextTrimming = TextTrimming.CharacterEllipsis;
+        if (publicUrl is not null) ToolTipService.SetToolTip(url, publicUrl);
+        address.Children.Add(url);
+        var addressAction = publicUrl is not null
+            ? Named(ActionButton("复制", () => CopyText(publicUrl, $"已复制 {name} 的地址", "")), $"复制 {name} 的远程地址")
+            : ActionButton("去配置中转", () => ShowPage("relay"));
+        var addressRow = new Grid { ColumnSpacing = 12, Padding = new Thickness(16, 13, 16, 13) };
         addressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         addressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         addressRow.Children.Add(address);
         addressAction.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(addressAction, 1);
         addressRow.Children.Add(addressAction);
-        page.Children.Add(Section("远程访问", "",
-            RowsPanel(
-                SettingRow("对外提供", enabled
-                    ? "claude.ai 等远程客户端可以通过下面的地址调用它。"
-                    : "已关闭：远程客户端无法调用，正在运行的进程已停止。", offered),
-                addressRow)));
+        var remote = Card(new StackPanel { Children = { offerRow, Divider(), addressRow } });
+        remote.Padding = new Thickness(0);
+        page.Children.Add(new StackPanel { Spacing = 8, Children = { Text("远程访问", "SectionTitleStyle"), remote } });
 
-        // ---- runtime
         if (enabled)
         {
             var info = Json.Obj(status, "server");
             var used = Json.Num(status, "last_used") is { } lastUsed ? $"，最近一次在 {Format.Since(lastUsed)}前" : "";
             var facts = Facts(
-                ("状态", $"{label} · {detail}", false),
+                ("状态", label, false),
                 ("服务程序", Json.Str(info, "name") is { } serverName ? $"{serverName} {Json.Str(info, "version")}" : "", false),
                 ("协议版本", Json.Str(status, "protocol") ?? "", true),
                 ("进程", Json.Num(status, "pid") is { } pid ? $"{pid:0}" : "", true),
-                ("工具调用", Json.Num(status, "calls") is > 0 and var calls ? $"{calls:0} 次{used}" : "", false),
-                ("远程会话", Json.Num(status, "sessions") is > 0 and var sessions ? $"{sessions:0} 个" : "", false));
+                ("工具调用", $"{Json.Num(status, "calls") ?? 0:0} 次{used}", false),
+                ("远程会话", $"{Json.Num(status, "sessions") ?? 0:0} 个", false));
+            facts.ColumnDefinitions[0].Width = new GridLength(68);
             var runtime = new StackPanel { Spacing = 12 };
-            runtime.Children.Add(facts);
             if (Json.Str(status, "error") is { Length: > 0 } error)
             {
-                runtime.Children.Add(Text(error, "ErrorCopyStyle"));
+                runtime.Children.Add(new InfoBar { Severity = InfoBarSeverity.Error, IsOpen = true, IsClosable = false, Message = error });
                 var tail = Json.Arr(status, "stderr_tail").Select(l => l.GetString() ?? "").Where(l => l.Length > 0).ToList();
-                if (tail.Count > 0)
-                    runtime.Children.Add(CodeBlock(string.Join("\n", tail.TakeLast(12))));
+                if (tail.Count > 0) runtime.Children.Add(CodeBlock(string.Join("\n", tail.TakeLast(12))));
             }
+            runtime.Children.Add(facts);
             var test = Named(ActionButton(busy ? "处理中…" : "测试", () => _ = TestMcpAsync(name)), $"测试 {name}");
             test.IsEnabled = !busy;
-            var actions = ActionRow(test);
+            var runtimeActions = ActionRow(test);
             if (!http && Json.Str(status, "state") is "running" or "error" or "unresponsive")
             {
                 var restart = Named(ActionButton("重启", () => _ = RestartMcpAsync(name)), $"重启 {name}");
                 restart.IsEnabled = !busy;
-                actions.Children.Add(restart);
+                runtimeActions.Children.Add(restart);
             }
             if (Json.Str(status, "log_file") is { } log)
-                actions.Children.Add(Named(ActionButton("打开日志", () => OpenPath(log, select: true)), $"打开 {name} 的日志"));
-            runtime.Children.Add(actions);
-            page.Children.Add(Section("运行", http ? "请求直接转发到这个本机地址。" : "第一次被调用时启动；崩溃或卡住不响应时会自动重启。", Card(runtime)));
+            {
+                var openLog = Named(ActionButton("打开日志", () => OpenPath(log, select: true)), $"打开 {name} 的日志");
+                openLog.Style = Resource<Style>("GhostButtonStyle");
+                runtimeActions.Children.Add(openLog);
+            }
+            runtime.Children.Add(runtimeActions);
+            var runtimeCard = Card(runtime);
+            runtimeCard.Padding = new Thickness(16, 14, 16, 14);
+            page.Children.Add(new StackPanel { Spacing = 8, Children = { Text("运行状态", "SectionTitleStyle"), runtimeCard } });
         }
 
-        // ---- how it is started
         var env = Json.Obj(server, "env") is { ValueKind: JsonValueKind.Object } values
-            ? string.Join("\n", values.EnumerateObject().Select(kv => $"{kv.Name}={kv.Value.GetString()}"))
-            : "";
+            ? string.Join("\n", values.EnumerateObject().Select(kv => $"{kv.Name}={kv.Value.GetString()}")) : "";
         var headers = Json.Obj(server, "headers") is { ValueKind: JsonValueKind.Object } headerValues
-            ? string.Join("\n", headerValues.EnumerateObject().Select(kv => $"{kv.Name}: {kv.Value.GetString()}"))
-            : "";
-        var launch = http
+            ? string.Join("\n", headerValues.EnumerateObject().Select(kv => $"{kv.Name}: {kv.Value.GetString()}")) : "";
+        var launch = new StackPanel { Spacing = 12 };
+        if (!http)
+        {
+            var args = Json.Arr(server, "args").Select(a => a.GetString() ?? "").Select(a => a.Contains(' ') ? $"\"{a}\"" : a);
+            var command = string.Join(" ", new[] { Json.Str(server, "command") ?? "" }.Concat(args));
+            launch.Children.Add(CodeBlock(command));
+        }
+        var launchFacts = http
             ? Facts(("地址", Json.Str(server, "url") ?? "", true), ("请求头", headers, true))
             : Facts(
-                ("命令", Json.Str(server, "command") ?? "", true),
-                ("参数", string.Join("\n", Json.Arr(server, "args").Select(a => a.GetString())), true),
                 ("工作目录", Json.Str(server, "cwd") ?? "", true),
                 ("环境变量", env, true),
                 ("启动超时", $"{Json.Num(server, "startup_timeout_s") ?? 60:0} 秒", false),
                 ("闲置停止", Json.Num(server, "idle_stop_minutes") is > 0 and var idle ? $"{idle:0} 分钟无调用后停止" : "", false));
-        var edit = Named(ActionButton("编辑…", () => _ = EditMcpAsync(server)), $"编辑 {name}");
-        page.Children.Add(Section("启动方式", http ? "本机已经以 HTTP 提供的 MCP 服务" : "winhand 用这条命令在本机启动它（stdio）",
-            Card(new StackPanel { Spacing = 12, Children = { launch, ActionRow(edit) } })));
-
-        // ---- removal, apart from everything else
-        var delete = Named(ActionButton("删除…", () => _ = DeleteMcpAsync(name)), $"删除 {name}");
-        page.Children.Add(RowsPanel(SettingRow("删除这个服务", "从 winhand 的配置里移除并停止它；服务本身的程序和数据不受影响。", delete)));
+        launchFacts.ColumnDefinitions[0].Width = new GridLength(68);
+        launch.Children.Add(launchFacts);
+        var launchCard = Card(launch);
+        launchCard.Padding = new Thickness(16, 14, 16, 14);
+        page.Children.Add(new StackPanel { Spacing = 8, Children = { Text("启动方式", "SectionTitleStyle"), launchCard } });
         return page;
     }
 
     private static Border CodeBlock(string text)
     {
-        var block = Text(text, "DataCopyStyle");
+        var block = Text(text, "MonoDataStyle");
         block.TextWrapping = TextWrapping.Wrap;
-        return new Border
-        {
-            Child = block,
-            Padding = new Thickness(12),
-            CornerRadius = new CornerRadius(6),
-            Background = Resource<Microsoft.UI.Xaml.Media.Brush>("ControlFillColorSecondaryBrush")
-        };
+        block.IsTextSelectionEnabled = true;
+        var border = new Border { Style = Resource<Style>("CodeBlockStyle") };
+        border.Child = block;
+        return border;
     }
 
     private async Task RestartMcpAsync(string name)
@@ -329,9 +398,7 @@ public sealed partial class MainWindow
             foreach (var tool in tools)
             {
                 var row = new StackPanel { Spacing = 2 };
-                var toolName = Text(Json.Str(tool, "name") ?? "", "DataCopyStyle");
-                toolName.FontSize = 13;
-                toolName.Foreground = Resource<Microsoft.UI.Xaml.Media.Brush>("TextFillColorPrimaryBrush");
+                var toolName = Text(Json.Str(tool, "name") ?? "", "MonoTitleStyle");
                 row.Children.Add(toolName);
                 if (Json.Str(tool, "description") is { Length: > 0 } description)
                     row.Children.Add(Text(description, "SecondaryCopyStyle"));

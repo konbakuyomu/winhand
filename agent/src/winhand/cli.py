@@ -316,7 +316,7 @@ def _apps(action: str, exe: str | None) -> int:
     if action == "off":
         question = (
             "确定关闭程序授权吗？\n\n关闭后，AI 点击、输入、操作任何程序前都不再先问你"
-            "（WinHand 自己的窗口和管理员窗口仍然不能操作）。\n随时可以用 winhand apps on 或在设置页重新开启。"
+            "（WinHand 自己的窗口和管理员窗口仍然不能操作）。\n随时可以用 winhand apps on 或在桌面端的「程序授权」页重新开启。"
         )
     else:
         try:
@@ -326,7 +326,7 @@ def _apps(action: str, exe: str | None) -> int:
             return 2
         question = (
             f"确定让 AI 一直可以操作 {key} 吗？\n\n它将可以点击、输入、操作这个程序的控件和窗口，不再先问你。"
-            "\n随时可以在 WinHand 的设置页或用 winhand apps revoke 撤销。"
+            "\n随时可以在 WinHand 的「程序授权」页或用 winhand apps revoke 撤销。"
         )
     try:
         yes = ask_confirm("WinHand：程序授权", question)
