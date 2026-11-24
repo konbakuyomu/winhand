@@ -33,7 +33,8 @@ $previousDpi = [PreviewCapture]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
 if ($previousDpi -eq 0) { throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
 try {
     foreach ($page in $Pages) {
-        $env:WINHAND_DESKTOP_INSTANCE = 'preview'
+        # one instance key per checkout: two worktrees can take screenshots at the same time
+        $env:WINHAND_DESKTOP_INSTANCE = 'preview-' + (Split-Path (Split-Path $desktop -Parent) -Leaf)
         $env:WINHAND_BACKEND_PATH = (Get-Command python).Source
         $env:WINHAND_BACKEND_ARGS = $backend
         $env:WINHAND_PREVIEW_SCENARIO = $Scenario
