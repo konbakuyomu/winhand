@@ -703,6 +703,21 @@ class BackgroundGuard:
                 user32.EnableWindow(self.top, not self.disabled)
 
 
+def background_ok(w: dict) -> bool:
+    """A ui action on window w may go on while the person uses the machine (presence.acting with
+    background=True): it runs under BackgroundGuard, takes no foreground and sends no input. Not when
+    the window in front belongs to w's program (the person is working in it) and not for WPF, whose
+    controls take the focus themselves."""
+    if not IS_WINDOWS or host_kind(w.get("class") or "") == "wpf":
+        return False
+    front = user32.GetForegroundWindow()
+    if not front:
+        return True
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(front, ctypes.byref(pid))
+    return pid.value != w.get("pid")
+
+
 @contextlib.contextmanager
 def background(hwnd):
     guard = BackgroundGuard(hwnd)

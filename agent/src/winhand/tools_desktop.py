@@ -922,10 +922,12 @@ def _ui_steps(w: dict, steps: list[dict], verify_wait_s: float) -> dict:
     results: list[dict] = []
     stopped = None
     shot_of = hwnd
+    background = desktop.background_ok(w)
     for n, step in enumerate(steps, 1):
         action = (step.get("action") or "").strip()
         try:
-            with presence.acting(f"ui step {n} {action}"):  # the stop keys end the steps here
+            # the stop keys end the steps here; keys and text wait for the person inside (window focus, input)
+            with presence.acting(f"ui step {n} {action}", background=background):
                 if action in ("keys", "type"):
                     text = step.get("value") or ""
                     desktop.require_operable(hwnd, f"按键：{text[:40]}" if action == "keys" else "输入文字")
@@ -1398,7 +1400,8 @@ def register(mcp: FastMCP) -> None:
             if action == "inspect":
                 desktop.require_capture(w)  # a password manager's control text is as private as its picture
                 return _ui_inspect(w, filter, name, automation_id, control_type)
-            with presence.acting(f"ui {action}") as said:  # waits while the person uses the machine
+            # waits while the person uses the machine, unless it can go on in the background
+            with presence.acting(f"ui {action}", background=desktop.background_ok(w)) as said:
                 out = _ui_act(
                     w,
                     action,

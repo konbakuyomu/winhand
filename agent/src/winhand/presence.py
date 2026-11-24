@@ -7,6 +7,11 @@ the middle of whatever the person at the machine is doing. Now:
   used the mouse or keyboard in the last `owner_idle_s` seconds, for at most WAIT_S, and then answers
   that the person is using the machine. Input winhand sent itself does not count, nor does the
   person answering one of winhand's own dialogs (an approval, a secret, a file picker).
+- A ui action in the background does not wait (Epic 004, 2026-11-25): it runs under
+  desktop.BackgroundGuard, takes no foreground and sends no input, so it cannot land in the middle of
+  what the person types. Background means the window in front belongs to another program and the
+  target is not WPF (desktop.background_ok). A foreground step inside one (the real click a ui action
+  falls back to, keys and text in steps) still waits.
 - Ctrl+Alt+Shift+Backspace stops the AI's desktop actions: they are refused for STOP_S after it,
   and the answer says the person stopped them. The keys are registered when winhand starts (live test
   2026-11-01: registered only at the first desktop action, a press right after an update was missed),
@@ -184,9 +189,10 @@ def resume() -> None:
 # ------------------------------------------------------------------ before an action
 
 
-def before(what: str) -> dict:
-    """Wait for the owner to leave the mouse and keyboard, or refuse when they stopped the AI.
-    Returns what the caller should mention (empty when nothing happened)."""
+def before(what: str, wait: bool = True) -> dict:
+    """Wait for the owner to leave the mouse and keyboard (not for a background action: wait=False),
+    or refuse when they stopped the AI. Returns what the caller should mention (empty when nothing
+    happened)."""
     from . import desktop
 
     left = stopped_left()
@@ -196,7 +202,7 @@ def before(what: str) -> dict:
             f"({what}). Ask them before going on (refused for {left:.0f} s more)"
         )
     conf = settings()
-    if not conf["yield"]:
+    if not wait or not conf["yield"]:
         return {}
     began = time.monotonic()
     while (ago := owner_input_ago(conf["idle_s"])) is not None:
@@ -213,12 +219,18 @@ def before(what: str) -> dict:
 
 
 @contextlib.contextmanager
-def acting(what: str) -> Iterator[dict]:
-    """Around a desktop action: wait for the owner (outermost call only), show the frame, and
-    take it away a little after the last action."""
+def acting(what: str, background: bool = False) -> Iterator[dict]:
+    """Around a desktop action: wait for the owner, show the frame, and take it away a little after
+    the last action. Nested actions wait once, at the outermost one that may wait: a background ui
+    action waits for nobody, a foreground step inside it (its fallback click, keys) does."""
     global _active, _quiet_since
     depth = getattr(_local, "depth", 0)
-    said = before(what) if depth == 0 else {}
+    waited = getattr(_local, "waited", False) if depth else False
+    if depth == 0 or not (background or waited):
+        said = before(what, wait=not background)
+    else:
+        said = {}
+    _local.waited = waited or not background
     _local.depth = depth + 1
     with _lock:
         _active += 1
@@ -227,7 +239,7 @@ def acting(what: str) -> Iterator[dict]:
     try:
         yield said
     finally:
-        _local.depth = depth
+        _local.depth, _local.waited = depth, waited
         with _lock:
             _active -= 1
             _quiet_since = time.monotonic()
