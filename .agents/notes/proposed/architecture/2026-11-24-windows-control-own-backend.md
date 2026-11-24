@@ -24,7 +24,7 @@ Status: proposed
 
 ### 第一步：两招防抢焦点守卫（1–2 人日）
 
-2026-11-24 已实现，在主人电脑上验收中。落点是 `desktop.BackgroundGuard`、`desktop.background()`、`uia._guarded()`，以及 `tools_desktop._ui_act` 里的五处后台动作调用。细节和出入见 Epic 004 第 1 张票的执行记录。
+2026-11-24 已实现，11-25 在主人电脑上验收通过：主人打字时 90 个动作，前台变化 0，注入 0。落点是 `desktop.BackgroundGuard`、`desktop.background()`、`uia._guarded()`，以及 `tools_desktop._ui_act` 里的五处后台动作调用。细节和出入见 Epic 004 第 1 张票的执行记录。
 
 两招都来自 CUA 驱动的源码（trycua/cua，MIT，`libs/cua-driver/rust/crates/platform-windows/src`）。实现时照着写，不复制代码：
 

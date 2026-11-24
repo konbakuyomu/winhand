@@ -658,12 +658,14 @@ def _on_current_desktop(hwnd) -> bool:
             _methods_ = [comtypes.COMMETHOD([], comtypes.HRESULT, "IsWindowOnCurrentVirtualDesktop",
                 (["in"], wintypes.HWND, "hwnd"), (["out"], ctypes.POINTER(wintypes.BOOL), "current"))]  # fmt: skip
 
-        comtypes.CoInitialize()
+        # COM stays initialized on this thread, as on the UI Automation worker: uninitializing it here
+        # let the manager be released after CoUninitialize, an access violation (CI, 2026-11-24)
         try:
-            manager = CreateObject("{AA509086-5CA9-4C25-8F95-589D3C07B48A}", interface=IVirtualDesktopManager)
-            return bool(manager.IsWindowOnCurrentVirtualDesktop(hwnd))
-        finally:
-            comtypes.CoUninitialize()
+            comtypes.CoInitializeEx(0)  # COINIT_MULTITHREADED; S_FALSE when the thread already has it
+        except OSError:
+            pass  # RPC_E_CHANGED_MODE: the thread already has COM in the other apartment model
+        manager = CreateObject("{AA509086-5CA9-4C25-8F95-589D3C07B48A}", interface=IVirtualDesktopManager)
+        return bool(manager.IsWindowOnCurrentVirtualDesktop(hwnd))
     except Exception:  # COM failure: treat the window as being on the current desktop
         return True
 
