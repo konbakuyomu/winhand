@@ -36,7 +36,17 @@ public sealed partial class MainWindow : Window
         _appWindow.Title = "winhand";
         _appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "winhand.ico"));
         var scale = GetDpiForWindow(_hwnd) / 96.0; // AppWindow sizes are physical pixels
-        _appWindow.Resize(new Windows.Graphics.SizeInt32((int)(1180 * scale), (int)(760 * scale)));
+        var width = 1180;
+        var height = 760;
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE"))
+            && Environment.GetEnvironmentVariable("WINHAND_DESKTOP_SIZE")?.Split('x') is [var w, var h]
+            && int.TryParse(w, out var previewWidth) && previewWidth > 0
+            && int.TryParse(h, out var previewHeight) && previewHeight > 0)
+        {
+            width = previewWidth;
+            height = previewHeight;
+        }
+        _appWindow.Resize(new Windows.Graphics.SizeInt32((int)(width * scale), (int)(height * scale)));
         _appWindow.Closing += OnAppWindowClosing;
 
         _tray = new NativeTray(_hwnd, ShowMainWindow, TrayMenu);
@@ -48,6 +58,9 @@ public sealed partial class MainWindow : Window
         InitializeFeedback();
         BuildPages();
         ShowPage("overview", fromNavigation: true); // the XAML already selects it; setting it again misplaces the indicator
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE"))
+            && Environment.GetEnvironmentVariable("WINHAND_DESKTOP_PAGE") is { } page && _pages.ContainsKey(page))
+            ShowPage(page);
         // Check that an error escaping a XAML callback is logged and survived (CrashGuard).
         if (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_SELFTEST") == "ui-error")
             RootNavigation.Loaded += (_, _) => throw new ArgumentException("WINHAND_DESKTOP_SELFTEST=ui-error");
@@ -255,6 +268,13 @@ public sealed partial class MainWindow : Window
 
     internal void ShowMainWindow()
     {
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE"))
+            && !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_PAGE")))
+        {
+            _everShown = true;
+            _appWindow.Show(false);
+            return;
+        }
         if (!_everShown)
         {
             _everShown = true;

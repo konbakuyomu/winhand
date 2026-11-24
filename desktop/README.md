@@ -25,3 +25,12 @@ $env:WINHAND_BACKEND_ARGS = 'run --project D:\path\to\winhand\agent winhand'
 ```
 
 图标和看板娘由 `uv run desktop/scripts/build_icons.py` 从 `assets/branding/source.webp` 生成。
+
+## 界面预览
+
+运行 `pwsh -File desktop\scripts\Capture-Preview.ps1`，构建独立预览并逐页截图到 `desktop\out\preview\shots`。
+再次截图可加 `-NoBuild`；用 `-Pages overview` 只截概览，`-OutDir` 指定输出目录，`-Size 853x1018` 指定逻辑尺寸。
+`-Scenario default` 展示丰富的假数据；`-Scenario empty` 展示未配置、空列表的界面。假后端仅修改内存，不读写真实配置。
+`WINHAND_DESKTOP_INSTANCE` 非空时启用独立的开发实例，可与已安装的 winhand 并排运行。
+`WINHAND_DESKTOP_PAGE` 指定启动页 Tag（overview、activity、sessions、mcp、settings），并让开发窗口显示时不抢焦点。
+`WINHAND_DESKTOP_SIZE` 指定开发窗口的逻辑宽高（宽x高），按屏幕缩放换算；格式无效时仍用 1180×760。
