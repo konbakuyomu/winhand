@@ -718,6 +718,22 @@ def background_ok(w: dict) -> bool:
     return pid.value != w.get("pid")
 
 
+def root_owner(hwnd: int) -> int:
+    """The window at the top of hwnd's owner chain, hwnd itself when nothing owns it: a dialog or
+    popup shares it with the window it belongs to (GA_ROOTOWNER)."""
+    if not IS_WINDOWS:
+        return hwnd
+    return int(user32.GetAncestor(wintypes.HWND(hwnd), 3) or hwnd)
+
+
+def in_front(hwnd: int) -> bool:
+    """Whether this top-level window is the one in front, which keys and text go to."""
+    if not IS_WINDOWS:
+        return False
+    front = user32.GetForegroundWindow()
+    return bool(front) and int(user32.GetAncestor(front, 2) or front) == hwnd  # GA_ROOT
+
+
 @contextlib.contextmanager
 def background(hwnd):
     guard = BackgroundGuard(hwnd)
@@ -1228,6 +1244,11 @@ _window_scale: dict[int, float] = {}  # scale of the latest screenshot of each w
 _lock = threading.Lock()
 PEEK_S = 0.4  # a minimized window shown again needs a moment to draw itself
 PEEK_NOTE = "the window was minimized: it was shown without taking the focus for this picture, then put back"
+CAPTURE_OCCLUDED = (
+    "CAPTURE_OCCLUDED: Windows gave no picture of this window itself (PrintWindow failed or drew only "
+    "black: GPU-drawn or protected content). The screen in its place was not used instead, since "
+    "another window may cover it. Its controls can still be read: ui(window, action='inspect')."
+)
 
 
 def require_capture(w: dict) -> None:
@@ -1373,7 +1394,8 @@ def capture(
 ) -> tuple[object, dict]:
     """The full-resolution picture of a window (even when covered by others), a monitor, a region
     [left, top, width, height] or the whole desktop, and where it sits on the screen:
-    {'left', 'top', 'target', 'key', 'note'?}."""
+    {'left', 'top', 'target', 'key', 'note'?}. A window's picture is only ever its own drawing:
+    when Windows gives none, CAPTURE_OCCLUDED, never the screen in its place (Epic 004 ticket 3)."""
     from . import secret_store
 
     if secret_store.shown():  # masking covers text, not pictures
@@ -1412,6 +1434,9 @@ def capture(
             if image is None:
                 raise DesktopUnavailable(state)
             target["note"] = DESKTOP_MESSAGES[state] + " This picture is the window's own drawing."
+        if image is None:
+            # the screen in that place could show another window over it: the person's, perhaps
+            raise DesktopError(CAPTURE_OCCLUDED)
     else:
         if state != "ok":
             raise DesktopUnavailable(state)

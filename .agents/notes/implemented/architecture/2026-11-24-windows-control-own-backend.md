@@ -44,9 +44,22 @@ Status: implemented
 - `ui` 的单个动作和 `steps` 把 `background_ok(w)` 交给 `presence`。`input`、`window`、`ocr` 的点击不变，照旧让路。`yield_to_owner` 的名字不变，现在管的是前台输入。
 - 这部分取代了 [desktop-gives-way-to-owner](../feature/2026-11-01-desktop-gives-way-to-owner.md) 里「所有桌面动作先等人停手」的范围，急停和边框不变。
 
+### 无关窗口不进回复（第 3 张票）
+
+AI 操作窗口 A 时，主人开的窗口 B 不管是别的程序，还是同一程序的第二个窗口，标题和图像都不进工具的回复。
+
+- **新窗口按拥有关系报**：动作后新出现的窗口，只有 A 拥有的（`desktop.root_owner`，即 `GA_ROOTOWNER` 和 A 相同：A 的对话框、弹窗）才在 `new_windows` 里报标题，最多 5 个。其余只在 `other_windows` 里报个数。等对话框出现时，先出现的无关窗口不算等到。
+- **`steps`**：
+  - 最后的图只对准 A 或 A 的对话框；
+  - 中途出现 A 不拥有的窗口就停下，`stopped` 以 `UNEXPECTED_DIALOG` 开头，不带那个窗口的标题和图；最后一步之后才出现的只计数。
+- **按窗口取图只用窗口自己画的**：`PrintWindow` 失败或全黑时回 `CAPTURE_OCCLUDED`，不再改截屏幕上同一块地方。截图、OCR、等画面都经 `desktop.capture`。整屏、按显示器、按区域的截图照旧，那是主人允许看的整块屏幕。
+- **`keys`、`type` 步**：
+  - A 切不到前台就停在这一步，回 `blocked_before_input`。主人在用电脑或按了急停时，照常报那两种错，不再被吞掉。
+  - 发送前经 `input_action(window=…)` 再查一次 A 在前台。
+  - 按完以后前台不是 A，结果里只写 `another window`，不报那个窗口的标题。
+
 ### Epic 004 接着做的
 
-- 止血（第 3 张票）：`new_windows` 只报同一程序的窗口；按窗口取图和 OCR 不退回屏幕像素；`steps` 切前台失败就停。
 - 第三轮定的控制会话：范围分窗口、程序实例、标签页、全局四档；信号会话期间一直亮；暂停和停止；后台做不到时回 `BACKGROUND_UNAVAILABLE`，经主人批准再借用前台。
 - 第一、二轮定的工具契约：`view_id`、短表、diff、默认不回图，以及效果回执（`confirmed`、`no_change`、「已发送待核验」）。
 - 浏览器标签组扩展：MV3，`tabGroups` 加 `chrome.debugger`，经 Native Messaging 连 winhand。
@@ -79,6 +92,15 @@ Status: implemented
     - 独立浏览器不是主人要的。主人要的是他自己浏览器里的标签页，那要扩展。
     - 先借后换，中间写的进程通信、状态转换都要扔掉。
     - m297、m300 约定了转向条件：winhand 自己做不到，并且 4 人日内补不上，才改成 C。配对实测没触发这个条件。
+- **新窗口按进程算：和 A 同一进程的也报标题。** 第 3 张票方案一节原来这样写。
+  - 最强的理由：程序新开的主窗口（「新建窗口」、安装程序换页）能直接报出来，AI 少查一次窗口列表。
+  - 否掉的原因：主人从任务栏给同一程序再开一个窗口时，Chrome、资源管理器、记事本都在原进程里开。按进程算，它的标题就进了回复，`steps` 的图也可能对准它。只认拥有关系的代价是：AI 要找它自己开出的新主窗口，得用 `window(action='list')`。
+- **全黑时，A 在最前、没被挡就仍截屏幕。**
+  - 最强的理由：GPU 画的窗口（视频、游戏）在前台时，屏幕上那块就是它自己，AI 照样能看。
+  - 否掉的原因：
+    - 判断「没被挡」要逐个比较上面的窗口，透明、置顶、分层窗口都容易算错；
+    - 设了显示亲和性、不让截图的窗口，在屏幕截图里根本不出现，截到的是它背后的窗口。
+    - AI 真要看屏幕，可以明确截整屏或区域，结果标的是屏幕，不会当成 A。被挡住也要截到，留给 WGC 取图（Epic「暂不推进」）。
 - **只改让路规则，不加守卫。** 第四轮 codex-c 最初的判断（m293）。
   - 最强的理由：`ui` 本来就用 UIA 的模式和 `BM_CLICK`，看起来只差「不等主人」这条规矩。
   - 否掉的原因：配对实测里，主人打字时 UIA 调用照样每轮抢 2 次焦点，字串进了 AI 的窗口。只放开等待，等于让 AI 抢主人的输入。
@@ -100,6 +122,8 @@ Status: implemented
   - **每次控件动作多几次系统调用**：加样式、撤样式、判断虚拟桌面。实测写值的中位数是 39–69 毫秒。
   - **崩溃时窗口可能停在禁用状态**，要主人关掉那个程序再打开。见「两招守卫」。
   - **没在主人电脑上实测的**：Chromium、Electron、Office 窗口，只有单测和 CI 的 WinForms 场景覆盖。
+  - **AI 自己开出的新主窗口不再直接报标题**，只计数，要它用窗口列表找。
+  - **PrintWindow 截不到的窗口**（GPU 画的、受保护的内容）按窗口截图只回 `CAPTURE_OCCLUDED`，要看就截整屏或区域。
 - **何时重访**：碰上 WPF 程序必须后台操作；或者主人报告守卫期间退出后窗口变灰。
 
 ## Verification
@@ -107,7 +131,10 @@ Status: implemented
 - 单测：
   - `agent/tests/test_background_guard.py`（14 项）：类名分类；只撤自己加的；原来禁用的仍禁用；超时时等调用结束再撤。
   - `agent/tests/test_background_presence.py`（10 项）：后台动作不等，前台动作和嵌套的前台步骤照旧等；急停照样拒；`background_ok` 的几种情况；`ui` 工具把 `background` 交给 `presence`。
-- Windows 场景测试：`test_background_controls_keep_notepad_foreground`，在 CI 的 windows-latest 上通过：第 1 张票 run 45433699647，第 2 张票 run 45441310264。
+  - `agent/tests/test_unrelated_windows.py`（12 项）：只报 A 拥有的新窗口；`steps` 遇到 A 不拥有的窗口就停，图仍是 A；切不到前台不按键；按窗口取图失败或全黑时回 `CAPTURE_OCCLUDED`，不碰屏幕。
+- Windows 场景测试：
+  - `test_background_controls_keep_notepad_foreground`，在 CI 的 windows-latest 上通过：第 1 张票 run 45433699647，第 2 张票 run 45441310264。
+  - `test_a_window_the_target_does_not_own_stays_out_of_the_reply`：同一进程开出不归属的标记窗口，`steps` 停在 `UNEXPECTED_DIALOG`，回复里没有标记，图是表单本身；表单自己的对话框照常报标题。
 - 主人电脑实测，脚本在 `~/.winhand/scratch/cua-trial/`：
   - `accept001.py`，11-25 00:06：`_ui_act` 的真实路径，90 个动作前台变化 0；
   - `accept002.py`，11-25 00:48：完整的 `ui` 工具，84 个动作，拒绝 0、前台变化 0。

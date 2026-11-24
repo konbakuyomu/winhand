@@ -170,17 +170,21 @@ Quick rules
   control, a window, a text or the picture instead of sleeping.
   ui reads back after an action: verified=true confirms the observed state; false/null requires
   inspecting the result. A button being invoked does not prove its task finished; do not blindly retry.
-  A window the action opened comes back in new_windows. inspect gives each control a ref (e12):
-  ui(window, action, ref='e12') acts on exactly that one; filter='a|b' takes either text.
+  A dialog or popup of the window that the action opened comes back in new_windows; other new
+  windows are only counted (other_windows): they may be the person's. inspect gives each control a
+  ref (e12): ui(window, action, ref='e12') acts on exactly that one; filter='a|b' takes either text.
   ui(window, steps=[{action, name | ref, value}, ...]) does several actions (also keys, type, wait)
-  in order, stops at the first that fails and ends with a picture.
+  in order, stops at the first that fails or when a window it does not own opens
+  (UNEXPECTED_DIALOG), and ends with a picture of the window or of its dialog.
   input: modifiers=['ctrl'] with a click or scroll, triple_click, hold_key (keys, duration_s),
   keys with repeat=N, cursor_position; window=<title> takes that window's pixels and brings it to
   the front. screenshot(path=...) also saves the picture; a minimized window is shown for it and
   put back. Without a window, screenshot(wait='stable') looks at the window in front.
   The person comes first: while they use the mouse or keyboard, desktop actions wait (up to 10 s)
-  and then say so; after they press Ctrl+Alt+Shift+Backspace they are refused for a minute: ask
-  them before going on. A thin frame lines the screen while you operate it (not in screenshots).
+  and then say so, except ui actions on a window behind another program's: those go on in the
+  background without taking the focus. After they press Ctrl+Alt+Shift+Backspace they are refused
+  for a minute: ask them before going on. A thin frame lines the screen while you operate it (not in
+  screenshots).
   run and job_status name a sign-in or signing window that appeared while a command went quiet
   (`prompts`): it is probably what the command waits for; tell the person.
   A locked screen, a UAC prompt or a disconnected session cannot be seen or operated, and Windows

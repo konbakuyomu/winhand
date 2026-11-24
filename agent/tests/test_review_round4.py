@@ -135,6 +135,7 @@ async def test_an_action_reports_the_dialog_it_opened(monkeypatch):
     dialog = {"hwnd": 22, "title": "确认", "process": "app.exe", "pid": 9, "class": "#32770"}
     opened = []
     monkeypatch.setattr(td.desktop, "windows", lambda: [window, dialog] if opened else [window])
+    monkeypatch.setattr(td.desktop, "root_owner", lambda hwnd: 11 if hwnd == 22 else hwnd)  # the app owns it
     monkeypatch.setattr(uia, "snapshot", _snapshot([_control("删除")]))
     monkeypatch.setattr(uia, "refresh", lambda e: None)
     monkeypatch.setattr(
@@ -182,7 +183,7 @@ async def test_steps_run_in_order_stop_at_a_failure_and_end_with_a_picture(monke
     out = result.structured_content
     assert [s["step"] for s in out["steps"]] == [1, 2, 3] and out["done"] == 2
     assert out["steps"][0]["verified"] is True and "step 3 failed" in out["stopped"]
-    assert acted == [("set_value", "alice")] and keys == [{"keys": "tab"}]
+    assert acted == [("set_value", "alice")] and keys == [{"keys": "tab", "window": 11}]
     assert any(block.type == "image" for block in result.content)
 
 

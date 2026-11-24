@@ -658,19 +658,30 @@ def _brief(w: dict) -> dict:
     }
 
 
-def _new_windows(before: set[int], settle_s: float = 0.0) -> list[dict]:
-    """Top-level windows that were not there before (up to 5), waiting up to settle_s for one."""
+def _new_windows(before: set[int], target: dict, settle_s: float = 0.0) -> tuple[list[dict], int]:
+    """Top-level windows that were not there before, waiting up to settle_s for one of the
+    target's: those it owns (its dialogs and popups, up to 5) and how many others opened. Only
+    the target's own are described: any other may be the person's, even a second window of the
+    same program (Epic 004 ticket 3)."""
     if not before:
-        return []
+        return [], 0
+    root = desktop.root_owner(target["hwnd"])
     deadline = time.monotonic() + settle_s
     while True:
         try:
-            new = [_brief(w) for w in desktop.windows() if w["hwnd"] not in before]
+            new = [w for w in desktop.windows() if w["hwnd"] not in before]
         except (desktop.DesktopError, OSError):
-            return []
-        if new or time.monotonic() >= deadline:
-            return new[:5]
+            return [], 0
+        own = [_brief(w) for w in new if desktop.root_owner(w["hwnd"]) == root]
+        if own or time.monotonic() >= deadline:
+            return own[:5], len(new) - len(own)
         time.sleep(0.15)
+
+
+OTHER_WINDOWS_NOTE = (
+    "windows this one does not own opened meanwhile: their titles are not shown, they may be the "
+    "person's. If the action was meant to open a new window, find it with window(action='list')"
+)
 
 
 def _ui_inspect(
@@ -902,12 +913,15 @@ def _ui_act(
     if ref is not None:
         out["ref"] = ref
     # a dialog the action opened (a confirmation, an error, a file picker) is what to look at next
-    new = _new_windows(before, settle_s=0 if expected else NEW_WINDOW_SETTLE_S)
+    new, others = _new_windows(before, w, settle_s=0 if expected else NEW_WINDOW_SETTLE_S)
     if new:
         out["new_windows"] = new
         out["new_windows_note"] = (
             "a window opened after this: read it (screenshot or ui inspect) before going on"
         )
+    if others:
+        out["other_windows"] = others
+        out["other_windows_note"] = OTHER_WINDOWS_NOTE
     return out
 
 
@@ -933,15 +947,23 @@ def _ui_steps(w: dict, steps: list[dict], verify_wait_s: float) -> dict:
                     desktop.require_operable(hwnd, f"按键：{text[:40]}" if action == "keys" else "输入文字")
                     try:
                         desktop.window_action(hwnd, "focus")
-                    except (desktop.DesktopUnavailable, approvals.NotOperable):
+                    except (
+                        desktop.DesktopUnavailable,
+                        desktop.OwnerBusy,
+                        desktop.OwnerStopped,
+                        approvals.NotOperable,
+                    ):
                         raise
-                    except desktop.DesktopError:
-                        pass  # it may be in front anyway
+                    except desktop.DesktopError as exc:
+                        # typed anyway, it would go to whatever window is in front: the person's, perhaps
+                        raise desktop.DesktopError(f"blocked_before_input: {exc}; nothing was typed") from exc
+                    # window=: it is checked to be in front again right before the keys go out
                     if action == "keys":
-                        done = desktop.input_action("keys", keys=text)
+                        done = desktop.input_action("keys", keys=text, window=hwnd)
                     else:
-                        done = desktop.input_action("type", text=text)
-                    result = {"done": action, "foreground": done.get("foreground")}
+                        done = desktop.input_action("type", text=text, window=hwnd)
+                    front = done.get("foreground") if desktop.in_front(hwnd) else "another window"
+                    result = {"done": action, "foreground": front}
                 elif action == "wait":
                     result = wait_control(
                         hwnd,
@@ -976,7 +998,12 @@ def _ui_steps(w: dict, steps: list[dict], verify_wait_s: float) -> dict:
             stopped = f"step {n}: the wait ran out; the steps after it were not done"
         elif result.get("verified") is False:
             stopped = f"step {n}: the control does not show the change; the steps after it were not done"
-        if result.get("new_windows"):
+        elif result.get("other_windows") and n < len(steps):
+            stopped = (
+                f"UNEXPECTED_DIALOG: during step {n} a window this one does not own opened (its title "
+                "and picture are not shown); the steps after it were not done"
+            )
+        if result.get("new_windows"):  # only the window's own: the picture never shows another
             shot_of = result["new_windows"][0]["hwnd"]
         if stopped:
             break
@@ -1372,8 +1399,9 @@ def register(mcp: FastMCP) -> None:
         inspect lists them, each with a ref; invoke/toggle/select/set_value/... find one by ref or
         name/automation_id/type and use it without moving the mouse; click is a real mouse click on it.
         Actions run once, then read back the control. verified=true means its observable state
-        matches; false means a mismatch; null means the outcome cannot be confirmed. A window the
-        action opened is listed in new_windows. For invoke/click on a button, inspect the resulting
+        matches; false means a mismatch; null means the outcome cannot be confirmed. A dialog or popup
+        of the window that the action opened is listed in new_windows; other new windows are only
+        counted (other_windows). For invoke/click on a button, inspect the resulting
         window before deciding whether to repeat it. steps=[...] does several actions in one call.
         wait polls (up to 40 s) until the control exists, is gone, is enabled or shows a value,
         e.g. an installer's Next button becoming enabled."""
