@@ -14,7 +14,6 @@ public sealed partial class MainWindow
     private InfoBar? _overviewUpdate;
     private StackPanel? _recentRows;
     private (TextBlock Value, TextBlock Note, Button Button)[] _overviewMetrics = [];
-    private Style? _overviewMutedMetricStyle;
     private string? _recentKey;
 
     private UIElement BuildOverview()
@@ -54,7 +53,6 @@ public sealed partial class MainWindow
         top.Children.Add(actions);
 
         var metrics = new Grid();
-        _overviewMutedMetricStyle = (Style)Microsoft.UI.Xaml.Markup.XamlReader.Load("<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='TextBlock' BasedOn='{StaticResource MetricValueStyle}'><Setter Property='Foreground' Value='{ThemeResource TextFillColorTertiaryBrush}' /></Style>");
         _overviewMetrics = new (TextBlock, TextBlock, Button)[3];
         var labels = new[] { "今日工具调用", "MCP 服务", "活动会话" };
         var targets = new[] { "activity", "mcp", "sessions" };
@@ -67,7 +65,6 @@ public sealed partial class MainWindow
             var target = targets[i];
             var button = ActionButton("", () => ShowPage(target));
             button.Style = Resource<Style>("GhostButtonStyle");
-            button.Background = Resource<Brush>("WinhandTransparentBrush");
             button.HorizontalAlignment = HorizontalAlignment.Stretch;
             button.HorizontalContentAlignment = HorizontalAlignment.Stretch;
             button.Padding = new Thickness(18, 14, 18, 15);
@@ -76,7 +73,7 @@ public sealed partial class MainWindow
             metrics.Children.Add(button);
             if (i > 0)
             {
-                var line = (Border)Microsoft.UI.Xaml.Markup.XamlReader.Load("<Border xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Width='1' Margin='0,14' HorizontalAlignment='Left' Background='{ThemeResource DividerStrokeColorDefaultBrush}' IsHitTestVisible='False' />");
+                var line = new Border { Style = Resource<Style>("VerticalDividerStyle"), Margin = new Thickness(0, 14, 0, 14), HorizontalAlignment = HorizontalAlignment.Left };
                 Grid.SetColumn(line, i);
                 metrics.Children.Add(line);
             }
@@ -96,7 +93,7 @@ public sealed partial class MainWindow
         page.Children.Add(_overviewUpdate);
 
         var all = ActionButton("", () => ShowPage("activity"));
-        all.Style = (Style)Microsoft.UI.Xaml.Markup.XamlReader.Load("<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='Button' BasedOn='{StaticResource GhostButtonStyle}'><Setter Property='Foreground' Value='{ThemeResource WinhandAccentTextBrush}' /></Style>");
+        all.Style = Resource<Style>("AccentGhostButtonStyle");
         all.Content = new StackPanel
         {
             Orientation = Orientation.Horizontal, Spacing = 6,
@@ -167,9 +164,10 @@ public sealed partial class MainWindow
         var open = _sessions.Count(s => Json.Str(s, "state") != "exited");
         var attention = _sessions.Count(s => Json.Str(s, "state") is "needs_user" or "blocked");
         _overviewMetrics[2].Value.Text = open.ToString();
-        _overviewMetrics[2].Value.Style = open == 0 ? _overviewMutedMetricStyle : Resource<Style>("MetricValueStyle");
+        _overviewMetrics[2].Value.Style = open == 0 ? Resource<Style>("MutedMetricValueStyle") : Resource<Style>("MetricValueStyle");
         _overviewMetrics[2].Note.Text = open == 0 ? "无活跃会话" : attention > 0 ? $"{attention} 个要处理" : "进行中";
-        _overviewMetrics[2].Button.IsEnabled = open > 0;
+        _overviewMetrics[2].Button.IsHitTestVisible = open > 0;
+        _overviewMetrics[2].Button.IsTabStop = open > 0;
         Named(_overviewMetrics[2].Button, $"活动会话 {open} 个" + (open > 0 ? "，查看会话" : "，无活跃会话"));
 
         var recent = _activity.AsEnumerable().Reverse().Take(8).ToList();
@@ -182,7 +180,7 @@ public sealed partial class MainWindow
         if (recent.Count == 0)
         {
             var empty = new StackPanel { Spacing = 12, Padding = new Thickness(24), HorizontalAlignment = HorizontalAlignment.Center };
-            empty.Children.Add((FontIcon)Microsoft.UI.Xaml.Markup.XamlReader.Load("<FontIcon xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Glyph='&#xE81C;' FontSize='24' Foreground='{ThemeResource TextFillColorTertiaryBrush}' />"));
+            empty.Children.Add(new FontIcon { Glyph = "\uE81C", FontSize = 24, Style = Resource<Style>("TertiaryIconStyle") });
             var message = Text("还没有活动。Claude 调用工具后会实时出现在这里。", "CaptionTextStyle");
             message.TextAlignment = TextAlignment.Center;
             empty.Children.Add(message);
@@ -203,7 +201,7 @@ public sealed partial class MainWindow
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(56) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
-        var time = (TextBlock)Microsoft.UI.Xaml.Markup.XamlReader.Load("<TextBlock xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Style='{StaticResource MonoDataStyle}' Foreground='{ThemeResource TextFillColorTertiaryBrush}' />");
+        var time = Text("", "TertiaryMonoDataStyle");
         time.Text = Format.Local(entry.Time).ToString("HH:mm:ss");
         time.Margin = new Thickness(0, 2, 0, 0);
         row.Children.Add(time);
@@ -226,7 +224,6 @@ public sealed partial class MainWindow
         row.Children.Add(arrow);
         var button = ActionButton("", () => ShowActivityEntry(entry.Id));
         button.Style = Resource<Style>("GhostButtonStyle");
-        button.Background = Resource<Brush>("WinhandTransparentBrush");
         button.HorizontalAlignment = HorizontalAlignment.Stretch;
         button.HorizontalContentAlignment = HorizontalAlignment.Stretch;
         button.Padding = new Thickness(0);

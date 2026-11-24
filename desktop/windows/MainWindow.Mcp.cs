@@ -195,7 +195,7 @@ public sealed partial class MainWindow
         var edit = Named(ActionButton("编辑", () => _ = EditMcpAsync(server)), $"编辑 {name}");
         var more = new Button { Style = Resource<Style>("IconGhostButtonStyle"), Content = new FontIcon { Glyph = "\uE712", FontSize = 14 } };
         Named(more, $"{name} 的更多操作");
-        var delete = (MenuFlyoutItem)Microsoft.UI.Xaml.Markup.XamlReader.Load("<MenuFlyoutItem xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Text='删除服务…' Foreground='{ThemeResource SystemFillColorCriticalBrush}' />");
+        var delete = new MenuFlyoutItem { Text = "删除服务…", Style = Resource<Style>("DangerMenuFlyoutItemStyle") };
         delete.Click += (_, _) => _ = DeleteMcpAsync(name);
         more.Flyout = new MenuFlyout { Items = { delete } };
         var actions = ActionRow(edit, more);
@@ -311,7 +311,7 @@ public sealed partial class MainWindow
         var block = Text(text, "MonoDataStyle");
         block.TextWrapping = TextWrapping.Wrap;
         block.IsTextSelectionEnabled = true;
-        var border = (Border)Microsoft.UI.Xaml.Markup.XamlReader.Load("<Border xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Padding='12' CornerRadius='6' Background='{ThemeResource WinhandCodeBgBrush}' />");
+        var border = new Border { Style = Resource<Style>("CodeBlockStyle") };
         border.Child = block;
         return border;
     }
@@ -398,9 +398,7 @@ public sealed partial class MainWindow
             foreach (var tool in tools)
             {
                 var row = new StackPanel { Spacing = 2 };
-                var toolName = Text(Json.Str(tool, "name") ?? "", "DataCopyStyle");
-                toolName.FontSize = 13;
-                toolName.Foreground = Resource<Microsoft.UI.Xaml.Media.Brush>("TextFillColorPrimaryBrush");
+                var toolName = Text(Json.Str(tool, "name") ?? "", "MonoTitleStyle");
                 row.Children.Add(toolName);
                 if (Json.Str(tool, "description") is { Length: > 0 } description)
                     row.Children.Add(Text(description, "SecondaryCopyStyle"));

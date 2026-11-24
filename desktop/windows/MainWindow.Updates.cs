@@ -169,9 +169,7 @@ public sealed partial class MainWindow
         _updateNotesBox = new Border
         {
             Child = new ScrollViewer { Content = _updateNotes, MaxHeight = 220 },
-            Padding = new Thickness(12),
-            CornerRadius = new CornerRadius(6),
-            Background = Resource<Microsoft.UI.Xaml.Media.Brush>("WinhandCodeBgBrush"),
+            Style = Resource<Style>("CodeBlockStyle"),
             Visibility = Visibility.Collapsed
         };
         _updateAction = ActionButton("检查更新", () => _ = UpdateActionAsync(), accent: true);
@@ -181,6 +179,7 @@ public sealed partial class MainWindow
         history.Padding = new Thickness(0);
 
         _autoCheckSwitch = CompactSwitch("自动检查更新", Preferences.AutoCheckUpdates);
+        _autoCheckSwitch.VerticalAlignment = VerticalAlignment.Center;
         _autoCheckSwitch.Toggled += (_, _) =>
         {
             Preferences.AutoCheckUpdates = _autoCheckSwitch.IsOn;
@@ -188,7 +187,9 @@ public sealed partial class MainWindow
                 _ = CheckAutomaticallyAsync();
         };
         ToolTipService.SetToolTip(_autoCheckSwitch, "启动后和每 6 小时检查一次。发现新版本只会提醒你，确认后才下载。");
-        var autoRow = PageControlRow(ActionRow(Text("自动检查更新", "BodyTextStyle"), _autoCheckSwitch), history);
+        var autoCheckText = Text("自动检查更新", "BodyTextStyle");
+        autoCheckText.VerticalAlignment = VerticalAlignment.Center;
+        var autoRow = PageControlRow(ActionRow(autoCheckText, _autoCheckSwitch), history);
 
         RenderUpdate();
         var summary = new StackPanel { Spacing = 4, Children = { _updateSummary, _updateFacts } };

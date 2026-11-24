@@ -278,6 +278,9 @@ public sealed partial class MainWindow : Window
     {
         MascotExpandedGrid.Visibility = RootNavigation.IsPaneOpen ? Visibility.Visible : Visibility.Collapsed;
         CompactConnectionDot.Visibility = RootNavigation.IsPaneOpen ? Visibility.Collapsed : Visibility.Visible;
+        MascotStatusButton.Width = RootNavigation.IsPaneOpen ? double.NaN : 36;
+        MascotStatusButton.HorizontalAlignment = RootNavigation.IsPaneOpen ? HorizontalAlignment.Stretch : HorizontalAlignment.Left;
+        MascotStatusButton.HorizontalContentAlignment = RootNavigation.IsPaneOpen ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
     }
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)

@@ -40,6 +40,7 @@
           <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="#F9FAFC" />
           <SolidColorBrush x:Key="WinhandCodeBgBrush" Color="#F1F3F7" />
           <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="WinhandOverlayBrush" Color="#FFFFFF" />
           <SolidColorBrush x:Key="CardBackgroundFillColorSecondaryBrush" Color="#F5F6FA" />
           <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#0F000000" />
           <SolidColorBrush x:Key="DividerStrokeColorDefaultBrush" Color="#0D000000" />
@@ -117,6 +118,7 @@
           <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="#24252B" />
           <SolidColorBrush x:Key="WinhandCodeBgBrush" Color="#1B1C21" />
           <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#2D2F36" />
+          <SolidColorBrush x:Key="WinhandOverlayBrush" Color="#2D2F36" />
           <SolidColorBrush x:Key="CardBackgroundFillColorSecondaryBrush" Color="#34363F" />
           <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#18FFFFFF" />
           <SolidColorBrush x:Key="DividerStrokeColorDefaultBrush" Color="#14FFFFFF" />
@@ -194,6 +196,7 @@
           <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="{ThemeResource SystemColorWindowColor}" />
           <SolidColorBrush x:Key="WinhandCodeBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
           <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="WinhandOverlayBrush" Color="{ThemeResource SystemColorWindowColor}" />
           <SolidColorBrush x:Key="CardBackgroundFillColorSecondaryBrush" Color="{ThemeResource SystemColorWindowColor}" />
           <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
           <SolidColorBrush x:Key="DividerStrokeColorDefaultBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
@@ -640,6 +643,93 @@
       <Style x:Key="ConnectionLabelCriticalStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Foreground" Value="{ThemeResource BadgeCriticalFgBrush}" />
+      </Style>
+      <Style x:Key="TertiaryMonoDataStyle" TargetType="TextBlock" BasedOn="{StaticResource MonoDataStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorTertiaryBrush}" />
+      </Style>
+      <Style x:Key="TertiaryCaptionTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorTertiaryBrush}" />
+      </Style>
+      <Style x:Key="CautionCaptionTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCautionBrush}" />
+      </Style>
+      <Style x:Key="CriticalCaptionTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCriticalBrush}" />
+      </Style>
+      <Style x:Key="SuccessCaptionTextStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorSuccessBrush}" />
+      </Style>
+      <Style x:Key="MutedMetricValueStyle" TargetType="TextBlock" BasedOn="{StaticResource MetricValueStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorTertiaryBrush}" />
+      </Style>
+      <Style x:Key="AccentGhostButtonStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource WinhandAccentTextBrush}" />
+      </Style>
+      <Style x:Key="SuccessGhostButtonStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorSuccessBrush}" />
+      </Style>
+      <Style x:Key="DangerMenuFlyoutItemStyle" TargetType="MenuFlyoutItem" BasedOn="{StaticResource DefaultMenuFlyoutItemStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCriticalBrush}" />
+      </Style>
+      <Style x:Key="CodeBlockStyle" TargetType="Border">
+        <Setter Property="Padding" Value="12" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Background" Value="{ThemeResource WinhandCodeBgBrush}" />
+      </Style>
+      <Style x:Key="SecretRevealBoxStyle" TargetType="Border">
+        <Setter Property="BorderBrush" Value="{ThemeResource WinhandWarningTintBorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="Background" Value="{ThemeResource WinhandCodeBgBrush}" />
+        <Setter Property="Padding" Value="8,4,8,4" />
+      </Style>
+      <Style x:Key="BottomDividerBorderStyle" TargetType="Border">
+        <Setter Property="BorderThickness" Value="0,0,0,1" />
+        <Setter Property="BorderBrush" Value="{ThemeResource DividerStrokeColorDefaultBrush}" />
+      </Style>
+      <Style x:Key="VerticalDividerStyle" TargetType="Border">
+        <Setter Property="Width" Value="1" />
+        <Setter Property="Background" Value="{ThemeResource DividerStrokeColorDefaultBrush}" />
+        <Setter Property="IsHitTestVisible" Value="False" />
+      </Style>
+      <Style x:Key="InspectorSurfaceStyle" TargetType="Grid">
+        <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+      </Style>
+      <Style x:Key="DrawerGripThumbStyle" TargetType="Thumb">
+        <Setter Property="Height" Value="12" />
+        <Setter Property="IsTabStop" Value="True" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Thumb">
+              <Grid Background="{ThemeResource WinhandTransparentBrush}" BorderThickness="0,1,0,0"
+                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+                <Border Width="36" Height="4" CornerRadius="2" HorizontalAlignment="Center" VerticalAlignment="Center"
+                        Background="{ThemeResource TextFillColorTertiaryBrush}" />
+              </Grid>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="AccentIconTileStyle" TargetType="Border">
+        <Setter Property="Width" Value="36" />
+        <Setter Property="Height" Value="36" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Background" Value="{ThemeResource WinhandAccentSoftBgBrush}" />
+      </Style>
+      <Style x:Key="AccentIconStyle" TargetType="FontIcon">
+        <Setter Property="Foreground" Value="{ThemeResource WinhandAccentTextBrush}" />
+      </Style>
+      <Style x:Key="TertiaryIconStyle" TargetType="FontIcon">
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorTertiaryBrush}" />
+      </Style>
+      <Style x:Key="CautionProgressBarStyle" TargetType="ProgressBar" BasedOn="{StaticResource DefaultProgressBarStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCautionBrush}" />
+      </Style>
+      <Style x:Key="ConnectionActiveStyle" TargetType="Ellipse" BasedOn="{StaticResource ConnectionIdleStyle}">
+        <Setter Property="Fill" Value="{ThemeResource WinhandAccentBrush}" />
+      </Style>
+      <Style x:Key="OverlayNoticeHostStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource WinhandOverlayBrush}" />
       </Style>
     </ResourceDictionary>
   </Application.Resources>

@@ -95,11 +95,14 @@
       <Grid Background="{ThemeResource WinhandCanvasBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="1,1,0,0" CornerRadius="8,0,0,0">
         <ContentControl x:Name="PageHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
-        <InfoBar x:Name="OverlayNotice" IsOpen="False" IsClosable="True" MaxWidth="440"
-                 HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="24,0,24,20">
-          <InfoBar.Shadow><ThemeShadow /></InfoBar.Shadow>
-          <InfoBar.ActionButton><Button x:Name="NoticeAction" Visibility="Collapsed" /></InfoBar.ActionButton>
-        </InfoBar>
+        <Border x:Name="OverlayNoticeHost" Style="{StaticResource OverlayNoticeHostStyle}"
+                CornerRadius="8" Visibility="Collapsed" MaxWidth="440"
+                HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="24,0,24,20">
+          <Border.Shadow><ThemeShadow /></Border.Shadow>
+          <InfoBar x:Name="OverlayNotice" IsOpen="False" IsClosable="True">
+            <InfoBar.ActionButton><Button x:Name="NoticeAction" Visibility="Collapsed" /></InfoBar.ActionButton>
+          </InfoBar>
+        </Border>
       </Grid>
     </muxc:NavigationView>
   </Grid>

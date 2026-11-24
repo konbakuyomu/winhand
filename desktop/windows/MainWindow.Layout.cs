@@ -304,7 +304,8 @@ public sealed partial class MainWindow
     private static Style DotStyle(Tone tone) => Resource<Style>(tone switch
     {
         Tone.Success => "ConnectionReadyStyle",
-        Tone.Warning or Tone.Active => "ConnectionPendingStyle",
+        Tone.Active => "ConnectionActiveStyle",
+        Tone.Warning => "ConnectionPendingStyle",
         Tone.Error => "ConnectionFailedStyle",
         _ => "ConnectionIdleStyle"
     });
@@ -372,10 +373,20 @@ public sealed partial class MainWindow
     private static StackPanel EmptyState(string title, string body, params UIElement[] actions)
     {
         var panel = new StackPanel { Spacing = 12, MaxWidth = 520, HorizontalAlignment = HorizontalAlignment.Left };
-        panel.Children.Add(Text(title, "SectionHeadingStyle"));
-        panel.Children.Add(Text(body, "SecondaryCopyStyle"));
+        var heading = Text(title, "SectionHeadingStyle");
+        heading.TextAlignment = TextAlignment.Center;
+        heading.HorizontalAlignment = HorizontalAlignment.Center;
+        panel.Children.Add(heading);
+        var description = Text(body, "SecondaryCopyStyle");
+        description.TextAlignment = TextAlignment.Center;
+        description.HorizontalAlignment = HorizontalAlignment.Center;
+        panel.Children.Add(description);
         if (actions.Length > 0)
-            panel.Children.Add(ActionRow(actions));
+        {
+            var row = ActionRow(actions);
+            row.HorizontalAlignment = HorizontalAlignment.Center;
+            panel.Children.Add(row);
+        }
         return panel;
     }
 
@@ -397,6 +408,7 @@ public sealed partial class MainWindow
         };
         OverlayNotice.Closed += (_, _) =>
         {
+            OverlayNoticeHost.Visibility = Visibility.Collapsed;
             _noticeTimer.Stop();
             _noticeTitle = null;
             _feedbackAction = null;
@@ -420,6 +432,7 @@ public sealed partial class MainWindow
         NoticeAction.Content = actionText ?? "";
         NoticeAction.Visibility = action is null ? Visibility.Collapsed : Visibility.Visible;
         OverlayNotice.IsOpen = true;
+        OverlayNoticeHost.Visibility = Visibility.Visible;
         _noticeTimer!.Stop();
         if (severity is InfoBarSeverity.Success or InfoBarSeverity.Informational)
         {
@@ -433,6 +446,7 @@ public sealed partial class MainWindow
         _noticeTitle = null;
         _noticeTimer!.Stop();
         OverlayNotice.IsOpen = false;
+        OverlayNoticeHost.Visibility = Visibility.Collapsed;
         _feedbackAction = null;
     }
 

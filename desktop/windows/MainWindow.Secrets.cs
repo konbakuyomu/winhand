@@ -50,7 +50,7 @@ public sealed partial class MainWindow
         _secretProgress = new ProgressBar
         {
             Minimum = 0, Maximum = 30, Height = 2, MinHeight = 2, VerticalAlignment = VerticalAlignment.Bottom,
-            Foreground = Resource<Brush>("SystemFillColorCautionBrush"), IsHitTestVisible = false
+            Style = Resource<Style>("CautionProgressBarStyle"), IsHitTestVisible = false
         };
         _secretBanner = new Grid { Visibility = Visibility.Collapsed, Children = { _secretProtection, _secretProgress } };
         page.Children.Add(_secretBanner);
@@ -140,8 +140,7 @@ public sealed partial class MainWindow
                 _shownCountdown = new ContentControl { Style = Resource<Style>("StatusBadgeWarningStyle") };
                 details.Children.Add(new Border
                 {
-                    BorderBrush = Resource<Brush>("WinhandWarningTintBorderBrush"), BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(4), Background = Resource<Brush>("WinhandCodeBgBrush"), Padding = new Thickness(8, 4, 8, 4),
+                    Style = Resource<Style>("SecretRevealBoxStyle"),
                     Child = PageControlRow(value, _shownCountdown)
                 });
             }
@@ -152,7 +151,7 @@ public sealed partial class MainWindow
             ToolTipService.SetToolTip(copy, "复制到剪贴板，不进剪贴板历史，也不同步到其他设备");
             var edit = Named(new MenuFlyoutItem { Text = "修改名称或值…" }, $"修改 {name}");
             edit.Click += (_, _) => _ = EditSecretAsync(name);
-            var delete = Named(new MenuFlyoutItem { Text = "删除密钥…", Foreground = Resource<Brush>("SystemFillColorCriticalBrush") }, $"删除 {name}");
+            var delete = Named(new MenuFlyoutItem { Text = "删除密钥…", Style = Resource<Style>("DangerMenuFlyoutItemStyle") }, $"删除 {name}");
             delete.Click += (_, _) => _ = DeleteSecretAsync(name);
             var more = Named(new Button
             {
@@ -270,11 +269,11 @@ public sealed partial class MainWindow
         Clipboard.SetContentWithOptions(package, new ClipboardContentOptions { IsAllowedInHistory = false, IsRoamable = false });
         var label = (TextBlock)((StackPanel)button.Content).Children[1];
         label.Text = "已复制";
-        button.Foreground = Resource<Brush>("SystemFillColorSuccessBrush");
+        button.Style = Resource<Style>("SuccessGhostButtonStyle");
         var timer = DispatcherQueue.CreateTimer();
         timer.Interval = TimeSpan.FromSeconds(1.5);
         timer.IsRepeating = false;
-        timer.Tick += (_, _) => { label.Text = "复制"; button.ClearValue(Button.ForegroundProperty); };
+        timer.Tick += (_, _) => { label.Text = "复制"; button.Style = Resource<Style>("GhostButtonStyle"); };
         timer.Start();
     }
 

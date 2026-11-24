@@ -29,17 +29,15 @@ public sealed partial class MainWindow
         _relayError = new InfoBar { Severity = InfoBarSeverity.Error, IsClosable = false, IsOpen = true, Visibility = Visibility.Collapsed };
         page.Children.Add(_relayError);
         _relayUrl = new TextBox { Header = "中转地址", PlaceholderText = "wss://winhand.example.com/agent", FontFamily = new FontFamily("Cascadia Mono, Consolas") };
-        _relayUrlError = Text("地址要以 wss:// 或 ws:// 开头", "CaptionTextStyle");
-        _relayUrlError.Foreground = Resource<Brush>("SystemFillColorCriticalBrush");
+        _relayUrlError = Text("地址要以 wss:// 或 ws:// 开头", "CriticalCaptionTextStyle");
         _relayUrlError.Visibility = Visibility.Collapsed;
         _relayToken = new PasswordBox { PlaceholderText = "粘贴中转生成的设备令牌" };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_relayToken, "设备令牌");
-        var saved = Text("已保存", "CaptionTextStyle");
-        saved.Foreground = Resource<Brush>("SystemFillColorSuccessBrush");
+        var saved = Text("已保存", "SuccessCaptionTextStyle");
         _relayTokenSaved = new StackPanel
         {
             Orientation = Orientation.Horizontal, Spacing = 6, Visibility = Visibility.Collapsed,
-            Children = { new Ellipse { Width = 8, Height = 8, Fill = Resource<Brush>("SystemFillColorSuccessBrush") }, saved }
+            Children = { new Ellipse { Style = DotStyle(Tone.Success) }, saved }
         };
         _relaySave = ActionButton("保存并连接", () => _ = SaveRelayAsync(), accent: true);
         _relayUrl.TextChanged += (_, _) => { _relayUrlTouched = true; ValidateRelayUrl(); };

@@ -48,8 +48,8 @@ public sealed partial class MainWindow
         _appsAskHint = Text("AI 第一次操作某个程序前，先在这台电脑上弹窗问你。", "CaptionTextStyle");
         var shield = new Border
         {
-            Width = 36, Height = 36, CornerRadius = new CornerRadius(6), Background = Resource<Brush>("WinhandAccentSoftBgBrush"),
-            Child = new FontIcon { Glyph = "\uEA18", FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontSize = 18, Foreground = Resource<Brush>("WinhandAccentTextBrush") }
+            Style = Resource<Style>("AccentIconTileStyle"),
+            Child = new FontIcon { Glyph = "\uEA18", FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontSize = 18, Style = Resource<Style>("AccentIconStyle") }
         };
         var copy = new StackPanel { Spacing = 4, Children = { Text("AI 操作程序前先问我", "RowTitleStyle"), _appsAskHint } };
         var guard = new Grid { ColumnSpacing = 12 };
@@ -111,9 +111,9 @@ public sealed partial class MainWindow
         _appsAskHint!.Text = _appsAsk.IsOn ? "AI 第一次操作某个程序前，先在这台电脑上弹窗问你。"
             : "已关闭：AI 可以直接操作程序；WinHand 自己的窗口和以管理员身份运行的程序仍然不能操作。";
         if (_appsAsk.IsOn)
-            _appsAskHint.ClearValue(TextBlock.ForegroundProperty);
+            _appsAskHint.Style = Resource<Style>("CaptionTextStyle");
         else
-            _appsAskHint.Foreground = Resource<Brush>("SystemFillColorCautionBrush");
+            _appsAskHint.Style = Resource<Style>("CautionCaptionTextStyle");
 
         var always = Json.Arr(apps, "always").ToList();
         var session = Json.Arr(apps, "session").ToList();

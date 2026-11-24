@@ -32,9 +32,9 @@ public sealed partial class MainWindow
     private string _activityFilter = "all";
     private string? _selectedActivity;
     private StackPanel? _activityDetail, _activityEmpty;
-    private Grid? _activityWorkspace, _activityInspector, _activityGrip;
+    private Grid? _activityWorkspace, _activityInspector;
     private ContentControl? _activityDetailHeader;
-    private Thumb? _activityDivider;
+    private Thumb? _activityDivider, _activityGrip;
     private KeyboardAccelerator? _activityEscape;
     private bool _renderingActivityList, _activityWide, _activityPreviewSelected;
     private double _activityDetailWidth;
@@ -101,7 +101,7 @@ public sealed partial class MainWindow
         Grid.SetColumn(count, 1);
         second.Children.Add(count);
         var toolbar = new StackPanel { Padding = new Thickness(24, 18, 24, 10), Children = { first, second } };
-        var toolbarBorder = (Border)Microsoft.UI.Xaml.Markup.XamlReader.Load("<Border xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' BorderThickness='0,0,0,1' BorderBrush='{ThemeResource DividerStrokeColorDefaultBrush}' />");
+        var toolbarBorder = new Border { Style = Resource<Style>("BottomDividerBorderStyle") };
         toolbarBorder.Child = toolbar;
         root.Children.Add(toolbarBorder);
 
@@ -134,14 +134,9 @@ public sealed partial class MainWindow
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
         _activityDetailHeader = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(24, 8, 20, 10) };
-        var header = (Border)Microsoft.UI.Xaml.Markup.XamlReader.Load("<Border xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' BorderThickness='0,0,0,1' BorderBrush='{ThemeResource DividerStrokeColorDefaultBrush}' />");
+        var header = new Border { Style = Resource<Style>("BottomDividerBorderStyle") };
         header.Child = _activityDetailHeader;
-        _activityGrip = (Grid)Microsoft.UI.Xaml.Markup.XamlReader.Load("<Grid xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Height='12' BorderThickness='0,1,0,0' BorderBrush='{ThemeResource DividerStrokeColorDefaultBrush}'><Border Width='36' Height='4' CornerRadius='2' HorizontalAlignment='Center' VerticalAlignment='Center' Background='{ThemeResource TextFillColorTertiaryBrush}' /></Grid>");
-        var grip = new Thumb
-        {
-            Height = 12, HorizontalAlignment = HorizontalAlignment.Stretch,
-            Template = (ControlTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load("<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='Thumb'><Border Background='{ThemeResource WinhandTransparentBrush}' /></ControlTemplate>")
-        };
+        var grip = _activityGrip = new Thumb { Style = Resource<Style>("DrawerGripThumbStyle") };
         Named(grip, "调整详情抽屉高度");
         grip.DragDelta += (_, args) =>
         {
@@ -149,8 +144,7 @@ public sealed partial class MainWindow
                 160, Math.Max(160, _activityWorkspace!.ActualHeight - 120));
             ArrangeActivityWorkspace();
         };
-        _activityGrip.Children.Add(grip);
-        _activityInspector = (Grid)Microsoft.UI.Xaml.Markup.XamlReader.Load("<Grid xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Background='{ThemeResource CardBackgroundFillColorDefaultBrush}' />");
+        _activityInspector = new Grid { Style = Resource<Style>("InspectorSurfaceStyle") };
         _activityInspector.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _activityInspector.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _activityInspector.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -350,7 +344,7 @@ public sealed partial class MainWindow
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(56) });
         var when = Format.Local(entry.Time);
         var time = new StackPanel();
-        var clock = (TextBlock)Microsoft.UI.Xaml.Markup.XamlReader.Load("<TextBlock xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Style='{StaticResource MonoDataStyle}' Foreground='{ThemeResource TextFillColorTertiaryBrush}' />");
+        var clock = Text("", "TertiaryMonoDataStyle");
         clock.Text = when.ToString("HH:mm:ss");
         time.Children.Add(clock);
         if (when.Date != DateTime.Today) time.Children.Add(Text(when.ToString("MM-dd"), "CaptionTextStyle"));
@@ -360,7 +354,7 @@ public sealed partial class MainWindow
         var middle = new StackPanel { Spacing = 2, Children = { title, detail } };
         Grid.SetColumn(middle, 1);
         grid.Children.Add(middle);
-        var duration = (TextBlock)Microsoft.UI.Xaml.Markup.XamlReader.Load("<TextBlock xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Style='{StaticResource MonoDataStyle}' Foreground='{ThemeResource TextFillColorTertiaryBrush}' />");
+        var duration = Text("", "TertiaryMonoDataStyle");
         duration.VerticalAlignment = VerticalAlignment.Center;
         duration.HorizontalAlignment = HorizontalAlignment.Right;
         Grid.SetColumn(duration, 2);
@@ -405,7 +399,7 @@ public sealed partial class MainWindow
         _activityDetailHeader!.Content = null;
         if (_selectedActivity is null || !_activityById.TryGetValue(_selectedActivity, out var entry))
         {
-            var hint = (TextBlock)Microsoft.UI.Xaml.Markup.XamlReader.Load("<TextBlock xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Text='选择一条记录查看参数和结果' Style='{StaticResource CaptionTextStyle}' Foreground='{ThemeResource TextFillColorTertiaryBrush}' />");
+            var hint = Text("选择一条记录查看参数和结果", "TertiaryCaptionTextStyle");
             hint.HorizontalAlignment = HorizontalAlignment.Center;
             hint.VerticalAlignment = VerticalAlignment.Center;
             var placeholder = new Grid();
