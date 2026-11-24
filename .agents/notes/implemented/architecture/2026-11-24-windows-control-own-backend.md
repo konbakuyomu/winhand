@@ -107,7 +107,7 @@ Status: implemented
 - 单测：
   - `agent/tests/test_background_guard.py`（14 项）：类名分类；只撤自己加的；原来禁用的仍禁用；超时时等调用结束再撤。
   - `agent/tests/test_background_presence.py`（10 项）：后台动作不等，前台动作和嵌套的前台步骤照旧等；急停照样拒；`background_ok` 的几种情况；`ui` 工具把 `background` 交给 `presence`。
-- Windows 场景测试：`test_background_controls_keep_notepad_foreground`，在 CI 的 windows-latest 上通过（run 45433699647）。
+- Windows 场景测试：`test_background_controls_keep_notepad_foreground`，在 CI 的 windows-latest 上通过：第 1 张票 run 45433699647，第 2 张票 run 45441310264。
 - 主人电脑实测，脚本在 `~/.winhand/scratch/cua-trial/`：
   - `accept001.py`，11-25 00:06：`_ui_act` 的真实路径，90 个动作前台变化 0；
   - `accept002.py`，11-25 00:48：完整的 `ui` 工具，84 个动作，拒绝 0、前台变化 0。
