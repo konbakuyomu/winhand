@@ -44,12 +44,17 @@ Status: implemented
   - 电脑离线再回来，`{"online": true}` 的链接也能叫醒，不用主人说一句「电脑回来了」。
 - **代价与已知上限**：
   - 沙箱一直在轮询：每 50 秒一次 GET，电脑上每秒查一次条件。几十个会话同时等时要量一下电脑的负载；
-  - 沙箱要能连到中转的域名。各个云端环境的网络设置不一样，派生的子会话所在的环境要实测；
+  - 沙箱要能连到中转的域名。总调度和它派的子会话所在的云环境网络不限（2026-11-24 查过）；网络受限的环境要把中转域名加进放行名单；
   - 后台命令最长 2 小时，更长的任务要会话重跑一次 `wake`，那一次要花一个回合；
-  - 一组 id 只等第一个；条件只有这四种，等窗口、等进程这类要另加；
-  - 叫醒延迟和花费的量化，等发版后跑满一周，用 `docs/reviews/tools/activity_stats.py` 和 `get_session` 量，写回 Epic 002。叫醒不了或延迟超过 1 分钟（p90），回到这里重看。
+  - 一组 id 只等第一个；条件只有这四种，等窗口、等进程这类要另加。
+- **一周实测：路是通的，用的人少。** 11-18 至 11-24 的调用日志，表在 Epic 002 的 spec，脚本是 `docs/reviews/tools/wake_stats.py`：
+  - 没在回合里等的任务，从结束到会话第一次来看，p50 0.2、p90 2.9 分钟（之前 3.4、16.9），74% 在 1 分钟内；
+  - 但 73% 的任务仍在回合里用 `job_status` 等，和之前一样；整周带 `wake=true` 的 `job_status` 只有 34 次；
+  - 最可能的原因在说明：开场说明和 `help()` 把 `job_status(wait_s=40)` 写成等任务的头一种写法，`wake` 排在后面。hwforge 的规矩 11-22 写了「等作业用 wake」，之后每起一个后台任务仍问 1.7–2.2 次 `job_status`。
+  - 所以 p90 没进 1 分钟，不改这条路，改说明：等任务先跑 `wake`，经中转第二次问同一个任务时回复带上它的 `wake`。见 Epic 002 第 6 张票（`codestable/epics/002-o-第二次复盘五轮强化/issues/006-o-第6轮等待改走wake与回复瘦身.md`）。
 
 ## Verification
 
 - `agent/tests/test_review2_wait.py`：签发，没满足回 `done:false`，任务结束、匹配、文件、在线回 `done:true`，过期 410，不认识 404，重启后照样认得，只有经中转时回复才带 `wake`。
 - 代码：`agent/src/winhand/transfer.py` 的 `issue_wait`、`endpoint`；`agent/src/winhand/tools_desktop.py` 的 `job_start`、`job_status`；`agent/src/winhand/server.py` 的 `run`。
+- 一周实测：`docs/reviews/tools/wake_stats.py` 读电脑上的调用日志和每个任务 exit.json 的写入时刻，按会话怎么得知任务结束分三类（2026-11-24，11-02 至 11-16 对 11-18 至 11-24）。
