@@ -3,6 +3,7 @@ param(
     [string[]]$Pages = @('overview', 'activity', 'sessions', 'mcp', 'secrets', 'apps', 'relay', 'settings'),
     [ValidateSet('default', 'empty')][string]$Scenario = 'default',
     [ValidateSet('light', 'dark')][string]$Theme = 'light',
+    [string]$State = '',  # WINHAND_DESKTOP_STATE: comma-separated flags a page shows for its screenshot
     [string]$Size = '853x1018',
     [switch]$NoBuild
 )
@@ -38,6 +39,8 @@ try {
         $env:WINHAND_PREVIEW_SCENARIO = $Scenario
         $env:WINHAND_DESKTOP_PAGE = $page
         $env:WINHAND_DESKTOP_THEME = $Theme
+        $env:WINHAND_DESKTOP_STATE = $State
+        $name = if ($State) { "$Scenario-$Theme-$page-$($State -replace ',', '+')" } else { "$Scenario-$Theme-$page" }
         $env:WINHAND_DESKTOP_SIZE = $Size
         $stolen = $false  # the person may switch windows meanwhile: only the preview taking the foreground counts
         $hwnd = [IntPtr]::Zero
@@ -71,7 +74,7 @@ try {
                         throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
                     }
                 } finally { $graphics.ReleaseHdc($hdc); $graphics.Dispose() }
-                $bitmap.Save((Join-Path ([IO.Path]::GetFullPath($OutDir)) "$Scenario-$Theme-$page.png"), [Drawing.Imaging.ImageFormat]::Png)
+                $bitmap.Save((Join-Path ([IO.Path]::GetFullPath($OutDir)) "$name.png"), [Drawing.Imaging.ImageFormat]::Png)
                 $color = $bitmap.GetPixel(32, 80).ToArgb()
                 $content = $false
                 for ($y = 80; $y -lt $height - 32 -and -not $content; $y += 32) {
@@ -79,7 +82,7 @@ try {
                         if ($bitmap.GetPixel($x, $y).ToArgb() -ne $color) { $content = $true; break }
                     }
                 }
-                if (-not $content) { throw "Blank or black preview: $Scenario-$Theme-$page.png" }
+                if (-not $content) { throw "Blank or black preview: $name.png" }
             } finally { $bitmap.Dispose() }
             $stolen = $stolen -or ([PreviewCapture]::GetForegroundWindow() -eq $hwnd)
         } finally {

@@ -24,6 +24,12 @@ public sealed partial class MainWindow
 
     private static StackPanel PagePanel() => new() { Spacing = PageInset, MaxWidth = ContentMaxWidth, HorizontalAlignment = HorizontalAlignment.Left };
 
+    /// <summary>Development previews only (WINHAND_DESKTOP_INSTANCE set): whether WINHAND_DESKTOP_STATE, a
+    /// comma-separated list, asks a page to show a state for its screenshot (revealed, selected, collapsed ...).</summary>
+    private static bool PreviewState(string flag) =>
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE"))
+        && (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_STATE") ?? "").Split(',').Contains(flag);
+
     private static Grid PageHeader(string title, UIElement content)
     {
         var page = new Grid();

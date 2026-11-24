@@ -87,6 +87,8 @@ public sealed partial class MainWindow : Window
         if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE"))
             && Environment.GetEnvironmentVariable("WINHAND_DESKTOP_PAGE") is { } page && _pages.ContainsKey(page))
             RootNavigation.Loaded += (_, _) => ShowPage(page); // selected before Loaded, the XAML-selected item stays highlighted too
+        if (PreviewState("collapsed"))
+            RootNavigation.Loaded += (_, _) => RootNavigation.IsPaneOpen = false;
         // Check that an error escaping a XAML callback is logged and survived (CrashGuard).
         if (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_SELFTEST") == "ui-error")
             RootNavigation.Loaded += (_, _) => throw new ArgumentException("WINHAND_DESKTOP_SELFTEST=ui-error");
