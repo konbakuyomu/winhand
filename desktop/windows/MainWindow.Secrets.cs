@@ -3,6 +3,8 @@ using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace Winhand.Desktop;
@@ -20,22 +22,60 @@ public sealed partial class MainWindow
 
     private JsonElement? _secrets;
     private StackPanel? _secretsList;
-    private TextBlock? _secretsError;
+    private InfoBar? _secretsError, _secretProtection;
+    private Grid? _secretBanner;
+    private ProgressBar? _secretProgress;
+    private AutoSuggestBox? _secretsSearch;
+    private ContentControl? _secretsCount, _shownCountdown;
     private string? _shownSecret, _shownValue;
-    private DispatcherQueueTimer? _secretTimer;
+    private DispatcherQueueTimer? _secretTimer, _secretCountdownTimer;
+    private DateTimeOffset _secretShownUntil;
+    private bool _previewSecretShown;
 
     private UIElement BuildSecretsSection()
     {
-        _secretsList = new StackPanel { Spacing = 12 };
-        _secretsError = Text("", "ErrorCopyStyle");
-        _secretsError.TextWrapping = TextWrapping.Wrap;
-        _secretsError.Visibility = Visibility.Collapsed;
-        var add = ActionButton("添加密钥", () => _ = EditSecretAsync(null));
-        return Section("密钥",
+        var page = PagePanel();
+        page.Spacing = 16;
+        _secretsCount = new ContentControl { Content = "0", Style = Resource<Style>("StatusBadgeNeutralStyle") };
+        var heading = ActionRow(Text("密钥", "PageTitleStyle"), _secretsCount, PageHelpButton("密钥",
             "AI 让程序带上这些名字运行时，程序拿到对应的值，AI 自己看不到。只保存在这台电脑的 secrets.env 里，只有你的 Windows 账户能读。" +
-            "显示的值 30 秒后自动隐藏，显示期间截图拍不到这个窗口。",
-            _secretsError,
-            Card(new StackPanel { Spacing = 12, Children = { _secretsList, Divider(), ActionRow(add) } }));
+            "显示的值 30 秒后自动隐藏，显示期间截图拍不到这个窗口。"));
+        page.Children.Add(PageControlRow(heading, PageGlyphButton("添加密钥", "\uE710", () => _ = EditSecretAsync(null), "AccentButtonStyle")));
+
+        _secretProtection = new InfoBar
+        {
+            Severity = InfoBarSeverity.Warning, IsClosable = false, IsOpen = true,
+            Title = "防截屏保护已开启", ActionButton = ActionButton("立即隐藏", HideSecret)
+        };
+        _secretProgress = new ProgressBar
+        {
+            Minimum = 0, Maximum = 30, Height = 2, MinHeight = 2, VerticalAlignment = VerticalAlignment.Bottom,
+            Foreground = Resource<Brush>("SystemFillColorCautionBrush"), IsHitTestVisible = false
+        };
+        _secretBanner = new Grid { Visibility = Visibility.Collapsed, Children = { _secretProtection, _secretProgress } };
+        page.Children.Add(_secretBanner);
+        _secretsError = new InfoBar
+        {
+            Severity = InfoBarSeverity.Error, IsClosable = false, IsOpen = true, Visibility = Visibility.Collapsed,
+            Title = "读不了密钥文件",
+            ActionButton = PageGlyphButton("打开文件位置", "\uE8DA", () => OpenPath(Json.Str(_secrets, "file"), select: true))
+        };
+        page.Children.Add(_secretsError);
+        _secretsSearch = Named(new AutoSuggestBox
+        {
+            PlaceholderText = "搜索密钥名称… (Ctrl+F)", QueryIcon = new FontIcon { Glyph = "\uE721", FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets") },
+            Width = 320, HorizontalAlignment = HorizontalAlignment.Left
+        }, "搜索密钥名称");
+        _secretsSearch.TextChanged += (_, _) => RenderSecrets();
+        page.Children.Add(PageControlRow(_secretsSearch, PageGlyphButton("secrets.env", "\uE8DA", () => OpenPath(Json.Str(_secrets, "file"), select: true))));
+        var search = new KeyboardAccelerator { Key = Windows.System.VirtualKey.F, Modifiers = Windows.System.VirtualKeyModifiers.Control };
+        search.Invoked += (_, args) => { _secretsSearch.Focus(FocusState.Keyboard); args.Handled = true; };
+        page.KeyboardAccelerators.Add(search);
+        _secretsList = new StackPanel();
+        var card = Card(_secretsList);
+        card.Padding = new Thickness(0);
+        page.Children.Add(card);
+        return PageScroll(page);
     }
 
     private void ApplySecrets(JsonElement? secrets)
@@ -46,6 +86,11 @@ public sealed partial class MainWindow
         if (_shownSecret is { } shown && !Json.Arr(secrets, "items").Any(item => Json.Str(item, "name") == shown))
             HideSecret(); // deleted or renamed meanwhile
         RenderSecrets();
+        if (!_previewSecretShown && PreviewState("revealed") && Json.Arr(secrets, "items").FirstOrDefault() is { ValueKind: JsonValueKind.Object } first)
+        {
+            _previewSecretShown = true;
+            _ = ToggleSecretAsync(Json.Str(first, "name")!);
+        }
     }
 
     private void RenderSecrets()
@@ -53,40 +98,87 @@ public sealed partial class MainWindow
         if (_secretsList is null || _secrets is not { } secrets)
             return;
         var error = Json.Str(secrets, "error");
-        _secretsError!.Text = error is null ? "" : $"读不了密钥文件：{error}";
-        _secretsError.Visibility = error is null ? Visibility.Collapsed : Visibility.Visible;
+        _secretsError!.Message = error ?? "";
+        _secretsError.Visibility = string.IsNullOrEmpty(error) ? Visibility.Collapsed : Visibility.Visible;
+        _secretBanner!.Visibility = _shownSecret is null ? Visibility.Collapsed : Visibility.Visible;
 
         _secretsList.Children.Clear();
+        _shownCountdown = null;
         var items = Json.Arr(secrets, "items").ToList();
-        if (items.Count == 0)
+        _secretsCount!.Content = items.Count.ToString();
+        var matching = items.Where(item => (Json.Str(item, "name") ?? "").Contains(_secretsSearch!.Text, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (matching.Count == 0)
         {
-            _secretsList.Children.Add(Text("还没有密钥。AI 需要时会弹框请你输入，也可以在这里添加。", "SecondaryCopyStyle"));
+            var empty = items.Count == 0
+                ? EmptyState("还没有密钥", "AI 需要时会弹框请你输入，也可以在这里添加。", PageGlyphButton("添加密钥", "\uE710", () => _ = EditSecretAsync(null), "AccentButtonStyle"))
+                : EmptyState("没有匹配的密钥", "试试其他名称，或清除搜索。", PageGlyphButton("清除搜索", "\uE721", () => _secretsSearch!.Text = ""));
+            empty.HorizontalAlignment = HorizontalAlignment.Center;
+            empty.Margin = new Thickness(20);
+            _secretsList.Children.Add(empty);
             return;
         }
-        foreach (var item in items)
+        foreach (var item in matching)
         {
             if (_secretsList.Children.Count > 0)
-                _secretsList.Children.Add(Divider());
+            {
+                var divider = Divider();
+                divider.Margin = new Thickness(16, 0, 16, 0);
+                _secretsList.Children.Add(divider);
+            }
             var name = Json.Str(item, "name") ?? "";
             var shown = name == _shownSecret;
             var chars = Json.Num(item, "chars") ?? 0;
             var verb = shown ? "隐藏" : "显示";
-            TextBlock detail;
+            var title = Text(name, "MonoTitleStyle");
+            title.TextWrapping = TextWrapping.NoWrap;
+            title.TextTrimming = TextTrimming.CharacterEllipsis;
+            var details = new StackPanel { Spacing = 4, Children = { title } };
             if (shown)
             {
-                detail = Text(_shownValue ?? "", "DataCopyStyle");
-                detail.IsTextSelectionEnabled = true;
-                detail.TextWrapping = TextWrapping.Wrap;
+                var value = Text(_shownValue ?? "", "MonoDataStyle");
+                value.IsTextSelectionEnabled = true;
+                _shownCountdown = new ContentControl { Style = Resource<Style>("StatusBadgeWarningStyle") };
+                details.Children.Add(new Border
+                {
+                    BorderBrush = Resource<Brush>("WinhandWarningTintBorderBrush"), BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(4), Background = Resource<Brush>("WinhandCodeBgBrush"), Padding = new Thickness(8, 4, 8, 4),
+                    Child = PageControlRow(value, _shownCountdown)
+                });
             }
             else
-                detail = Text($"{chars:0} 个字符", "SecondaryCopyStyle");
+                details.Children.Add(Text($"•••••••••••• · {chars:0} 个字符", "CaptionTextStyle"));
+            Button? copy = null;
+            copy = Named(PageGlyphButton("复制", "\uE8C8", () => _ = CopySecretAsync(name, copy!)), $"复制 {name} 的值");
+            ToolTipService.SetToolTip(copy, "复制到剪贴板，不进剪贴板历史，也不同步到其他设备");
+            var edit = Named(new MenuFlyoutItem { Text = "修改名称或值…" }, $"修改 {name}");
+            edit.Click += (_, _) => _ = EditSecretAsync(name);
+            var delete = Named(new MenuFlyoutItem { Text = "删除密钥…", Foreground = Resource<Brush>("SystemFillColorCriticalBrush") }, $"删除 {name}");
+            delete.Click += (_, _) => _ = DeleteSecretAsync(name);
+            var more = Named(new Button
+            {
+                Style = Resource<Style>("IconGhostButtonStyle"),
+                Content = new FontIcon { Glyph = "\uE712", FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontSize = 14 },
+                Flyout = new MenuFlyout { Items = { edit, new MenuFlyoutSeparator(), delete } }
+            }, $"{name} 的更多操作");
             var actions = ActionRow(
-                Named(ActionButton(verb, () => _ = ToggleSecretAsync(name)), $"{verb} {name} 的值"),
-                Named(ActionButton("复制", () => _ = CopySecretAsync(name)), $"复制 {name} 的值"),
-                Named(ActionButton("修改", () => _ = EditSecretAsync(name)), $"修改 {name}"),
-                Named(ActionButton("删除", () => _ = DeleteSecretAsync(name)), $"删除 {name}"));
-            _secretsList.Children.Add(SettingRow(name, detail, actions));
+                Named(PageGlyphButton(verb, shown ? "\uED1A" : "\uE7B3", () => _ = ToggleSecretAsync(name), shown ? "WarningTintedButtonStyle" : "GhostButtonStyle"), $"{verb} {name} 的值"),
+                copy, more);
+            var row = PageControlRow(details, actions);
+            row.Padding = new Thickness(16, 12, 16, 12);
+            _secretsList.Children.Add(row);
         }
+        UpdateSecretCountdown();
+    }
+
+    private void UpdateSecretCountdown()
+    {
+        if (_shownSecret is null)
+            return;
+        var seconds = Math.Max(0, (int)Math.Ceiling((_secretShownUntil - DateTimeOffset.UtcNow).TotalSeconds));
+        _secretProtection!.Message = $"正在显示 {_shownSecret}，{seconds} 秒后自动隐藏，期间无法捕获此窗口";
+        _secretProgress!.Value = seconds;
+        if (_shownCountdown is not null)
+            _shownCountdown.Content = $"{seconds}s";
     }
 
     private async Task RefreshSecretsAsync()
@@ -128,6 +220,15 @@ public sealed partial class MainWindow
         }
         _secretTimer.Stop();
         _secretTimer.Start();
+        _secretShownUntil = DateTimeOffset.UtcNow + SecretShownFor;
+        if (_secretCountdownTimer is null)
+        {
+            _secretCountdownTimer = DispatcherQueue.CreateTimer();
+            _secretCountdownTimer.Interval = TimeSpan.FromSeconds(1);
+            _secretCountdownTimer.Tick += (_, _) => UpdateSecretCountdown();
+        }
+        _secretCountdownTimer.Stop();
+        _secretCountdownTimer.Start();
         RenderSecrets();
     }
 
@@ -138,6 +239,7 @@ public sealed partial class MainWindow
             return;
         _shownSecret = _shownValue = null;
         _secretTimer?.Stop();
+        _secretCountdownTimer?.Stop();
         RenderSecrets();
         SetWindowDisplayAffinity(_hwnd, WdaNone);
         _ = SecretHiddenAsync();
@@ -157,7 +259,7 @@ public sealed partial class MainWindow
         }
     }
 
-    private async Task CopySecretAsync(string name)
+    private async Task CopySecretAsync(string name, Button button)
     {
         var parameters = new Dictionary<string, object?> { ["name"] = name, ["copy"] = true };
         if (await RequestAsync("secrets_reveal", parameters) is not { } result)
@@ -166,7 +268,14 @@ public sealed partial class MainWindow
         package.SetText(Json.Str(result, "value") ?? "");
         // kept out of the clipboard history (Win+V) and not synced to the person's other devices
         Clipboard.SetContentWithOptions(package, new ClipboardContentOptions { IsAllowedInHistory = false, IsRoamable = false });
-        ShowNotice("已复制", $"{name} 的值已复制到剪贴板，不会进剪贴板历史，也不会同步到其他设备。", InfoBarSeverity.Success);
+        var label = (TextBlock)((StackPanel)button.Content).Children[1];
+        label.Text = "已复制";
+        button.Foreground = Resource<Brush>("SystemFillColorSuccessBrush");
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(1.5);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => { label.Text = "复制"; button.ClearValue(Button.ForegroundProperty); };
+        timer.Start();
     }
 
     private async Task EditSecretAsync(string? original)

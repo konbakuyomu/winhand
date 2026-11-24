@@ -265,6 +265,7 @@ public sealed partial class MainWindow : Window
             : _updater.Available ? $"\n发现新版本 {_updater.LatestVersion}" : "";
         _tray.Update(view.Online, $"winhand · {view.Label}\n{view.Detail}{update}");
         RenderOverviewStatus(view);
+        RenderRelayStatus(view);
         RefreshRunningDurations();
     }
 
@@ -315,14 +316,10 @@ public sealed partial class MainWindow : Window
         _pages["activity"] = PageHeader("活动", BuildActivity());
         _pages["sessions"] = PageHeader("会话", BuildSessions());
         _pages["mcp"] = PageHeader("MCP 服务", BuildMcp());
-        var secrets = PagePanel();
-        secrets.Children.Add(BuildSecretsSection());
-        _pages["secrets"] = PageHeader("密钥", PageScroll(secrets));
-        var apps = PagePanel();
-        apps.Children.Add(BuildAppsSection());
-        _pages["apps"] = PageHeader("程序授权", PageScroll(apps));
-        _pages["relay"] = PageHeader("中转", BuildRelay());
-        _pages["settings"] = PageHeader("设置", BuildSettings());
+        _pages["secrets"] = BuildSecretsSection();
+        _pages["apps"] = BuildAppsSection();
+        _pages["relay"] = BuildRelay();
+        _pages["settings"] = BuildSettings();
     }
 
     // ------------------------------------------------------------ window/tray

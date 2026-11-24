@@ -14,7 +14,7 @@ namespace Winhand.Desktop;
 public sealed partial class MainWindow
 {
     private const double PageInset = 24;
-    private const double ContentMaxWidth = 920;
+    private const double ContentMaxWidth = 880;
     private Action? _feedbackAction;
     private string? _noticeTitle;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _noticeTimer;
@@ -49,7 +49,7 @@ public sealed partial class MainWindow
         var scroll = new ScrollViewer
         {
             Content = content,
-            Padding = new Thickness(inset),
+            Padding = new Thickness(inset, 20, inset, 28),
             HorizontalScrollMode = ScrollMode.Disabled,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
@@ -63,6 +63,47 @@ public sealed partial class MainWindow
         scroll.SizeChanged += (_, _) => Fit();
         scroll.Loaded += (_, _) => Fit();
         return scroll;
+    }
+
+    private static Grid PageControlRow(FrameworkElement leading, FrameworkElement trailing)
+    {
+        var row = new Grid { ColumnSpacing = 16 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        leading.VerticalAlignment = trailing.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(trailing, 1);
+        row.Children.Add(leading);
+        row.Children.Add(trailing);
+        return row;
+    }
+
+    private static Button PageGlyphButton(string label, string glyph, Action action, string style = "GhostButtonStyle")
+    {
+        var button = ActionButton(label, action);
+        button.Style = Resource<Style>(style);
+        button.Content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 6,
+            Children =
+            {
+                new FontIcon { Glyph = glyph, FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontSize = 14 },
+                new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center }
+            }
+        };
+        AutomationProperties.SetName(button, label);
+        return button;
+    }
+
+    private static Grid PageHelpButton(string title, string description)
+    {
+        var button = Named(new Button
+        {
+            Style = Resource<Style>("FieldHelpButtonStyle"),
+            Content = new FontIcon { Glyph = "\uE897", FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontSize = 14 }
+        }, $"{title}帮助");
+        var tip = new TeachingTip { Target = button, Title = title, Content = Text(description, "BodyTextStyle"), IsLightDismissEnabled = true };
+        button.Click += (_, _) => tip.IsOpen = true;
+        return new Grid { Children = { button, tip } };
     }
 
     private static StackPanel Section(string title, string subtitle, params UIElement[] content)
@@ -362,10 +403,18 @@ public sealed partial class MainWindow
 
     private void InitializeFeedback()
     {
+        var hovered = false;
         _noticeTimer = DispatcherQueue.CreateTimer();
         _noticeTimer.Interval = TimeSpan.FromSeconds(4);
         _noticeTimer.IsRepeating = false;
-        _noticeTimer.Tick += (_, _) => HideNotice();
+        _noticeTimer.Tick += (_, _) => { if (!hovered) HideNotice(); };
+        OverlayNotice.PointerEntered += (_, _) => { hovered = true; _noticeTimer.Stop(); };
+        OverlayNotice.PointerExited += (_, _) =>
+        {
+            hovered = false;
+            if (OverlayNotice.IsOpen && OverlayNotice.Severity is InfoBarSeverity.Success or InfoBarSeverity.Informational)
+                _noticeTimer.Start();
+        };
         OverlayNotice.Closed += (_, _) =>
         {
             _noticeTimer.Stop();
@@ -381,7 +430,7 @@ public sealed partial class MainWindow
     }
 
     /// <summary>Show an operation message at the bottom right without moving page content.</summary>
-    private void ShowNotice(string title, string message, InfoBarSeverity severity, string? actionText = null, Action? action = null)
+    private void ShowNotice(string title, string message, InfoBarSeverity severity, string? actionText = null, Action? action = null, TimeSpan? duration = null)
     {
         _noticeTitle = title;
         OverlayNotice.Title = title;
@@ -393,7 +442,10 @@ public sealed partial class MainWindow
         OverlayNotice.IsOpen = true;
         _noticeTimer!.Stop();
         if (severity is InfoBarSeverity.Success or InfoBarSeverity.Informational)
+        {
+            _noticeTimer.Interval = duration ?? TimeSpan.FromSeconds(4);
             _noticeTimer.Start();
+        }
     }
 
     private void HideNotice()
