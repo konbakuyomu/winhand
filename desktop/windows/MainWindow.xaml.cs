@@ -31,6 +31,32 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE")))
+        {
+            if (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_THEME") == "light")
+                RootGrid.RequestedTheme = ElementTheme.Light;
+            else if (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_THEME") == "dark")
+                RootGrid.RequestedTheme = ElementTheme.Dark;
+        }
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(TitleBarDragRegion);
+        RootNavigation.RegisterPropertyChangedCallback(NavigationView.IsPaneOpenProperty, (_, _) => UpdatePaneFooter());
+        RootNavigation.Loaded += (_, _) =>
+        {
+            // The native template puts PaneFooter above FooterMenuItems; the design puts it below.
+            // These are the template's own parts: when another WinUI version lays them out differently,
+            // the native order stays rather than the app failing to start.
+            DependencyObject? footer = MascotStatusButton;
+            while (footer is not null && (footer as FrameworkElement)?.Name != "FooterContentBorder")
+                footer = VisualTreeHelper.GetParent(footer);
+            if (footer is FrameworkElement border && VisualTreeHelper.GetParent(border) is Grid items
+                && items.Children.OfType<FrameworkElement>().Where(item => Grid.GetRow(item) == 3).ToList() is [var footerItems])
+            {
+                Grid.SetRow(footerItems, 2);
+                Grid.SetRow(border, 3);
+            }
+        };
+        UpdatePaneFooter();
         _hwnd = WindowNative.GetWindowHandle(this);
         _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(_hwnd));
         _appWindow.Title = "winhand";
@@ -60,7 +86,7 @@ public sealed partial class MainWindow : Window
         ShowPage("overview", fromNavigation: true); // the XAML already selects it; setting it again misplaces the indicator
         if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE"))
             && Environment.GetEnvironmentVariable("WINHAND_DESKTOP_PAGE") is { } page && _pages.ContainsKey(page))
-            ShowPage(page);
+            RootNavigation.Loaded += (_, _) => ShowPage(page); // selected before Loaded, the XAML-selected item stays highlighted too
         // Check that an error escaping a XAML callback is logged and survived (CrashGuard).
         if (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_SELFTEST") == "ui-error")
             RootNavigation.Loaded += (_, _) => throw new ArgumentException("WINHAND_DESKTOP_SELFTEST=ui-error");
@@ -214,16 +240,25 @@ public sealed partial class MainWindow : Window
     private void RefreshStatus()
     {
         var view = CurrentStatus;
-        HeaderStatus.Content = view.Label;
-        HeaderStatus.Style = PillStyle(view.Tone);
-        ConnectionDot.Style = Resource<Style>(view.Tone switch
+        ConnectionDot.Style = CompactConnectionDot.Style = DotStyle(view.Tone);
+        ConnectionLabel.Text = view.Label;
+        ConnectionLabel.Style = Resource<Style>("ConnectionLabel" + (view.Tone switch
         {
-            Tone.Success => "ConnectionReadyStyle",
-            Tone.Warning => "ConnectionPendingStyle",
-            Tone.Error => "ConnectionFailedStyle",
-            _ => "ConnectionIdleStyle"
-        });
-        ConnectionToolTip.Content = $"{view.Label} · {view.Detail}";
+            Tone.Success => "Success",
+            Tone.Warning => "Warning",
+            Tone.Error => "Critical",
+            Tone.Active => "Active",
+            _ => "Neutral"
+        }) + "Style");
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "?";
+        ConnectionMeta.Text = $"v{version}" + (view.Online ? $" · {Format.Since(Json.Num(_status, "since"))}" : "");
+        ConnectionToolTip.Content = $"{Json.Str(_relay, "url")}\n{view.Label} · {view.Detail}";
+        var openSessions = _sessions.Count(s => Json.Str(s, "state") != "exited");
+        NavSessions.Visibility = openSessions > 0 || _currentPage == "sessions" ? Visibility.Visible : Visibility.Collapsed;
+        SessionsBadge.Value = openSessions;
+        SessionsBadge.Style = Resource<Style>(_sessions.Any(s => Json.Str(s, "state") is "needs_user" or "blocked")
+            ? "WinhandSessionCautionBadgeStyle" : "WinhandSessionBadgeStyle");
+        UpdateBadge.Visibility = _updater.Available || _updater.Ready ? Visibility.Visible : Visibility.Collapsed;
         var update = _updater.Ready ? $"\n新版本 {_updater.LatestVersion} 已就绪"
             : _updater.Available ? $"\n发现新版本 {_updater.LatestVersion}" : "";
         _tray.Update(view.Online, $"winhand · {view.Label}\n{view.Detail}{update}");
@@ -232,6 +267,22 @@ public sealed partial class MainWindow : Window
     }
 
     // -------------------------------------------------------------- navigation
+
+    private void OnPaneToggleClick(object sender, RoutedEventArgs args) => RootNavigation.IsPaneOpen = !RootNavigation.IsPaneOpen;
+
+    private void OnMascotStatusClick(object sender, RoutedEventArgs args) => ShowPage("overview");
+
+    private void OnRootSizeChanged(object sender, SizeChangedEventArgs args)
+    {
+        if ((args.PreviousSize.Width < 680) != (args.NewSize.Width < 680))
+            RootNavigation.IsPaneOpen = args.NewSize.Width >= 680;
+    }
+
+    private void UpdatePaneFooter()
+    {
+        MascotExpandedGrid.Visibility = RootNavigation.IsPaneOpen ? Visibility.Visible : Visibility.Collapsed;
+        CompactConnectionDot.Visibility = RootNavigation.IsPaneOpen ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
@@ -242,26 +293,34 @@ public sealed partial class MainWindow : Window
     private void ShowPage(string page, bool fromNavigation = false)
     {
         _currentPage = page;
-        PageTitle.Text = page switch { "activity" => "活动", "sessions" => "会话", "mcp" => "MCP 服务", "settings" => "设置", _ => "概览" };
-        PageHost.Content = _pages[page];
-        if (page == "settings")
-        {
-            _ = RefreshAppsAsync(); // `winhand apps` or an edited file changes them without an event
-            _ = RefreshSecretsAsync(); // so does editing secrets.env by hand
-        }
-        else
+        if (page != "secrets")
             HideSecret();
+        PageHost.Content = _pages[page];
+        if (page == "apps")
+            _ = RefreshAppsAsync(); // `winhand apps` or an edited file changes them without an event
+        if (page == "secrets")
+            _ = RefreshSecretsAsync(); // so does editing secrets.env by hand
         if (!fromNavigation)
-            RootNavigation.SelectedItem = RootNavigation.MenuItems.OfType<NavigationViewItem>().First(i => (string)i.Tag == page);
+            RootNavigation.SelectedItem = RootNavigation.MenuItems.Concat(RootNavigation.FooterMenuItems)
+                .OfType<NavigationViewItem>().First(i => (string)i.Tag == page);
+        NavSessions.Visibility = _sessions.Any(s => Json.Str(s, "state") != "exited") || page == "sessions"
+            ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void BuildPages()
     {
-        _pages["overview"] = BuildOverview();
-        _pages["activity"] = BuildActivity();
-        _pages["sessions"] = BuildSessions();
-        _pages["mcp"] = BuildMcp();
-        _pages["settings"] = BuildSettings();
+        _pages["overview"] = PageHeader("概览", BuildOverview());
+        _pages["activity"] = PageHeader("活动", BuildActivity());
+        _pages["sessions"] = PageHeader("会话", BuildSessions());
+        _pages["mcp"] = PageHeader("MCP 服务", BuildMcp());
+        var secrets = PagePanel();
+        secrets.Children.Add(BuildSecretsSection());
+        _pages["secrets"] = PageHeader("密钥", PageScroll(secrets));
+        var apps = PagePanel();
+        apps.Children.Add(BuildAppsSection());
+        _pages["apps"] = PageHeader("程序授权", PageScroll(apps));
+        _pages["relay"] = PageHeader("中转", BuildRelay());
+        _pages["settings"] = PageHeader("设置", BuildSettings());
     }
 
     // ------------------------------------------------------------ window/tray

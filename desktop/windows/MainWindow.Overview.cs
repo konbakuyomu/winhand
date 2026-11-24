@@ -57,7 +57,7 @@ public sealed partial class MainWindow
                         Text("填写中转地址（wss://…/agent）和设备令牌后，claude.ai 的 winhand 连接器就能操作这台电脑。", "SecondaryCopyStyle")
                     }
                 },
-                ActionRow(ActionButton("去设置", () => ShowPage("settings"), accent: true))
+                ActionRow(ActionButton("去设置", () => ShowPage("relay"), accent: true))
             }
         });
         _setupHint.Visibility = Visibility.Collapsed;

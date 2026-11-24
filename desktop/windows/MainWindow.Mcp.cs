@@ -157,7 +157,7 @@ public sealed partial class MainWindow
         FrameworkElement addressAction = publicUrl is not null
             ? Named(ActionButton("复制", () => CopyText(publicUrl, $"已复制 {name} 的地址",
                 "在 claude.ai 的“设置 → 连接器 → 添加自定义连接器”里粘贴；第一次连接时输入 winhand 口令授权。")), $"复制 {name} 的远程地址")
-            : ActionButton("去设置", () => ShowPage("settings"));
+            : ActionButton("去设置", () => ShowPage("relay"));
         var addressRow = new Grid { ColumnSpacing = 20 };
         addressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         addressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });

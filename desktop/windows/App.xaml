@@ -7,6 +7,239 @@
       <ResourceDictionary.MergedDictionaries>
         <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
       </ResourceDictionary.MergedDictionaries>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <Color x:Key="SystemAccentColor">#4F63D2</Color>
+          <Color x:Key="SystemAccentColorLight1">#4254BC</Color>
+          <Color x:Key="SystemAccentColorLight2">#4F63D2</Color>
+          <Color x:Key="SystemAccentColorLight3">#3F51B5</Color>
+          <Color x:Key="SystemAccentColorDark1">#4F63D2</Color>
+          <Color x:Key="SystemAccentColorDark2">#3F51B5</Color>
+          <Color x:Key="SystemAccentColorDark3">#4254BC</Color>
+          <SolidColorBrush x:Key="WinhandAccentBrush" Color="#4F63D2" />
+          <SolidColorBrush x:Key="WinhandAccentHoverBrush" Color="#4254BC" />
+          <SolidColorBrush x:Key="WinhandAccentPressedBrush" Color="#3747A3" />
+          <SolidColorBrush x:Key="WinhandAccentTextBrush" Color="#3F51B5" />
+          <SolidColorBrush x:Key="WinhandAccentSoftBgBrush" Color="#EEF1FC" />
+          <SolidColorBrush x:Key="WinhandAccentForegroundOnFill" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#4F63D2" />
+          <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#4254BC" />
+          <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#3747A3" />
+          <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="#3F51B5" />
+          <SolidColorBrush x:Key="AccentTextFillColorSecondaryBrush" Color="#3F51B5" />
+          <SolidColorBrush x:Key="AccentTextFillColorTertiaryBrush" Color="#3F51B5" />
+          <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="TextOnAccentFillColorSecondaryBrush" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="SystemControlHighlightAccentBrush" Color="#4F63D2" />
+          <SolidColorBrush x:Key="SystemControlForegroundAccentBrush" Color="#4F63D2" />
+          <SolidColorBrush x:Key="SystemFillColorAttentionBrush" Color="#4F63D2" />
+          <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="#4F63D2" />
+          <SolidColorBrush x:Key="WinhandMicaFallbackBrush" Color="#F3F4F8" />
+          <SolidColorBrush x:Key="ApplicationPageBackgroundThemeBrush" Color="#F3F4F8" />
+          <SolidColorBrush x:Key="WinhandCanvasBrush" Color="#F9FAFC" />
+          <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="#F9FAFC" />
+          <SolidColorBrush x:Key="WinhandCodeBgBrush" Color="#F1F3F7" />
+          <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="CardBackgroundFillColorSecondaryBrush" Color="#F5F6FA" />
+          <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#0F000000" />
+          <SolidColorBrush x:Key="DividerStrokeColorDefaultBrush" Color="#0D000000" />
+          <SolidColorBrush x:Key="TextFillColorPrimaryBrush" Color="#1A1D24" />
+          <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="#5C6370" />
+          <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="#7E8594" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgBrush" Color="#FFF4CE" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgHoverBrush" Color="#FFEAA8" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgPressedBrush" Color="#FFE082" />
+          <SolidColorBrush x:Key="WinhandWarningTintBorderBrush" Color="#48C77800" />
+          <SolidColorBrush x:Key="WinhandWarningTintFgBrush" Color="#8A4F00" />
+          <SolidColorBrush x:Key="BadgeNeutralBgBrush" Color="#EFF1F5" />
+          <SolidColorBrush x:Key="BadgeNeutralFgBrush" Color="#5C6370" />
+          <SolidColorBrush x:Key="BadgeSuccessBgBrush" Color="#E7F6EC" />
+          <SolidColorBrush x:Key="BadgeSuccessFgBrush" Color="#107C41" />
+          <SolidColorBrush x:Key="BadgeActiveBgBrush" Color="#EEF1FC" />
+          <SolidColorBrush x:Key="BadgeActiveFgBrush" Color="#3F51B5" />
+          <SolidColorBrush x:Key="BadgeWarningBgBrush" Color="#FFF4CE" />
+          <SolidColorBrush x:Key="BadgeWarningFgBrush" Color="#9D5D00" />
+          <SolidColorBrush x:Key="BadgeCriticalBgBrush" Color="#FDE7E9" />
+          <SolidColorBrush x:Key="BadgeCriticalFgBrush" Color="#C42B1C" />
+          <SolidColorBrush x:Key="SystemFillColorSuccessBrush" Color="#107C41" />
+          <SolidColorBrush x:Key="SystemFillColorSuccessBackgroundBrush" Color="#E7F6EC" />
+          <SolidColorBrush x:Key="SystemFillColorCautionBrush" Color="#9D5D00" />
+          <SolidColorBrush x:Key="SystemFillColorCautionBackgroundBrush" Color="#FFF4CE" />
+          <SolidColorBrush x:Key="SystemFillColorCriticalBrush" Color="#C42B1C" />
+          <SolidColorBrush x:Key="SystemFillColorCriticalBackgroundBrush" Color="#FDE7E9" />
+          <SolidColorBrush x:Key="ConnectionReadyBrush" Color="#107C41" />
+          <StaticResource x:Key="AccentButtonBackground" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="AccentButtonBackgroundPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="AccentButtonBackgroundPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <StaticResource x:Key="AccentButtonForeground" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="AccentButtonForegroundPointerOver" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="AccentButtonForegroundPressed" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="HyperlinkButtonForeground" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="HyperlinkButtonForegroundPointerOver" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="HyperlinkButtonForegroundPressed" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOn" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOnPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOnPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOn" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOnPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOnPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <SolidColorBrush x:Key="WinhandTransparentBrush" Color="Transparent" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <Color x:Key="SystemAccentColor">#8EA0F8</Color>
+          <Color x:Key="SystemAccentColorLight1">#A3B2FA</Color>
+          <Color x:Key="SystemAccentColorLight2">#8EA0F8</Color>
+          <Color x:Key="SystemAccentColorLight3">#A8B7FF</Color>
+          <Color x:Key="SystemAccentColorDark1">#788CEB</Color>
+          <Color x:Key="SystemAccentColorDark2">#788CEB</Color>
+          <Color x:Key="SystemAccentColorDark3">#788CEB</Color>
+          <SolidColorBrush x:Key="WinhandAccentBrush" Color="#8EA0F8" />
+          <SolidColorBrush x:Key="WinhandAccentHoverBrush" Color="#A3B2FA" />
+          <SolidColorBrush x:Key="WinhandAccentPressedBrush" Color="#788CEB" />
+          <SolidColorBrush x:Key="WinhandAccentTextBrush" Color="#A8B7FF" />
+          <SolidColorBrush x:Key="WinhandAccentSoftBgBrush" Color="#248EA0F8" />
+          <SolidColorBrush x:Key="WinhandAccentForegroundOnFill" Color="#0F1426" />
+          <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#8EA0F8" />
+          <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#A3B2FA" />
+          <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#788CEB" />
+          <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="#A8B7FF" />
+          <SolidColorBrush x:Key="AccentTextFillColorSecondaryBrush" Color="#A8B7FF" />
+          <SolidColorBrush x:Key="AccentTextFillColorTertiaryBrush" Color="#A8B7FF" />
+          <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#0F1426" />
+          <SolidColorBrush x:Key="TextOnAccentFillColorSecondaryBrush" Color="#0F1426" />
+          <SolidColorBrush x:Key="SystemControlHighlightAccentBrush" Color="#8EA0F8" />
+          <SolidColorBrush x:Key="SystemControlForegroundAccentBrush" Color="#8EA0F8" />
+          <SolidColorBrush x:Key="SystemFillColorAttentionBrush" Color="#8EA0F8" />
+          <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="#8EA0F8" />
+          <SolidColorBrush x:Key="WinhandMicaFallbackBrush" Color="#1C1D22" />
+          <SolidColorBrush x:Key="ApplicationPageBackgroundThemeBrush" Color="#1C1D22" />
+          <SolidColorBrush x:Key="WinhandCanvasBrush" Color="#24252B" />
+          <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="#24252B" />
+          <SolidColorBrush x:Key="WinhandCodeBgBrush" Color="#1B1C21" />
+          <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#2D2F36" />
+          <SolidColorBrush x:Key="CardBackgroundFillColorSecondaryBrush" Color="#34363F" />
+          <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#18FFFFFF" />
+          <SolidColorBrush x:Key="DividerStrokeColorDefaultBrush" Color="#14FFFFFF" />
+          <SolidColorBrush x:Key="TextFillColorPrimaryBrush" Color="#F4F5F8" />
+          <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="#A9B0BE" />
+          <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="#7D8494" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgBrush" Color="#22FCD14D" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgHoverBrush" Color="#34F5B82E" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgPressedBrush" Color="#1CF5B82E" />
+          <SolidColorBrush x:Key="WinhandWarningTintBorderBrush" Color="#4DF5B82E" />
+          <SolidColorBrush x:Key="WinhandWarningTintFgBrush" Color="#FCD14D" />
+          <SolidColorBrush x:Key="BadgeNeutralBgBrush" Color="#18FFFFFF" />
+          <SolidColorBrush x:Key="BadgeNeutralFgBrush" Color="#A9B0BE" />
+          <SolidColorBrush x:Key="BadgeSuccessBgBrush" Color="#225AD082" />
+          <SolidColorBrush x:Key="BadgeSuccessFgBrush" Color="#5AD082" />
+          <SolidColorBrush x:Key="BadgeActiveBgBrush" Color="#248EA0F8" />
+          <SolidColorBrush x:Key="BadgeActiveFgBrush" Color="#A8B7FF" />
+          <SolidColorBrush x:Key="BadgeWarningBgBrush" Color="#22FCD14D" />
+          <SolidColorBrush x:Key="BadgeWarningFgBrush" Color="#FCD14D" />
+          <SolidColorBrush x:Key="BadgeCriticalBgBrush" Color="#24FF8C96" />
+          <SolidColorBrush x:Key="BadgeCriticalFgBrush" Color="#FF8C96" />
+          <SolidColorBrush x:Key="SystemFillColorSuccessBrush" Color="#5AD082" />
+          <SolidColorBrush x:Key="SystemFillColorSuccessBackgroundBrush" Color="#225AD082" />
+          <SolidColorBrush x:Key="SystemFillColorCautionBrush" Color="#FCD14D" />
+          <SolidColorBrush x:Key="SystemFillColorCautionBackgroundBrush" Color="#22FCD14D" />
+          <SolidColorBrush x:Key="SystemFillColorCriticalBrush" Color="#FF8C96" />
+          <SolidColorBrush x:Key="SystemFillColorCriticalBackgroundBrush" Color="#24FF8C96" />
+          <SolidColorBrush x:Key="ConnectionReadyBrush" Color="#5AD082" />
+          <StaticResource x:Key="AccentButtonBackground" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="AccentButtonBackgroundPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="AccentButtonBackgroundPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <StaticResource x:Key="AccentButtonForeground" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="AccentButtonForegroundPointerOver" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="AccentButtonForegroundPressed" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="HyperlinkButtonForeground" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="HyperlinkButtonForegroundPointerOver" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="HyperlinkButtonForegroundPressed" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOn" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOnPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOnPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOn" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOnPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOnPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <SolidColorBrush x:Key="WinhandTransparentBrush" Color="Transparent" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="HighContrast">
+          <StaticResource x:Key="SystemAccentColor" ResourceKey="SystemColorHighlightColor" />
+          <StaticResource x:Key="SystemAccentColorLight1" ResourceKey="SystemColorHighlightColor" />
+          <StaticResource x:Key="SystemAccentColorLight2" ResourceKey="SystemColorHighlightColor" />
+          <StaticResource x:Key="SystemAccentColorLight3" ResourceKey="SystemColorHighlightColor" />
+          <StaticResource x:Key="SystemAccentColorDark1" ResourceKey="SystemColorHighlightColor" />
+          <StaticResource x:Key="SystemAccentColorDark2" ResourceKey="SystemColorHighlightColor" />
+          <StaticResource x:Key="SystemAccentColorDark3" ResourceKey="SystemColorHighlightColor" />
+          <SolidColorBrush x:Key="WinhandAccentBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="WinhandAccentHoverBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="WinhandAccentPressedBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="WinhandAccentTextBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="WinhandAccentSoftBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="WinhandAccentForegroundOnFill" Color="{ThemeResource SystemColorHighlightTextColor}" />
+          <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="AccentTextFillColorSecondaryBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="AccentTextFillColorTertiaryBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="{ThemeResource SystemColorHighlightTextColor}" />
+          <SolidColorBrush x:Key="TextOnAccentFillColorSecondaryBrush" Color="{ThemeResource SystemColorHighlightTextColor}" />
+          <SolidColorBrush x:Key="SystemControlHighlightAccentBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="SystemControlForegroundAccentBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="SystemFillColorAttentionBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="WinhandMicaFallbackBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="ApplicationPageBackgroundThemeBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="WinhandCanvasBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="WinhandCodeBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="CardBackgroundFillColorSecondaryBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="DividerStrokeColorDefaultBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="TextFillColorPrimaryBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="{ThemeResource SystemColorGrayTextColor}" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgHoverBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="WinhandWarningTintBgPressedBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="WinhandWarningTintBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="WinhandWarningTintFgBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="BadgeNeutralBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="BadgeNeutralFgBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="BadgeSuccessBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="BadgeSuccessFgBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="BadgeActiveBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="BadgeActiveFgBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+          <SolidColorBrush x:Key="BadgeWarningBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="BadgeWarningFgBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="BadgeCriticalBgBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="BadgeCriticalFgBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="SystemFillColorSuccessBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="SystemFillColorSuccessBackgroundBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="SystemFillColorCautionBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="SystemFillColorCautionBackgroundBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="SystemFillColorCriticalBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="SystemFillColorCriticalBackgroundBrush" Color="{ThemeResource SystemColorWindowColor}" />
+          <SolidColorBrush x:Key="ConnectionReadyBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <StaticResource x:Key="AccentButtonBackground" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="AccentButtonBackgroundPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="AccentButtonBackgroundPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <StaticResource x:Key="AccentButtonForeground" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="AccentButtonForegroundPointerOver" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="AccentButtonForegroundPressed" ResourceKey="WinhandAccentForegroundOnFill" />
+          <StaticResource x:Key="HyperlinkButtonForeground" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="HyperlinkButtonForegroundPointerOver" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="HyperlinkButtonForegroundPressed" ResourceKey="WinhandAccentTextBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOn" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOnPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="ToggleSwitchFillOnPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOn" ResourceKey="WinhandAccentBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOnPointerOver" ResourceKey="WinhandAccentHoverBrush" />
+          <StaticResource x:Key="ToggleSwitchStrokeOnPressed" ResourceKey="WinhandAccentPressedBrush" />
+          <SolidColorBrush x:Key="WinhandTransparentBrush" Color="Transparent" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
       <ItemsPanelTemplate x:Key="ActivityItemsPanel">
         <ItemsStackPanel ItemsUpdatingScrollMode="KeepScrollOffset" />
       </ItemsPanelTemplate>
@@ -22,31 +255,86 @@
       <Style TargetType="PasswordBox" BasedOn="{StaticResource DefaultPasswordBoxStyle}">
         <Setter Property="MinHeight" Value="36" />
       </Style>
-      <Style x:Key="PageHeadingStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="26" />
+      <Style x:Key="BodyTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Microsoft YaHei UI" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="LineHeight" Value="20" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+      </Style>
+      <Style x:Key="PageTitleStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Microsoft YaHei UI" />
+        <Setter Property="FontSize" Value="22" />
+        <Setter Property="LineHeight" Value="28" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="TextWrapping" Value="Wrap" />
         <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
       </Style>
-      <Style x:Key="SectionHeadingStyle" TargetType="TextBlock" BasedOn="{StaticResource PageHeadingStyle}">
-        <Setter Property="FontSize" Value="18" />
-      </Style>
-      <Style x:Key="BodyCopyStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="14" />
+      <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Microsoft YaHei UI" />
+        <Setter Property="FontSize" Value="15" />
+        <Setter Property="LineHeight" Value="20" />
+        <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="TextWrapping" Value="Wrap" />
         <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
       </Style>
-      <Style x:Key="SecondaryCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyCopyStyle}">
+      <Style x:Key="RowTitleStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Microsoft YaHei UI" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="LineHeight" Value="20" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+      </Style>
+      <Style x:Key="CaptionTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Microsoft YaHei UI" />
         <Setter Property="FontSize" Value="12" />
+        <Setter Property="LineHeight" Value="16" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="TextWrapping" Value="Wrap" />
         <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
       </Style>
-      <Style x:Key="DataCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource SecondaryCopyStyle}">
-        <Setter Property="FontFamily" Value="Consolas" />
+      <Style x:Key="MonoTitleStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Cascadia Mono, Consolas" />
+        <Setter Property="FontSize" Value="13.5" />
+        <Setter Property="LineHeight" Value="20" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+      </Style>
+      <Style x:Key="MonoDataStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Cascadia Mono, Consolas" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="LineHeight" Value="18" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+      </Style>
+      <Style x:Key="MetricValueStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Microsoft YaHei UI" />
+        <Setter Property="FontSize" Value="24" />
+        <Setter Property="LineHeight" Value="30" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+      </Style>
+      <Style x:Key="PageHeadingStyle" TargetType="TextBlock" BasedOn="{StaticResource PageTitleStyle}" />
+      <Style x:Key="SectionHeadingStyle" TargetType="TextBlock" BasedOn="{StaticResource SectionTitleStyle}" />
+      <Style x:Key="BodyCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}" />
+      <Style x:Key="SecondaryCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}" />
+      <Style x:Key="DataCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource MonoDataStyle}">
         <Setter Property="IsTextSelectionEnabled" Value="True" />
       </Style>
-      <Style x:Key="LabelCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyCopyStyle}">
-        <Setter Property="FontWeight" Value="SemiBold" />
-      </Style>
+      <Style x:Key="LabelCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource RowTitleStyle}" />
       <Thickness x:Key="SurfaceCardPadding">16</Thickness>
       <Style x:Key="ErrorCopyStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyCopyStyle}">
         <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCriticalBrush}" />
@@ -63,7 +351,7 @@
             <ControlTemplate TargetType="ContentControl">
               <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                       BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                      BorderThickness="1" CornerRadius="10" Padding="{TemplateBinding Padding}">
+                      BorderThickness="1" CornerRadius="8" Padding="{TemplateBinding Padding}">
                 <ContentPresenter Content="{TemplateBinding Content}"
                                   ContentTemplate="{TemplateBinding ContentTemplate}"
                                   Padding="0"
@@ -80,7 +368,7 @@
         <Setter Property="Template">
           <Setter.Value>
             <ControlTemplate TargetType="Thumb">
-              <Grid Background="Transparent">
+              <Grid Background="{ThemeResource WinhandTransparentBrush}">
                 <Border Width="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
               </Grid>
             </ControlTemplate>
@@ -117,11 +405,10 @@
         <Setter Property="MinHeight" Value="24" />
         <Setter Property="Padding" Value="5" />
         <Setter Property="BorderThickness" Value="0" />
-        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Background" Value="{ThemeResource WinhandTransparentBrush}" />
         <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
         <Setter Property="CornerRadius" Value="12" />
       </Style>
-      <SolidColorBrush x:Key="ConnectionReadyBrush" Color="#35C759" />
       <Style x:Key="ConnectionIdleStyle" TargetType="Ellipse">
         <Setter Property="Width" Value="8" />
         <Setter Property="Height" Value="8" />
@@ -129,7 +416,7 @@
         <Setter Property="Fill" Value="{ThemeResource TextFillColorSecondaryBrush}" />
       </Style>
       <Style x:Key="ConnectionReadyStyle" TargetType="Ellipse" BasedOn="{StaticResource ConnectionIdleStyle}">
-        <Setter Property="Fill" Value="{StaticResource ConnectionReadyBrush}" />
+        <Setter Property="Fill" Value="{ThemeResource ConnectionReadyBrush}" />
       </Style>
       <Style x:Key="ConnectionPendingStyle" TargetType="Ellipse" BasedOn="{StaticResource ConnectionIdleStyle}">
         <Setter Property="Fill" Value="{ThemeResource SystemFillColorCautionBrush}" />
@@ -137,39 +424,222 @@
       <Style x:Key="ConnectionFailedStyle" TargetType="Ellipse" BasedOn="{StaticResource ConnectionIdleStyle}">
         <Setter Property="Fill" Value="{ThemeResource SystemFillColorCriticalBrush}" />
       </Style>
-      <Style x:Key="StatusNeutralStyle" TargetType="ContentControl">
-        <Setter Property="Padding" Value="8,4" />
-        <Setter Property="FontSize" Value="12" />
-        <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="HorizontalAlignment" Value="Left" />
-        <Setter Property="VerticalAlignment" Value="Center" />
-        <Setter Property="Background" Value="{ThemeResource ControlFillColorSecondaryBrush}" />
+      <Style x:Key="SettingsRowCardStyle" TargetType="ContentControl" BasedOn="{StaticResource SurfaceCardStyle}">
+        <Setter Property="Padding" Value="18,14" />
+        <Setter Property="MinHeight" Value="64" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="IsTabStop" Value="False" />
+      </Style>
+      <Style x:Key="GhostButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="Padding" Value="10,4" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Background" Value="{ThemeResource WinhandTransparentBrush}" />
         <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource WinhandTransparentBrush}" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
         <Setter Property="Template">
           <Setter.Value>
-            <ControlTemplate TargetType="ContentControl">
-              <Border Background="{TemplateBinding Background}" CornerRadius="12" Padding="{TemplateBinding Padding}">
-                <ContentPresenter Content="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" />
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="RootBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
+                <VisualStateManager.VisualStateGroups>
+                  <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal" />
+                    <VisualState x:Name="PointerOver">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                        <Setter Target="ButtonContent.Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Pressed">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                        <Setter Target="ButtonContent.Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Disabled">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Opacity" Value="0.45" />
+                      </VisualState.Setters>
+                    </VisualState>
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+                <ContentPresenter x:Name="ButtonContent" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                                  Foreground="{TemplateBinding Foreground}" HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
               </Border>
             </ControlTemplate>
           </Setter.Value>
         </Setter>
       </Style>
-      <Style x:Key="StatusSuccessStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusNeutralStyle}">
-        <Setter Property="Background" Value="{ThemeResource SystemFillColorSuccessBackgroundBrush}" />
-        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorSuccessBrush}" />
+      <Style x:Key="DangerGhostButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="Padding" Value="10,4" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Background" Value="{ThemeResource WinhandTransparentBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource WinhandTransparentBrush}" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="RootBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
+                <VisualStateManager.VisualStateGroups>
+                  <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal" />
+                    <VisualState x:Name="PointerOver">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Background" Value="{ThemeResource BadgeCriticalBgBrush}" />
+                        <Setter Target="ButtonContent.Foreground" Value="{ThemeResource BadgeCriticalFgBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Pressed">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Background" Value="{ThemeResource BadgeCriticalBgBrush}" />
+                        <Setter Target="ButtonContent.Foreground" Value="{ThemeResource BadgeCriticalFgBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Disabled">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Opacity" Value="0.45" />
+                      </VisualState.Setters>
+                    </VisualState>
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+                <ContentPresenter x:Name="ButtonContent" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                                  Foreground="{TemplateBinding Foreground}" HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
       </Style>
-      <Style x:Key="StatusWarningStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusNeutralStyle}">
-        <Setter Property="Background" Value="{ThemeResource SystemFillColorCautionBackgroundBrush}" />
-        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCautionBrush}" />
+      <Style x:Key="WarningTintedButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="Padding" Value="10,4" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Background" Value="{ThemeResource WinhandWarningTintBgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource WinhandWarningTintFgBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource WinhandWarningTintBorderBrush}" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="RootBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
+                <VisualStateManager.VisualStateGroups>
+                  <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal" />
+                    <VisualState x:Name="PointerOver">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Background" Value="{ThemeResource WinhandWarningTintBgHoverBrush}" />
+                        <Setter Target="ButtonContent.Foreground" Value="{ThemeResource WinhandWarningTintFgBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Pressed">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Background" Value="{ThemeResource WinhandWarningTintBgPressedBrush}" />
+                        <Setter Target="ButtonContent.Foreground" Value="{ThemeResource WinhandWarningTintFgBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Disabled">
+                      <VisualState.Setters>
+                        <Setter Target="RootBorder.Opacity" Value="0.45" />
+                      </VisualState.Setters>
+                    </VisualState>
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+                <ContentPresenter x:Name="ButtonContent" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                                  Foreground="{TemplateBinding Foreground}" HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
       </Style>
-      <Style x:Key="StatusErrorStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusNeutralStyle}">
-        <Setter Property="Background" Value="{ThemeResource SystemFillColorCriticalBackgroundBrush}" />
-        <Setter Property="Foreground" Value="{ThemeResource SystemFillColorCriticalBrush}" />
+      <Style x:Key="IconGhostButtonStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+        <Setter Property="Width" Value="30" />
+        <Setter Property="Height" Value="30" />
+        <Setter Property="MinWidth" Value="30" />
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
       </Style>
-      <Style x:Key="StatusActiveStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusNeutralStyle}">
-        <Setter Property="Background" Value="{ThemeResource ControlFillColorSecondaryBrush}" />
-        <Setter Property="Foreground" Value="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+      <Style x:Key="StatusBadgeNeutralStyle" TargetType="ContentControl">
+        <Setter Property="Height" Value="22" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="IsTabStop" Value="False" />
+        <Setter Property="HorizontalAlignment" Value="Left" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Background" Value="{ThemeResource BadgeNeutralBgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeNeutralFgBrush}" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="ContentControl">
+              <Border Background="{TemplateBinding Background}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                <ContentPresenter Content="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="StatusBadgeSuccessStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeNeutralStyle}">
+        <Setter Property="Background" Value="{ThemeResource BadgeSuccessBgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeSuccessFgBrush}" />
+      </Style>
+      <Style x:Key="StatusBadgeActiveStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeNeutralStyle}">
+        <Setter Property="Background" Value="{ThemeResource BadgeActiveBgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeActiveFgBrush}" />
+      </Style>
+      <Style x:Key="StatusBadgeWarningStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeNeutralStyle}">
+        <Setter Property="Background" Value="{ThemeResource BadgeWarningBgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeWarningFgBrush}" />
+      </Style>
+      <Style x:Key="StatusBadgeCriticalStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeNeutralStyle}">
+        <Setter Property="Background" Value="{ThemeResource BadgeCriticalBgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeCriticalFgBrush}" />
+      </Style>
+      <Style x:Key="StatusNeutralStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeNeutralStyle}" />
+      <Style x:Key="StatusSuccessStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeSuccessStyle}" />
+      <Style x:Key="StatusActiveStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeActiveStyle}" />
+      <Style x:Key="StatusWarningStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeWarningStyle}" />
+      <Style x:Key="StatusErrorStyle" TargetType="ContentControl" BasedOn="{StaticResource StatusBadgeCriticalStyle}" />
+      <Style x:Key="WinhandSessionBadgeStyle" TargetType="InfoBadge" BasedOn="{StaticResource AttentionValueInfoBadgeStyle}">
+        <Setter Property="Background" Value="{ThemeResource WinhandAccentBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource WinhandAccentForegroundOnFill}" />
+      </Style>
+      <Style x:Key="WinhandSessionCautionBadgeStyle" TargetType="InfoBadge" BasedOn="{StaticResource CautionValueInfoBadgeStyle}">
+        <Setter Property="Background" Value="{ThemeResource BadgeWarningFgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource WinhandAccentForegroundOnFill}" />
+      </Style>
+      <Style x:Key="ConnectionLabelNeutralStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeNeutralFgBrush}" />
+      </Style>
+      <Style x:Key="ConnectionLabelSuccessStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeSuccessFgBrush}" />
+      </Style>
+      <Style x:Key="ConnectionLabelActiveStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeActiveFgBrush}" />
+      </Style>
+      <Style x:Key="ConnectionLabelWarningStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeWarningFgBrush}" />
+      </Style>
+      <Style x:Key="ConnectionLabelCriticalStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource BadgeCriticalFgBrush}" />
       </Style>
     </ResourceDictionary>
   </Application.Resources>

@@ -3,8 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace Winhand.Desktop;
 
-/// <summary>The "设置" page: one scrolling column of sections (relay, secrets, program approval, startup,
-/// updates, local data, about); each setting is a row with its description left and its control right.</summary>
+/// <summary>The relay page and local settings (startup, updates, local data, about).</summary>
 public sealed partial class MainWindow
 {
     private TextBox? _relayUrl;
@@ -13,7 +12,7 @@ public sealed partial class MainWindow
     private TextBlock? _configPath, _logsPath, _activityPath, _aboutText, _autostartHint;
     private bool _relayUrlTouched;
 
-    private UIElement BuildSettings()
+    private UIElement BuildRelay()
     {
         var page = PagePanel();
 
@@ -24,8 +23,12 @@ public sealed partial class MainWindow
         page.Children.Add(Section("中转", "这台电脑主动连出到你的 Cloudflare 中转，不开放任何入站端口。令牌只保存在本机的 config.toml。",
             Card(new StackPanel { Spacing = 16, Children = { _relayUrl, _relayToken, ActionRow(save) } })));
 
-        page.Children.Add(BuildSecretsSection());
-        page.Children.Add(BuildAppsSection());
+        return PageScroll(page);
+    }
+
+    private UIElement BuildSettings()
+    {
+        var page = PagePanel();
 
         _autostart = CompactSwitch("登录 Windows 后自动启动", Autostart.IsEnabled);
         _autostart.Toggled += (_, _) =>

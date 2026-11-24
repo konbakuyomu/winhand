@@ -1,7 +1,8 @@
 param(
     [string]$OutDir = (Join-Path $PSScriptRoot '..\out\preview\shots'),
-    [string[]]$Pages = @('overview', 'activity', 'sessions', 'mcp', 'settings'),
+    [string[]]$Pages = @('overview', 'activity', 'sessions', 'mcp', 'secrets', 'apps', 'relay', 'settings'),
     [ValidateSet('default', 'empty')][string]$Scenario = 'default',
+    [ValidateSet('light', 'dark')][string]$Theme = 'light',
     [string]$Size = '853x1018',
     [switch]$NoBuild
 )
@@ -36,24 +37,24 @@ try {
         $env:WINHAND_BACKEND_ARGS = $backend
         $env:WINHAND_PREVIEW_SCENARIO = $Scenario
         $env:WINHAND_DESKTOP_PAGE = $page
+        $env:WINHAND_DESKTOP_THEME = $Theme
         $env:WINHAND_DESKTOP_SIZE = $Size
-        $foreground = [PreviewCapture]::GetForegroundWindow()
-        $changed = $false
+        $stolen = $false  # the person may switch windows meanwhile: only the preview taking the foreground counts
+        $hwnd = [IntPtr]::Zero
         $process = Start-Process (Join-Path $app 'WinhandDesktop.exe') -PassThru -WindowStyle Hidden
         try {
             $deadline = [DateTime]::UtcNow.AddSeconds(30)
             do {
                 $process.Refresh()
-                $changed = $changed -or ([PreviewCapture]::GetForegroundWindow() -ne $foreground)
                 if ($process.HasExited) { throw "Preview process exited: $($process.ExitCode)" }
-                if ($process.MainWindowHandle -ne 0) { break }
+                if ($process.MainWindowHandle -ne 0) { $hwnd = $process.MainWindowHandle; break }
                 if ([DateTime]::UtcNow -ge $deadline) { throw 'Preview window did not appear within 30 seconds' }
                 Start-Sleep -Milliseconds 100
             } while ($true)
             $ready = [DateTime]::UtcNow.AddSeconds(3)
             do {
                 Start-Sleep -Milliseconds 100
-                $changed = $changed -or ([PreviewCapture]::GetForegroundWindow() -ne $foreground)
+                $stolen = $stolen -or ([PreviewCapture]::GetForegroundWindow() -eq $hwnd)
             } while ([DateTime]::UtcNow -lt $ready)
             $rect = [PreviewCapture+RECT]::new()
             if (-not [PreviewCapture]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) {
@@ -70,7 +71,7 @@ try {
                         throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
                     }
                 } finally { $graphics.ReleaseHdc($hdc); $graphics.Dispose() }
-                $bitmap.Save((Join-Path ([IO.Path]::GetFullPath($OutDir)) "$Scenario-$page.png"), [Drawing.Imaging.ImageFormat]::Png)
+                $bitmap.Save((Join-Path ([IO.Path]::GetFullPath($OutDir)) "$Scenario-$Theme-$page.png"), [Drawing.Imaging.ImageFormat]::Png)
                 $color = $bitmap.GetPixel(32, 80).ToArgb()
                 $content = $false
                 for ($y = 80; $y -lt $height - 32 -and -not $content; $y += 32) {
@@ -78,9 +79,9 @@ try {
                         if ($bitmap.GetPixel($x, $y).ToArgb() -ne $color) { $content = $true; break }
                     }
                 }
-                if (-not $content) { throw "Blank or black preview: $Scenario-$page.png" }
+                if (-not $content) { throw "Blank or black preview: $Scenario-$Theme-$page.png" }
             } finally { $bitmap.Dispose() }
-            $changed = $changed -or ([PreviewCapture]::GetForegroundWindow() -ne $foreground)
+            $stolen = $stolen -or ([PreviewCapture]::GetForegroundWindow() -eq $hwnd)
         } finally {
             $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($process.Id) AND Name='python.exe'" |
                 Where-Object { $_.CommandLine -like "*$backend*" } | ForEach-Object { [Diagnostics.Process]::GetProcessById($_.ProcessId) })
@@ -92,8 +93,7 @@ try {
             }
             $process.Dispose()
         }
-        $changed = $changed -or ([PreviewCapture]::GetForegroundWindow() -ne $foreground)
-        $answer = if ($changed) { '是' } else { '否' }
-        Write-Output "$page ${width}x${height} 前台窗口变过：$answer"
+        $answer = if ($stolen) { '是' } else { '否' }
+        Write-Output "$page ${width}x${height} 预览抢过前台：$answer"
     }
 } finally { [PreviewCapture]::SetThreadDpiAwarenessContext($previousDpi) | Out-Null }

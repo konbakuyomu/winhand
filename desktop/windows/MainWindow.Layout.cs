@@ -10,18 +10,32 @@ namespace Winhand.Desktop;
 /// <summary>Shared page structure, following Smart Search's Windows layout: one 24 px content edge,
 /// a 920 px reading width, sections (18 px heading, 12 px to content, 24 px apart), setting rows
 /// with the description left and the control right, resizable list/detail splits, and operation
-/// messages in a header flyout so they never move the page.</summary>
+/// messages in a floating InfoBar so they never move the page.</summary>
 public sealed partial class MainWindow
 {
     private const double PageInset = 24;
     private const double ContentMaxWidth = 920;
     private Action? _feedbackAction;
     private string? _noticeTitle;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _noticeTimer;
     private bool _uiErrorShown;
 
     // ------------------------------------------------------------------ pages
 
     private static StackPanel PagePanel() => new() { Spacing = PageInset, MaxWidth = ContentMaxWidth, HorizontalAlignment = HorizontalAlignment.Left };
+
+    private static Grid PageHeader(string title, UIElement content)
+    {
+        var page = new Grid();
+        page.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        page.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var heading = Text(title, "PageTitleStyle");
+        heading.Margin = new Thickness(PageInset, 20, PageInset, 0);
+        page.Children.Add(heading);
+        content.SetValue(Grid.RowProperty, 1); // Grid.SetRow takes a FrameworkElement; the page builders return UIElement
+        page.Children.Add(content);
+        return page;
+    }
 
     /// <summary>A vertically scrolling page whose content keeps the 24 px edge and fits the width.</summary>
     private static ScrollViewer PageScroll(FrameworkElement content, double inset = PageInset)
@@ -342,49 +356,46 @@ public sealed partial class MainWindow
 
     private void InitializeFeedback()
     {
-        FeedbackClear.Click += (_, _) => HideNotice();
-        FeedbackAction.Click += (_, _) =>
+        _noticeTimer = DispatcherQueue.CreateTimer();
+        _noticeTimer.Interval = TimeSpan.FromSeconds(4);
+        _noticeTimer.IsRepeating = false;
+        _noticeTimer.Tick += (_, _) => HideNotice();
+        OverlayNotice.Closed += (_, _) =>
         {
-            FeedbackFlyout.Hide();
-            _feedbackAction?.Invoke();
+            _noticeTimer.Stop();
+            _noticeTitle = null;
+            _feedbackAction = null;
+        };
+        NoticeAction.Click += (_, _) =>
+        {
+            var action = _feedbackAction;
+            HideNotice();
+            action?.Invoke();
         };
     }
 
-    /// <summary>Show an operation message in the header flyout (reachable again until cleared).</summary>
+    /// <summary>Show an operation message at the bottom right without moving page content.</summary>
     private void ShowNotice(string title, string message, InfoBarSeverity severity, string? actionText = null, Action? action = null)
     {
         _noticeTitle = title;
-        FeedbackTitle.Text = title;
-        FeedbackMessage.Text = message;
-        FeedbackIcon.Glyph = severity switch
-        {
-            InfoBarSeverity.Error or InfoBarSeverity.Warning => "",
-            InfoBarSeverity.Success => "",
-            _ => ""
-        };
-        FeedbackIcon.Foreground = severity switch
-        {
-            InfoBarSeverity.Error => Resource<Microsoft.UI.Xaml.Media.Brush>("SystemFillColorCriticalBrush"),
-            InfoBarSeverity.Warning => Resource<Microsoft.UI.Xaml.Media.Brush>("SystemFillColorCautionBrush"),
-            _ => Resource<Microsoft.UI.Xaml.Media.Brush>("TextFillColorPrimaryBrush")
-        };
+        OverlayNotice.Title = title;
+        OverlayNotice.Message = message;
+        OverlayNotice.Severity = severity;
         _feedbackAction = action;
-        FeedbackAction.Content = actionText ?? "";
-        FeedbackAction.Visibility = action is null ? Visibility.Collapsed : Visibility.Visible;
-        FeedbackButton.IsEnabled = true;
-        ToolTipService.SetToolTip(FeedbackButton, title);
-        if (FeedbackButton.XamlRoot is not null && IsWindowVisible(_hwnd))
-            FeedbackFlyout.ShowAt(FeedbackButton);
+        NoticeAction.Content = actionText ?? "";
+        NoticeAction.Visibility = action is null ? Visibility.Collapsed : Visibility.Visible;
+        OverlayNotice.IsOpen = true;
+        _noticeTimer!.Stop();
+        if (severity is InfoBarSeverity.Success or InfoBarSeverity.Informational)
+            _noticeTimer.Start();
     }
 
     private void HideNotice()
     {
         _noticeTitle = null;
-        FeedbackFlyout.Hide();
-        FeedbackTitle.Text = FeedbackMessage.Text = "";
+        _noticeTimer!.Stop();
+        OverlayNotice.IsOpen = false;
         _feedbackAction = null;
-        FeedbackButton.IsEnabled = false;
-        ToolTipService.SetToolTip(FeedbackButton, "操作提示");
     }
 
     /// <summary>After the window recovered from an error (see <see cref="CrashGuard"/>): say so once per run.</summary>
