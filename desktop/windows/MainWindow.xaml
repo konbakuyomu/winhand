@@ -48,10 +48,10 @@
           <muxc:NavigationViewItem.InfoBadge><InfoBadge x:Name="SessionsBadge" Value="0" /></muxc:NavigationViewItem.InfoBadge>
         </muxc:NavigationViewItem>
         <muxc:NavigationViewItem Content="MCP 服务" Tag="mcp">
-          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE968;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
+          <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE71B;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
         </muxc:NavigationViewItem>
         <muxc:NavigationViewItemSeparator />
-        <muxc:NavigationViewItemHeader Content="安全与连接" />
+        <muxc:NavigationViewItemHeader Content="安全与连接" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         <muxc:NavigationViewItem Content="密钥" Tag="secrets">
           <muxc:NavigationViewItem.Icon><FontIcon Glyph="&#xE8D7;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" /></muxc:NavigationViewItem.Icon>
         </muxc:NavigationViewItem>
@@ -70,7 +70,7 @@
       </muxc:NavigationView.FooterMenuItems>
       <muxc:NavigationView.PaneFooter>
         <Button x:Name="MascotStatusButton" Style="{StaticResource GhostButtonStyle}" Click="OnMascotStatusClick"
-                Margin="6,4,6,4" Padding="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                Margin="6,12,6,10" Padding="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
                 AutomationProperties.Name="连接状态，返回概览">
           <ToolTipService.ToolTip><ToolTip x:Name="ConnectionToolTip" Placement="Top" /></ToolTipService.ToolTip>
           <Grid>

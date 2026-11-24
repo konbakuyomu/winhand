@@ -627,11 +627,11 @@
       </Style>
       <Style x:Key="ConnectionLabelSuccessStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Foreground" Value="{ThemeResource BadgeSuccessFgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
       </Style>
       <Style x:Key="ConnectionLabelActiveStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Foreground" Value="{ThemeResource BadgeActiveFgBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
       </Style>
       <Style x:Key="ConnectionLabelWarningStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextStyle}">
         <Setter Property="FontWeight" Value="SemiBold" />

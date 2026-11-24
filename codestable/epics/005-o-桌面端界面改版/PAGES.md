@@ -40,7 +40,7 @@
     [E80F] 概览                 (tag: overview)
     [E81C] 活动                 (tag: activity)
     [E756] 会话  [InfoBadge]    (tag: sessions, 默认 Collapsed，有会话时 Visible)
-    [E968] MCP 服务             (tag: mcp)
+    [E71B] MCP 服务             (tag: mcp)
     ─────────── (NavigationViewItemSeparator)
     安全与连接  (NavigationViewItemHeader)
     [E8D7] 密钥                 (tag: secrets)
@@ -144,7 +144,7 @@
           </NavigationViewItem.InfoBadge>
         </NavigationViewItem>
         <NavigationViewItem Content="MCP 服务" Tag="mcp">
-          <NavigationViewItem.Icon><FontIcon Glyph="&#xE968;" /></NavigationViewItem.Icon>
+          <NavigationViewItem.Icon><FontIcon Glyph="&#xE71B;" /></NavigationViewItem.Icon>
         </NavigationViewItem>
         <NavigationViewItemSeparator />
         <NavigationViewItemHeader Content="安全与连接" />
