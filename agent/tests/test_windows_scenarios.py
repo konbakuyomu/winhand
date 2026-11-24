@@ -537,6 +537,47 @@ async def test_ui_automation_fills_and_presses_controls(test_form):
     assert next(e for e in found["elements"] if e["name"] == "Remember me")["toggle"] == "On"
 
 
+def test_background_controls_keep_notepad_foreground(test_form):
+    from winhand import desktop
+    from winhand.tools_desktop import _ui_act
+
+    before = desktop.top_level_handles()
+    notepad = subprocess.Popen(["notepad.exe"])
+    notepad_hwnd = None
+    try:
+        for _ in range(240):
+            found = [
+                w
+                for w in desktop.windows()
+                if w["process"].lower() == "notepad.exe" and w["hwnd"] not in before
+            ]
+            if found:
+                notepad_hwnd = found[0]["hwnd"]
+                break
+            time.sleep(0.25)
+        else:
+            pytest.fail("notepad did not appear")
+        assert desktop._force_foreground(notepad_hwnd)
+        assert desktop.user32.GetForegroundWindow() == notepad_hwnd
+        for action, arguments in (
+            ("set_value", {"automation_id": "NameBox", "value": "background"}),
+            ("invoke", {"name": "Press me"}),
+        ):
+            done = _ui_act(test_form, action, **arguments)
+            assert done["done"] == ("value set" if action == "set_value" else "invoked"), done
+            assert desktop.user32.GetForegroundWindow() == notepad_hwnd
+            style = desktop.user32.GetWindowLongPtrW(test_form["hwnd"], desktop.GWL_EXSTYLE)
+            assert not style & desktop.WS_EX_NOACTIVATE
+            assert desktop.user32.IsWindowEnabled(test_form["hwnd"])
+        assert desktop.find_window(test_form["hwnd"])["title"].startswith(
+            "winhand-ui-test pressed: background"
+        )
+    finally:
+        if notepad_hwnd is not None:
+            desktop.user32.PostMessageW(notepad_hwnd, 0x0010, 0, 0)
+        notepad.wait(timeout=10)
+
+
 async def test_real_mouse_click_lands_where_the_screenshot_shows(test_form):
     from winhand import desktop
 

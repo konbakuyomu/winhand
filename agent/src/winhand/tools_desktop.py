@@ -768,7 +768,8 @@ def _ui_act(
         ):
             # a posted click: UI Automation's Invoke waits while the button's handler runs,
             # all the time a modal dialog it opens stays open
-            done = desktop.native_act(target, action, value)
+            with desktop.background(hwnd):
+                done = desktop.native_act(target, action, value)
         if not done and target.get("_element") is not None and can:
             handler = action in ("invoke", "toggle", "select", "expand")
             try:
@@ -777,6 +778,7 @@ def _ui_act(
                     action,
                     value,
                     timeout=INVOKE_WAIT_S if handler else uia.TIMEOUT_S,
+                    hwnd=hwnd,
                 )
             except uia.NoAnswer:
                 if not handler:
@@ -784,13 +786,15 @@ def _ui_act(
                 # the program is still in the control's handler, typically a dialog it opened
                 done = "sent; the program has not finished handling it (a dialog it opened may be waiting)"
         elif not done and target.get("uia_index") is not None and can:
-            done = _run_uia(
-                hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
-                ExpectId=",".join(map(str, target.get("_runtime_id", []))),
-                Do=action, Value=value,
-            )["done"]  # fmt: skip
+            with desktop.background(hwnd):
+                done = _run_uia(
+                    hwnd, Mode="act", Index=target["uia_index"], ExpectName=target["_expect"],
+                    ExpectId=",".join(map(str, target.get("_runtime_id", []))),
+                    Do=action, Value=value,
+                )["done"]  # fmt: skip
         if not done and target.get("native"):
-            done = desktop.native_act(target, action, value)
+            with desktop.background(hwnd):
+                done = desktop.native_act(target, action, value)
     rect = target.get("rect")
     if (
         not done
@@ -799,7 +803,7 @@ def _ui_act(
         and target.get("_element") is not None
         and "ScrollItem" in (target.get("patterns") or ())
     ):
-        rect = uia.scroll_into_view(target["_element"]) or rect  # a list row out of sight
+        rect = uia.scroll_into_view(target["_element"], hwnd=hwnd) or rect  # a list row out of sight
     if not done and action in ("click", "invoke", "toggle", "select") and rect:
         left, top, width, height = rect
         cx, cy = left + width // 2, top + height // 2
@@ -891,6 +895,10 @@ def _ui_act(
     }
     if snapshot.get("backend_note"):
         out["backend_note"] = snapshot["backend_note"]
+    if desktop.host_kind(w.get("class", "")) == "wpf":
+        out["focus_note"] = (
+            "WPF program: its controls can bring its window to the front even in the background"
+        )
     if ref is not None:
         out["ref"] = ref
     # a dialog the action opened (a confirmation, an error, a file picker) is what to look at next
@@ -914,10 +922,12 @@ def _ui_steps(w: dict, steps: list[dict], verify_wait_s: float) -> dict:
     results: list[dict] = []
     stopped = None
     shot_of = hwnd
+    background = desktop.background_ok(w)
     for n, step in enumerate(steps, 1):
         action = (step.get("action") or "").strip()
         try:
-            with presence.acting(f"ui step {n} {action}"):  # the stop keys end the steps here
+            # the stop keys end the steps here; keys and text wait for the person inside (window focus, input)
+            with presence.acting(f"ui step {n} {action}", background=background):
                 if action in ("keys", "type"):
                     text = step.get("value") or ""
                     desktop.require_operable(hwnd, f"按键：{text[:40]}" if action == "keys" else "输入文字")
@@ -1390,7 +1400,8 @@ def register(mcp: FastMCP) -> None:
             if action == "inspect":
                 desktop.require_capture(w)  # a password manager's control text is as private as its picture
                 return _ui_inspect(w, filter, name, automation_id, control_type)
-            with presence.acting(f"ui {action}") as said:  # waits while the person uses the machine
+            # waits while the person uses the machine, unless it can go on in the background
+            with presence.acting(f"ui {action}", background=desktop.background_ok(w)) as said:
                 out = _ui_act(
                     w,
                     action,

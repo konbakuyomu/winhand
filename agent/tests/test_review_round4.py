@@ -114,7 +114,9 @@ async def test_an_action_by_ref_uses_the_control_that_inspect_listed(monkeypatch
     monkeypatch.setattr(uia, "snapshot", _snapshot(controls))
     monkeypatch.setattr(uia, "refresh", lambda e: {**controls[1], "_element": e} if e is second else None)
     acted = []
-    monkeypatch.setattr(uia, "act", lambda e, verb, value=None, timeout=0: acted.append(e) or "invoked")
+    monkeypatch.setattr(
+        uia, "act", lambda e, verb, value=None, timeout=0, hwnd=None: acted.append(e) or "invoked"
+    )
     async with Client(build_server(Config())) as client:
         call = client.call_tool
         listed = (await call("ui", {"window": "app"})).structured_content
@@ -135,7 +137,9 @@ async def test_an_action_reports_the_dialog_it_opened(monkeypatch):
     monkeypatch.setattr(td.desktop, "windows", lambda: [window, dialog] if opened else [window])
     monkeypatch.setattr(uia, "snapshot", _snapshot([_control("删除")]))
     monkeypatch.setattr(uia, "refresh", lambda e: None)
-    monkeypatch.setattr(uia, "act", lambda e, verb, value=None, timeout=0: opened.append(1) or "invoked")
+    monkeypatch.setattr(
+        uia, "act", lambda e, verb, value=None, timeout=0, hwnd=None: opened.append(1) or "invoked"
+    )
     async with Client(build_server(Config())) as client:
         done = (
             await client.call_tool("ui", {"window": "app", "action": "invoke", "name": "删除"})
@@ -155,7 +159,9 @@ async def test_steps_run_in_order_stop_at_a_failure_and_end_with_a_picture(monke
     )
     acted = []
     monkeypatch.setattr(
-        uia, "act", lambda e, verb, value=None, timeout=0: acted.append((verb, value)) or f"{verb} done"
+        uia,
+        "act",
+        lambda e, verb, value=None, timeout=0, hwnd=None: acted.append((verb, value)) or f"{verb} done",
     )
     keys = []
     monkeypatch.setattr(td.desktop, "window_action", lambda *a, **k: {})
@@ -344,7 +350,7 @@ async def test_steps_stop_when_the_person_presses_the_stop_keys(monkeypatch, clo
     monkeypatch.setattr(uia, "refresh", lambda e: None)
     acted = []
 
-    def act(e, verb, value=None, timeout=0):
+    def act(e, verb, value=None, timeout=0, hwnd=None):
         acted.append(verb)
         presence.stop_pressed()  # the person hits the keys during the first step
         return "invoked"

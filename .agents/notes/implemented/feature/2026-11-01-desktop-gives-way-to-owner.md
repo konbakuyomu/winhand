@@ -25,6 +25,7 @@ Status: implemented
 - **桌面动作先等人停手。** `input`、`ui` 的动作、`ocr` 的点击、`window` 的操作都包在 `presence.acting()` 里：
   - 人在用时，每 0.25 秒看一次，最多等 `WAIT_S`（10 秒），还在用就报 `OwnerBusy`，什么也不做；
   - 嵌套的调用（`ui` 点击里的 `input`）只在最外层等一次。
+  - 2026-11-25 起，目标在后台时，`ui` 的控件动作不再等，只查急停；其中退回前台真点的那一步照旧等一次。见 [windows-control-own-backend](../architecture/2026-11-24-windows-control-own-backend.md)。
 - **急停。** 后台线程用 `RegisterHotKey` 注册 Ctrl+Alt+Shift+Backspace：
   - WinHand 一启动就注册（`build_server` 里调 `presence.start()`）；
   - 按下后 `STOP_S`（60 秒）内，桌面动作一律报 `OwnerStopped`；
@@ -65,13 +66,14 @@ Status: implemented
   - 命令卡在签名、登录窗口上时，AI 和人都能知道；
   - 一次调用能做完填表、勾选、点按钮几步。
 - **代价与已知上限**：
-  - 人一边看一边动鼠标时，AI 每个桌面动作会多等几秒；嫌慢可以把 `owner_idle_s` 调小，或者关掉 `yield_to_owner`。
+  - 人一边看一边动鼠标时，AI 每个前台动作会多等几秒（目标在后台的 `ui` 控件动作不等）；嫌慢可以把 `owner_idle_s` 调小，或者关掉 `yield_to_owner`。
   - `GetLastInputInfo` 分不清输入来自谁：别的远程控制程序发来的输入，也算人在用。
   - 急停后 1 分钟内，对话里没有办法提前恢复。
   - 判断“像在要人回应的窗口”靠窗口类、所有者和一份程序名单，名单外的密码管理器认不出来，无关程序的对话框也可能被报出来。
   - 截最小化窗口时，窗口会在屏幕上出现约半秒。
   - 急停键只有一个进程能持有。其他进程靠停止文件跟着停；持有的进程退出后，要等别的进程下一次桌面动作才会重新注册。
   - 这些都在 Linux 上靠模拟测试，真正的窗口行为要靠 CI 的 Windows 任务和在电脑上实测。
+- **2026-11-24 的实测与之后的改动**：让路只能保证 AI 不在主人用电脑时动手，换来的是主人在用电脑时 AI 什么也做不了。而且 UI Automation 的控件操作本身就会抢焦点：主人打字时，12 轮抢了 24 次。之后加了防抢焦点守卫；目标在后台、经守卫执行的 `ui` 控件动作不再等主人停手；`input` 的按键和坐标点击、`ocr` 的点击、`window` 的操作照旧让路。见 [windows-control-own-backend](../architecture/2026-11-24-windows-control-own-backend.md)。
 
 ## Verification
 
