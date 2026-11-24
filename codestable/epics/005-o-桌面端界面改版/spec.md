@@ -25,7 +25,7 @@ created: 2026-11-25
 
 ## 当前怎么理解（活规格）
 
-方案在 parley 房间 t36 讨论两轮后定稿（m322、m324）。视觉规范在 `desktop/DESIGN.md`，逐页规范、零依赖样式和截图验收要点在同目录的 `PAGES.md`；HTML 样稿在主人电脑的 `~/.winhand/scratch/ui-review/gemini/mockups/`。取舍和被否的方案见 [决定笔记](../../../.agents/notes/proposed/feature/2026-11-25-desktop-ui-redesign.md)。
+方案在 parley 房间 t36 讨论两轮后定稿（m322、m324）。视觉规范在 `desktop/DESIGN.md`，逐页规范、零依赖样式和截图验收要点在同目录的 `PAGES.md`；HTML 样稿在主人电脑的 `~/.winhand/scratch/ui-review/gemini/mockups/`。取舍和被否的方案见 [决定笔记](../../../.agents/notes/implemented/feature/2026-11-25-desktop-ui-redesign.md)。
 
 ### 信息架构
 
@@ -69,20 +69,20 @@ created: 2026-11-25
 
 ## 现在推什么、先搁什么
 
-**可推进：** 第 1、2 张票已关闭。第 3、4 张由两个 GPT 在两个工作树里并行做完，各管各的文件，代码已合进会话分支；接下来合并后统一截图，交 Gemini 验收。
+**可推进：** 四张票都已关闭，Gemini 终验通过（parley t36 m335），随 0.15.0 发布。剩下的是主人用 0.15.0 看过、在里面手点一遍，确认以后关 Epic。
 
 **Issues：**（都在同目录 `issues/` 下，编号只在本 Epic 内有效）
 
 - [x] `issues/001-x-预览底座与截图验收.md` — 假后端、开发版直接打开某页、逐页截图脚本。主人电脑上六张截图都出来了，截图期间前台不变。
 - [x] `issues/002-x-外壳设计系统与导航.md` — 主题资源和共享样式、Mica 和标题栏、新侧栏、看板娘状态锚点、右下角提示条，设置拆成四页。Gemini 验收通过。
-- [ ] `issues/003-o-密钥授权中转与设置四页.md` — 按 PAGES.md 4.5–4.8 做这四页。依赖第 2 张。
-- [ ] `issues/004-o-概览活动MCP与会话四页.md` — 按 PAGES.md 4.1–4.4 做这四页。依赖第 2 张，可以和第 3 张并行。
+- [x] `issues/003-x-密钥授权中转与设置四页.md` — 密钥、程序授权、中转、设置四页。撤销一直允许给 8 秒「恢复」；显示中的密钥截不到图，实测窗口一直不进截图。
+- [x] `issues/004-x-概览活动MCP与会话四页.md` — 概览、活动、MCP 服务、会话四页，和第 3 张票并行。合并后统一收尾：Gemini 提的六处，加上代码里的颜色统一改成 App.xaml 样式。
 
 **关闭时要满足：**
 - 四张票都做完，每页的截图验收 Gemini 认可，深色模式也截一轮。
 - 主人用 0.15.0 看过，确认关闭。
 
-**合并回 project spec 的候选：** `spec/index.md` 补一节桌面端的页面结构；`desktop/DESIGN.md` 留作以后改界面的规范。
+**合并回 project spec：** `spec/index.md` 的桌面端一条补上了页面结构和视觉规范的入口（0.15.0）；`desktop/DESIGN.md` 留作以后改界面的规范。
 
 ## 相关材料
 
