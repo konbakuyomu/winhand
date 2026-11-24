@@ -30,7 +30,8 @@ public sealed partial class MainWindow
         };
         _sessionDetail = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
         RenderSessions();
-        return SplitWorkspace("sessions", ListPane(null, _sessionList), _sessionDetail, 260, 220, 360);
+        return SplitWorkspace("sessions", ListPane(Text("会话", "SectionTitleStyle"), _sessionList), _sessionDetail,
+            200, 180, 260, 380, _sessionList, "返回会话列表");
     }
 
     private static (string Label, Tone Tone) SessionState(string state) => state switch
@@ -68,7 +69,7 @@ public sealed partial class MainWindow
             for (var i = 0; i < ordered.Count; i++)
             {
                 var (label, tone) = SessionState(Json.Str(ordered[i], "state") ?? "");
-                UpdateListRow((ListViewItem)_sessionList.Items[i], ids[i], $"{label} · {Json.Str(ordered[i], "transport")}", tone);
+                UpdateListRow((ListViewItem)_sessionList.Items[i], ids[i], label, tone);
             }
         }
         else
@@ -78,7 +79,15 @@ public sealed partial class MainWindow
             {
                 var id = Json.Str(session, "id") ?? "";
                 var (label, tone) = SessionState(Json.Str(session, "state") ?? "");
-                _sessionList.Items.Add(ListRow(id, id, $"{label} · {Json.Str(session, "transport")}", tone));
+                var item = ListRow(id, id, label, tone);
+                var row = (Grid)item.Content;
+                row.ColumnSpacing = 9;
+                ((Microsoft.UI.Xaml.Shapes.Ellipse)row.Children[0]).Margin = new Thickness(0, 6, 0, 0);
+                var text = (StackPanel)row.Children[1];
+                ((TextBlock)text.Children[0]).Style = Resource<Style>("MonoTitleStyle");
+                ((TextBlock)text.Children[1]).Style = Resource<Style>("CaptionTextStyle");
+                item.Padding = new Thickness(10, 9, 10, 9);
+                _sessionList.Items.Add(item);
             }
         }
         var selected = _sessionList.Items.OfType<ListViewItem>().FirstOrDefault(i => i.Tag as string == _sessionSelection);
@@ -136,8 +145,24 @@ public sealed partial class MainWindow
         }
         _sessionDetailShape = shape;
         _sessionPill = Pill(label, tone);
-        page.Children.Add(DetailHeader(id, profile is null ? "" : $"profile：{profile}", _sessionPill, null));
+        var title = Text(id, "MonoTitleStyle");
+        title.FontSize = 20;
+        title.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
+        title.TextWrapping = TextWrapping.NoWrap;
+        title.TextTrimming = TextTrimming.CharacterEllipsis;
+        var titleLine = new Grid { ColumnSpacing = 9 };
+        titleLine.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        titleLine.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        titleLine.Children.Add(title);
+        _sessionPill.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(_sessionPill, 1);
+        titleLine.Children.Add(_sessionPill);
+        var heading = new StackPanel { Spacing = 4, Children = { titleLine } };
+        heading.SizeChanged += (_, _) => title.MaxWidth = Math.Max(0, heading.ActualWidth - _sessionPill.ActualWidth - 9);
+        if (profile is not null) heading.Children.Add(Text($"profile：{profile}", "CaptionTextStyle"));
+        page.Children.Add(heading);
         var facts = Facts(rows);
+        facts.ColumnDefinitions[0].Width = new GridLength(68);
         _sessionFacts = FactValues(facts);
         var actions = ActionRow();
         if (Json.Str(session, "log_file") is { } log)
@@ -147,7 +172,9 @@ public sealed partial class MainWindow
         else
             actions.Children.Add(Named(ActionButton("停止…", () => _ = StopSessionAsync(id)), $"停止 {id}"));
         page.Children.Add(Card(new StackPanel { Spacing = 12, Children = { facts, actions } }));
-        _sessionDetail.Content = DetailPane(page);
+        var scroll = DetailPane(page);
+        scroll.Padding = new Thickness(22, 18, 24, 28);
+        _sessionDetail.Content = scroll;
     }
 
     private async Task ForgetSessionAsync(string id)

@@ -31,13 +31,6 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE")))
-        {
-            if (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_THEME") == "light")
-                RootGrid.RequestedTheme = ElementTheme.Light;
-            else if (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_THEME") == "dark")
-                RootGrid.RequestedTheme = ElementTheme.Dark;
-        }
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(TitleBarDragRegion);
         RootNavigation.RegisterPropertyChangedCallback(NavigationView.IsPaneOpenProperty, (_, _) => UpdatePaneFooter());
@@ -312,10 +305,10 @@ public sealed partial class MainWindow : Window
 
     private void BuildPages()
     {
-        _pages["overview"] = PageHeader("概览", BuildOverview());
-        _pages["activity"] = PageHeader("活动", BuildActivity());
-        _pages["sessions"] = PageHeader("会话", BuildSessions());
-        _pages["mcp"] = PageHeader("MCP 服务", BuildMcp());
+        _pages["overview"] = BuildOverview();
+        _pages["activity"] = BuildActivity();
+        _pages["sessions"] = BuildSessions();
+        _pages["mcp"] = BuildMcp();
         _pages["secrets"] = BuildSecretsSection();
         _pages["apps"] = BuildAppsSection();
         _pages["relay"] = BuildRelay();

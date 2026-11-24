@@ -30,19 +30,6 @@ public sealed partial class MainWindow
         !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINHAND_DESKTOP_INSTANCE"))
         && (Environment.GetEnvironmentVariable("WINHAND_DESKTOP_STATE") ?? "").Split(',').Contains(flag);
 
-    private static Grid PageHeader(string title, UIElement content)
-    {
-        var page = new Grid();
-        page.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        page.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        var heading = Text(title, "PageTitleStyle");
-        heading.Margin = new Thickness(PageInset, 20, PageInset, 0);
-        page.Children.Add(heading);
-        content.SetValue(Grid.RowProperty, 1); // Grid.SetRow takes a FrameworkElement; the page builders return UIElement
-        page.Children.Add(content);
-        return page;
-    }
-
     /// <summary>A vertically scrolling page whose content keeps the 24 px edge and fits the width.</summary>
     private static ScrollViewer PageScroll(FrameworkElement content, double inset = PageInset)
     {
@@ -152,19 +139,6 @@ public sealed partial class MainWindow
         return row;
     }
 
-    /// <summary>Rows inside one bordered panel, separated by hairlines.</summary>
-    private static ContentControl RowsPanel(params UIElement[] rows)
-    {
-        var stack = new StackPanel { Spacing = 12 };
-        for (var i = 0; i < rows.Length; i++)
-        {
-            if (i > 0)
-                stack.Children.Add(Divider());
-            stack.Children.Add(rows[i]);
-        }
-        return Card(stack);
-    }
-
     /// <summary>A key/value fact list (label column aligned across rows).</summary>
     private static Grid Facts(params (string Label, string Value, bool Mono)[] facts)
     {
@@ -221,9 +195,10 @@ public sealed partial class MainWindow
     // ------------------------------------------------------------------ split view
 
     /// <summary>List on the left, detail on the right; the divider is draggable and keyboard
-    /// adjustable, its position is remembered per page, and narrow windows stack the two.</summary>
+    /// adjustable, its position is remembered per page. A window too narrow for both shows the list, then the item
+    /// clicked in it with a way back.</summary>
     private static Grid SplitWorkspace(string key, FrameworkElement leading, FrameworkElement detail,
-        double initialWidth, double minimumWidth, double maximumWidth, double detailMinimum = 420)
+        double initialWidth, double minimumWidth, double maximumWidth, double detailMinimum, ListView list, string backLabel)
     {
         const double dividerWidth = 8;
         var width = double.TryParse(Preferences.ReadString("split:" + key), NumberStyles.Float, CultureInfo.InvariantCulture, out var saved)
@@ -233,15 +208,31 @@ public sealed partial class MainWindow
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(dividerWidth) });
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0) });
         var divider = new Thumb { Style = Resource<Style>("PaneDividerStyle") };
+        var detailHost = new Grid();
+        detailHost.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        detailHost.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var back = new Button { Style = Resource<Style>("GhostButtonStyle") };
+        back.Content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 8,
+            Children = { new FontIcon { Glyph = "\uE72B", FontSize = 14 }, Text(backLabel) }
+        };
+        back.HorizontalAlignment = HorizontalAlignment.Left;
+        back.Margin = new Thickness(14, 10, 14, 0);
+        back.Visibility = Visibility.Collapsed;
+        AutomationProperties.SetName(back, backLabel);
+        detailHost.Children.Add(back);
+        Grid.SetRow(detail, 1);
+        detailHost.Children.Add(detail);
         AutomationProperties.SetName(divider, "调整分栏宽度");
         ToolTipService.SetToolTip(divider, "拖动调整宽度；方向键微调");
         layout.Children.Add(leading);
         Grid.SetColumn(divider, 1);
         layout.Children.Add(divider);
-        layout.Children.Add(detail);
+        layout.Children.Add(detailHost);
         var compact = false;
+        var drilledIn = false;
         void Arrange()
         {
             if (layout.ActualWidth <= 0)
@@ -251,10 +242,10 @@ public sealed partial class MainWindow
                 : new GridLength(Math.Clamp(width, minimumWidth, Math.Min(maximumWidth, layout.ActualWidth - detailMinimum - dividerWidth)));
             layout.ColumnDefinitions[1].Width = new GridLength(compact ? 0 : dividerWidth);
             layout.ColumnDefinitions[2].Width = compact ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
-            layout.RowDefinitions[0].Height = new GridLength(compact ? 0.4 : 1, GridUnitType.Star);
-            layout.RowDefinitions[1].Height = compact ? new GridLength(0.6, GridUnitType.Star) : new GridLength(0);
-            Grid.SetColumn(detail, compact ? 0 : 2);
-            Grid.SetRow(detail, compact ? 1 : 0);
+            Grid.SetColumn(detailHost, compact ? 0 : 2);
+            leading.Visibility = compact && drilledIn ? Visibility.Collapsed : Visibility.Visible;
+            detailHost.Visibility = compact && !drilledIn ? Visibility.Collapsed : Visibility.Visible;
+            back.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
             divider.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         }
         void Resize(double delta)
@@ -276,6 +267,19 @@ public sealed partial class MainWindow
             Persist();
             args.Handled = true;
         };
+        list.IsItemClickEnabled = true;
+        list.ItemClick += (_, _) =>
+        {
+            if (!compact)
+                return;
+            drilledIn = true;
+            Arrange();
+        };
+        back.Click += (_, _) =>
+        {
+            drilledIn = false;
+            Arrange();
+        };
         layout.SizeChanged += (_, _) => Arrange();
         return layout;
     }
@@ -288,7 +292,7 @@ public sealed partial class MainWindow
         pane.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         if (toolbar is not null)
         {
-            toolbar.Margin = new Thickness(PageInset, PageInset, PageInset, 12);
+            toolbar.Margin = new Thickness(14, 18, 14, 10);
             pane.Children.Add(toolbar);
         }
         list.Padding = new Thickness(12, toolbar is null ? 12 : 0, 12, 12);
@@ -363,30 +367,6 @@ public sealed partial class MainWindow
 
     /// <summary>The detail side of a split: a scrolling page with the standard edge.</summary>
     private static ScrollViewer DetailPane(FrameworkElement content) => PageScroll(content);
-
-    /// <summary>Header of a detail page: title with a status pill, optional control at the right.</summary>
-    private static Grid DetailHeader(string title, string subtitle, ContentControl? pill, FrameworkElement? trailing)
-    {
-        var heading = new StackPanel { Spacing = 4 };
-        var titleLine = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        titleLine.Children.Add(new TextBlock { Text = title, Style = Resource<Style>("PageHeadingStyle"), TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis });
-        if (pill is not null)
-            titleLine.Children.Add(pill);
-        heading.Children.Add(titleLine);
-        if (subtitle.Length > 0)
-            heading.Children.Add(Text(subtitle, "SecondaryCopyStyle"));
-        var grid = new Grid { ColumnSpacing = 16 };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.Children.Add(heading);
-        if (trailing is not null)
-        {
-            trailing.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(trailing, 1);
-            grid.Children.Add(trailing);
-        }
-        return grid;
-    }
 
     /// <summary>What a list side says when it has nothing: what goes here and how to add it.</summary>
     private static StackPanel EmptyState(string title, string body, params UIElement[] actions)

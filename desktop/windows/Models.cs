@@ -72,10 +72,10 @@ internal sealed record StatusView(string Label, string Detail, Tone Tone, bool O
             "connecting" => new("连接中", $"正在连接 {relay}…", Tone.Warning, false),
             "offline" => new("已断开",
                 (connecting ? "正在重试… " : retry is { } r ? $"{r:0} 秒后重试 · " : "") + reason, Tone.Warning, false),
-            "refused" => new("令牌被拒绝", "中转拒绝了设备令牌，请在设置里更新。" + (reason.Length > 0 ? $"（{reason}）" : ""), Tone.Error, false),
+            "refused" => new("令牌被拒绝", "中转拒绝了设备令牌，请在「中转」页更新。" + (reason.Length > 0 ? $"（{reason}）" : ""), Tone.Error, false),
             "replaced" => new("已被接管", "另一台机器或另一个 winhand 连上了同一个中转。点“重新连接”夺回。", Tone.Error, false),
             "conflict" => new("有另一个实例", "终端里的 winhand connect 仍在运行，关掉它后点“重新连接”。", Tone.Error, false),
-            "unconfigured" => new("未配置", "在设置里填写中转地址和设备令牌。", Tone.Neutral, false),
+            "unconfigured" => new("未配置", "在「中转」页填写中转地址和设备令牌。", Tone.Neutral, false),
             "paused" => new("已暂停", "已手动断开，Claude 暂时无法使用这台电脑。", Tone.Neutral, false),
             _ => new("启动中", "正在准备…", Tone.Neutral, false)
         };
@@ -122,7 +122,7 @@ internal sealed class ActivityEntry(JsonElement data)
         _ => Status
     };
 
-    public string KindLabel => Kind switch { "tool" => "工具", "connection" => "连接", "session" => "会话", "mcp" => "MCP 服务", _ => Kind };
+    public string KindLabel => Kind switch { "tool" => "工具", "connection" => "连接", "session" => "会话", "mcp" => "MCP 服务", "transfer" => "文件传输", "settings" => "设置", _ => Kind };
 
     /// <summary>The one argument that best says what the call did (command, path, text…).</summary>
     public string ArgsLine
