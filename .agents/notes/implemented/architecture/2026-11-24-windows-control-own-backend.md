@@ -134,8 +134,9 @@ AI 操作窗口 A 时，主人开的窗口 B 不管是别的程序，还是同�
   - `agent/tests/test_unrelated_windows.py`（12 项）：只报 A 拥有的新窗口；`steps` 遇到 A 不拥有的窗口就停，图仍是 A；切不到前台不按键；按窗口取图失败或全黑时回 `CAPTURE_OCCLUDED`，不碰屏幕。
 - Windows 场景测试：
   - `test_background_controls_keep_notepad_foreground`，在 CI 的 windows-latest 上通过：第 1 张票 run 45433699647，第 2 张票 run 45441310264。
-  - `test_a_window_the_target_does_not_own_stays_out_of_the_reply`：同一进程开出不归属的标记窗口，`steps` 停在 `UNEXPECTED_DIALOG`，回复里没有标记，图是表单本身；表单自己的对话框照常报标题。
+  - `test_a_window_the_target_does_not_own_stays_out_of_the_reply`：同一进程开出不归属的标记窗口，`steps` 停在 `UNEXPECTED_DIALOG`，回复里没有标记，图是表单本身；表单自己的对话框照常报标题。在 CI 上通过（run 45451587670）。
 - 主人电脑实测，脚本在 `~/.winhand/scratch/cua-trial/`：
   - `accept001.py`，11-25 00:06：`_ui_act` 的真实路径，90 个动作前台变化 0；
   - `accept002.py`，11-25 00:48：完整的 `ui` 工具，84 个动作，拒绝 0、前台变化 0。
+  - `accept003.py`，11-25 01:46：11 项全过。不让截图的窗口 X（`PrintWindow` 只画出黑色）截图和 OCR 都回 `CAPTURE_OCCLUDED`；改之前的 0.13.0 截 X，回的是它下面的标记窗口。`steps` 遇到不归属的窗口停在 `UNEXPECTED_DIALOG`，主人的前台窗口没变。
 - 选型时的配对实测和守卫原型：同一目录下的 `paired.py`、`paired-*-log.txt`、`monitor-*.json`。实测汇总在 `~/.winhand/scratch/winctl-research/brief-4-cua-trial.md`。
