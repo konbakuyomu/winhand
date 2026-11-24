@@ -68,7 +68,12 @@ uv run winhand connect
 1. 只要还设着 `AGENT_TOKEN`，旧地址照常通。它们指向一台叫 `default` 的电脑，旧连接器的登录也照常可用，不用马上改。
    - 旧中转开着 CIMD，claude.ai 的登录就是 CIMD 客户端。所以升级时要设 `CIMD=on`：自托管用 `install.sh --cimd on`，Cloudflare 加变量 `CIMD=on`。
    - 不设的话，旧连接器的访问令牌最多一小时后过期，刷新会失败，要重新授权。
-2. 在首页给这台电脑配对一个名字，在 claude.ai 加上 `/pc/<名称>/mcp` 连接器。各个会话都换到新连接器以后，删掉 `AGENT_TOKEN`，旧地址随之消失。
+2. 在首页给这台电脑配对一个名字，在 claude.ai 加上 `/pc/<名称>/mcp` 连接器。
+3. 各个会话都换到新连接器以后，先在首页移除 `default`，再删掉 `AGENT_TOKEN`，旧地址随之消失。
+   - 移除 `default` 时，旧连接器的登录随之作废。
+   - 顺序不能反。单台电脑时代的登录没有绑定地址。先删 `AGENT_TOKEN` 的话，`default` 就从首页消失了，没法再单独移除；只剩一台电脑时，OAuth 库还会把这些登录改成指向那台电脑。
+   - 自托管：删掉 `secrets/agent-token`，再运行一次 `install.sh`。只想重启、不想升级时，删掉 `.env` 里 `AGENT_TOKEN_FILE` 那一行，再运行 `docker compose up -d`。
+   - Cloudflare：运行 `npx wrangler secret delete AGENT_TOKEN`。
 
 ## 登录
 
