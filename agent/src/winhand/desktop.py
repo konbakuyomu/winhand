@@ -118,12 +118,23 @@ if IS_WINDOWS:
     user32.GetWindow.restype = wintypes.HWND
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.restype = ctypes.c_int
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsIconic.argtypes = [wintypes.HWND]
     user32.IsZoomed.argtypes = [wintypes.HWND]
     user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+    user32.EnableWindow.restype = wintypes.BOOL
+    user32.GetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+    user32.GetWindowPlacement.restype = wintypes.BOOL
+    user32.SetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+    user32.SetWindowPlacement.restype = wintypes.BOOL
     user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.BringWindowToTop.argtypes = [wintypes.HWND]
@@ -623,6 +634,83 @@ def _class(hwnd) -> str:
     return buffer.value
 
 
+WS_EX_NOACTIVATE = 0x08000000
+GWL_EXSTYLE = -20
+
+
+def host_kind(class_name) -> str:
+    if class_name in ("ApplicationFrameWindow", "Windows.UI.Core.CoreWindow", "WinUIDesktopWin32WindowClass"):
+        return "xaml"
+    if class_name.startswith("Chrome_WidgetWin_"):
+        return "chromium"
+    if class_name.startswith("HwndWrapper["):
+        return "wpf"
+    return "win32"
+
+
+def _on_current_desktop(hwnd) -> bool:
+    try:
+        import comtypes
+        from comtypes.client import CreateObject
+
+        class IVirtualDesktopManager(comtypes.IUnknown):
+            _iid_ = comtypes.GUID("{A5CD92FF-29BE-454C-8D04-D82879FB3F1B}")
+            _methods_ = [comtypes.COMMETHOD([], comtypes.HRESULT, "IsWindowOnCurrentVirtualDesktop",
+                (["in"], wintypes.HWND, "hwnd"), (["out"], ctypes.POINTER(wintypes.BOOL), "current"))]  # fmt: skip
+
+        comtypes.CoInitialize()
+        try:
+            manager = CreateObject("{AA509086-5CA9-4C25-8F95-589D3C07B48A}", interface=IVirtualDesktopManager)
+            return bool(manager.IsWindowOnCurrentVirtualDesktop(hwnd))
+        finally:
+            comtypes.CoUninitialize()
+    except Exception:  # COM failure: treat the window as being on the current desktop
+        return True
+
+
+class BackgroundGuard:
+    def __init__(self, hwnd):
+        self.hwnd, self.host = hwnd, "win32"
+        self.added, self.disabled, self.released = False, None, False
+        self.lock = threading.Lock()
+
+    def apply(self):
+        if not IS_WINDOWS:
+            return
+        self.top = user32.GetAncestor(self.hwnd, 2) or self.hwnd
+        self.host = host_kind(_class(self.top))
+        if _on_current_desktop(self.top):
+            style = user32.GetWindowLongPtrW(self.top, GWL_EXSTYLE)
+            if not style & WS_EX_NOACTIVATE:
+                user32.SetWindowLongPtrW(self.top, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
+                self.added = bool(user32.GetWindowLongPtrW(self.top, GWL_EXSTYLE) & WS_EX_NOACTIVATE)
+        if self.host in ("xaml", "chromium"):
+            self.disabled = bool(user32.EnableWindow(self.top, False))
+
+    def release(self):
+        if not IS_WINDOWS:
+            return
+        with self.lock:
+            if self.released:
+                return
+            self.released = True
+            if self.added:
+                style = user32.GetWindowLongPtrW(self.top, GWL_EXSTYLE)
+                user32.SetWindowLongPtrW(self.top, GWL_EXSTYLE, style & ~WS_EX_NOACTIVATE)
+            if self.disabled is not None:
+                user32.EnableWindow(self.top, not self.disabled)
+
+
+@contextlib.contextmanager
+def background(hwnd):
+    guard = BackgroundGuard(hwnd)
+    try:
+        guard.apply()
+        yield guard
+    finally:
+        guard.release()
+
+
 def _rect(hwnd) -> dict:
     r = RECT()
     # extended frame bounds: the visible window without the invisible resize border
@@ -901,6 +989,17 @@ def window_action(
 
 
 def _window_act(w: dict, hwnd, action: str, left, top, width, height) -> dict:
+    behind = w["hwnd"] != user32.GetForegroundWindow()
+    if behind and (
+        action == "restore" or action == "move" and (user32.IsIconic(hwnd) or user32.IsZoomed(hwnd))
+    ):
+        placement = WINDOWPLACEMENT()
+        placement.length = ctypes.sizeof(WINDOWPLACEMENT)
+        if not user32.GetWindowPlacement(hwnd, ctypes.byref(placement)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        placement.showCmd = 4  # SW_SHOWNOACTIVATE
+        if not user32.SetWindowPlacement(hwnd, ctypes.byref(placement)):
+            raise ctypes.WinError(ctypes.get_last_error())
     if action == "focus":
         ok = _force_foreground(hwnd)
         if not ok:
@@ -908,16 +1007,22 @@ def _window_act(w: dict, hwnd, action: str, left, top, width, height) -> dict:
                 "Windows refused to bring the window forward (a full-screen app or a UAC prompt?)"
             )
     elif action == "minimize":
-        user32.ShowWindow(hwnd, 6)
+        user32.ShowWindow(hwnd, 7 if behind else 6)
     elif action == "maximize":
-        user32.ShowWindow(hwnd, 3)
+        if behind:
+            with background(hwnd):
+                user32.ShowWindow(hwnd, 3)
+        else:
+            user32.ShowWindow(hwnd, 3)
     elif action == "restore":
-        user32.ShowWindow(hwnd, 9)
+        if not behind:
+            user32.ShowWindow(hwnd, 9)
     elif action == "close":
         user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE: the app may ask to save first
     elif action == "move":
         rect = w
-        user32.ShowWindow(hwnd, 9)
+        if not behind:
+            user32.ShowWindow(hwnd, 9)
         user32.SetWindowPos(
             hwnd,
             None,

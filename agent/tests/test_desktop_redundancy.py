@@ -117,7 +117,7 @@ async def test_ui_acts_on_the_element_it_just_read(monkeypatch):
     monkeypatch.setattr(uia, "snapshot", snapshot)
     monkeypatch.setattr(uia, "refresh", refresh)
     monkeypatch.setattr(
-        uia, "act", lambda e, verb, value=None, timeout=0: acted.append((e, verb)) or "expanded"
+        uia, "act", lambda e, verb, value=None, timeout=0, hwnd=None: acted.append((e, verb)) or "expanded"
     )
     monkeypatch.setattr(td, "_run_uia", lambda *a, **k: pytest.fail("the PowerShell script must not run"))
     async with Client(build_server(Config())) as client:
@@ -141,7 +141,7 @@ async def test_classic_buttons_get_a_posted_click_that_a_modal_dialog_cannot_hol
     monkeypatch.setattr(td.desktop, "native_controls", lambda hwnd: [
         {"hwnd": 77, "type": "Button", "name": "Browse...", "class": "Button", "enabled": True, "rect": [1, 2, 3, 4]}
     ])  # fmt: skip
-    monkeypatch.setattr(uia, "act", lambda *a, **k: pytest.fail("UI Automation Invoke can block"))
+    monkeypatch.setattr(uia, "act", lambda *a, hwnd=None, **k: pytest.fail("UI Automation Invoke can block"))
     monkeypatch.setattr(uia, "refresh", lambda e: None)
     posted = []
     monkeypatch.setattr(
@@ -225,7 +225,7 @@ async def test_a_dialog_opened_by_invoke_does_not_hold_up_the_call(monkeypatch):
     monkeypatch.setattr(uia, "refresh", lambda e: None)
     timeouts = []
 
-    def act(e, verb, value=None, timeout=uia.TIMEOUT_S):
+    def act(e, verb, value=None, timeout=uia.TIMEOUT_S, hwnd=None):
         timeouts.append(timeout)
         raise uia.NoAnswer(uia.NO_ANSWER)
 
@@ -288,7 +288,9 @@ async def test_scrolls_a_row_into_view_before_clicking_it(monkeypatch):
         {"index": 0, "type": "ListItem", "name": "row 90", "automation_id": "", "hwnd": 0, "enabled": True,
          "rect": None, "offscreen": True, "patterns": ["ScrollItem"], "_runtime_id": [5], "_element": element},
     ]})  # fmt: skip
-    monkeypatch.setattr(uia, "scroll_into_view", lambda e: [100, 200, 50, 20] if e is element else None)
+    monkeypatch.setattr(
+        uia, "scroll_into_view", lambda e, hwnd=None: [100, 200, 50, 20] if e is element else None
+    )
     monkeypatch.setattr(td.desktop, "window_action", lambda *a, **k: {})
     monkeypatch.setattr(td.desktop, "input_action", lambda *a, **k: clicks.append(a) or {})
     async with Client(build_server(Config())) as client:
@@ -465,7 +467,9 @@ async def test_ui_does_not_guess_between_controls_of_the_same_name(monkeypatch):
     )
     monkeypatch.setattr(uia, "refresh", lambda e: None)
     acted = []
-    monkeypatch.setattr(uia, "act", lambda e, verb, value=None, timeout=0: acted.append(e) or "invoked")
+    monkeypatch.setattr(
+        uia, "act", lambda e, verb, value=None, timeout=0, hwnd=None: acted.append(e) or "invoked"
+    )
     async with Client(build_server(Config())) as client:
         ambiguous = (
             await client.call_tool("ui", {"window": "app", "action": "invoke", "name": "删除"})

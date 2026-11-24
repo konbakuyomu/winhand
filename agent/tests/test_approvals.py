@@ -534,7 +534,7 @@ async def test_ui_reads_without_asking_and_operates_only_when_allowed(monkeypatc
     monkeypatch.setattr(
         uia, "snapshot", lambda hwnd, timeout=0: {"window": "app", "count": 1, "elements": [button]}
     )
-    monkeypatch.setattr(uia, "act", lambda *a, **k: pytest.fail("the control was operated"))
+    monkeypatch.setattr(uia, "act", lambda *a, hwnd=None, **k: pytest.fail("the control was operated"))
     asked = _refusing(monkeypatch)
     async with Client(build_server(Config())) as client:
         listed = (await client.call_tool("ui", {"window": "app"})).structured_content

@@ -24,6 +24,8 @@ Status: proposed
 
 ### 第一步：两招防抢焦点守卫（1–2 人日）
 
+2026-11-24 已实现，在主人电脑上验收中。落点是 `desktop.BackgroundGuard`、`desktop.background()`、`uia._guarded()`，以及 `tools_desktop._ui_act` 里的五处后台动作调用。细节和出入见 Epic 004 第 1 张票的执行记录。
+
 两招都来自 CUA 驱动的源码（trycua/cua，MIT，`libs/cua-driver/rust/crates/platform-windows/src`）。实现时照着写，不复制代码：
 
 - **不可激活守卫**（CUA `input/inject.rs` 的 `NoActivateGuard`）。每个后台动作期间，给目标的顶层窗口（`GetAncestor(GA_ROOT)`）加 `WS_EX_NOACTIVATE`，做完只去掉这一位，不恢复整个样式值，以免盖掉程序中途自己改的样式。

@@ -18,6 +18,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from . import desktop
 
 TIMEOUT_S = 20.0
+GUARD_CAP_S = 30.0
 MAX_ELEMENTS = 600
 # kept even without a name: what a person could operate
 ACTIONABLE = {
@@ -103,7 +104,9 @@ def call(fn, *args, timeout: float = TIMEOUT_S):
     future = worker.submit(fn, *args)
     try:
         return future.result(timeout=timeout)
-    except desktop.DesktopError:
+    except desktop.DesktopError as exc:
+        if isinstance(exc, NoAnswer):
+            exc.future = future
         raise
     except FutureTimeout:
         future.cancel()  # if it has not started, it never will
@@ -111,9 +114,14 @@ def call(fn, *args, timeout: float = TIMEOUT_S):
         with _lock:
             if _worker is worker:
                 _worker = None  # that thread still waits on the program; the next call gets a new one
-        raise NoAnswer(NO_ANSWER) from None
+        exc = NoAnswer(NO_ANSWER)
+        exc.future = future
+        raise exc from None
     except Exception as exc:  # noqa: BLE001 - COM errors: the control went away, is disabled ...
-        raise explain(exc) from exc
+        error = explain(exc)
+        if isinstance(error, NoAnswer):
+            error.future = future
+        raise error from exc
 
 
 NO_ANSWER = (
@@ -405,9 +413,29 @@ def _act(element, verb: str, value: str | None) -> str | None:
     return None
 
 
-def act(element, verb: str, value: str | None = None, timeout: float = TIMEOUT_S) -> str | None:
+def _guarded(hwnd, fn, *args, timeout):
+    g = desktop.BackgroundGuard(hwnd) if hwnd is not None else None
+    if g is not None:
+        g.apply()
+    deferred = False
+    try:
+        return call(fn, *args, timeout=timeout)
+    except NoAnswer as exc:
+        if g is not None:
+            deferred = True
+            exc.future.add_done_callback(lambda _f: g.release())
+            timer = threading.Timer(GUARD_CAP_S, g.release)
+            timer.daemon = True
+            timer.start()
+        raise
+    finally:
+        if g is not None and not deferred:
+            g.release()
+
+
+def act(element, verb: str, value: str | None = None, timeout: float = TIMEOUT_S, hwnd=None) -> str | None:
     """Operate the element through its UI Automation pattern; None when it offers none for verb."""
-    return call(_act, element, verb, value, timeout=timeout)
+    return _guarded(hwnd, _act, element, verb, value, timeout=timeout)
 
 
 def _scroll_into_view(element) -> list[int] | None:
@@ -418,6 +446,6 @@ def _scroll_into_view(element) -> list[int] | None:
     return _rect(element.GetCurrentPropertyValue(m.UIA_BoundingRectanglePropertyId))
 
 
-def scroll_into_view(element) -> list[int] | None:
+def scroll_into_view(element, hwnd=None) -> list[int] | None:
     """Scroll an element into view where it can; its rectangle afterwards."""
-    return call(_scroll_into_view, element)
+    return _guarded(hwnd, _scroll_into_view, element, timeout=TIMEOUT_S)
