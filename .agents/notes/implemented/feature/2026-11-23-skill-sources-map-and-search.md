@@ -38,7 +38,7 @@ Status: implemented
 
 - 没有 `.git` 时只看 start 本身，不像 Pi 那样一路爬到盘符根。
 - 以点开头的目录和 `synced` 一律跳过。
-- 一次调用最多走 4000 个目录、花 2 秒；超了就标出没走完。
+- 一次调用最多走 4000 个目录、花 2 秒 CPU 时间（另有 10 秒总时间上限，见「后续修订」）；超了就标出没走完。
 - 不起任何外部命令，不联网。t18 实测过两条在线路径：问 Codex app-server 要 1.2–1.4 秒并且要联网；`codex plugin list` 超过 20 秒。
 
 ### 名字：id 说明它在哪
@@ -149,7 +149,13 @@ Status: implemented
   - 领域分类靠关键词，会分错，要靠主人纠正。
   - MCP instructions 里的技能说明压成了一句，没有钉住的名字。为此删掉了 GUIDE 里两句话：「Waiting then costs no turns.」和「garbled text, a failing shim」的举例。
 - **推后**：`--add-dir`；受管、系统（`$CODEX_HOME/skills/.system`）和 claude.ai 同步的技能；Pi 包；按调用方过滤；项目 `.codex/config.toml` 里的插件开关。
+- **后续修订（2026-11-25）**：读取预算的时间改按调用线程自己的 CPU 时间算，总时间只留 10 秒上限兜底。
+  - 起因：本机实测，同时发出 4 个 `context()`，每个要 3 秒（单独跑 0.5 秒）。原来的 2 秒是总时间，在读到 Codex 插件之前就用完了：地图只数到 109 条，少了 Codex 插件的 56 条，还只留一句「太大没读全」。
+  - 否掉的做法：
+    - 只把总时间上限放宽：并发再多一点还会超，结果仍取决于同时有几个调用。
+    - 缓存读到的技能清单：能让并发的调用更快，但要管失效，而且这次要修的是结果不对。推后。
+  - 读不完时，`context()` 的 `skills_note` 和 `skill(query=…)` 的 `incomplete` 现在都会说「可能不全」；以前检索里一个字都没有。
 - **验证**：
-  - `agent/tests/test_skills.py` 覆盖：项目链、四种目录、递归、id、去重、信任三种模式、Claude 和 Codex 插件、宿主开关、地图、中文检索、配额、跨项目加载、子目录、报告。
+  - `agent/tests/test_skills.py` 覆盖：项目链、四种目录、递归、id、去重、信任三种模式、Claude 和 Codex 插件、宿主开关、地图、中文检索、配额、跨项目加载、子目录、报告、读取预算。
   - 旧测试改为新的语义，全套测试通过。
   - 本机在 md2visio、Trellis、dev-board 上的实测，记在 `codestable/issues/005-o-技能分层发现与按需展示.md` 的执行记录里。

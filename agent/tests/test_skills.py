@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 import pytest
 from fastmcp import Client
@@ -97,6 +98,65 @@ def test_codex_folders_are_walked_deep_claude_folders_one_level(home):
         "user:~/.codex/skills/officecli",
         "user:~/.codex/skills/officecli/officecli-docx",
     ]
+
+
+# ------------------------------------------------------------------ the walk's budget
+
+
+def codex_plugins_with_a_skill_each(home, count: int):
+    """The Codex plugins come last in a walk, so a spent budget loses them first."""
+    cache = home / ".codex" / "plugins" / "cache"
+    enabled = ""
+    for i in range(count):
+        skill(cache / "bundled" / f"plug{i}" / "1.0.0" / "skills", f"plug{i}-skill")
+        enabled += f'[plugins."plug{i}@bundled"]\nenabled = true\n'
+    write(home / ".codex" / "config.toml", enabled)
+
+
+def test_calls_running_side_by_side_do_not_cost_each_other_their_plugins(home, monkeypatch):
+    # 2026-11-25: four context() calls at once took 3 s each instead of 0.5 s; counting elapsed time,
+    # the walk gave up before the Codex plugins and the map lost all 56 of their skills
+    skill(home / ".agents" / "skills", "mine")
+    codex_plugins_with_a_skill_each(home, 3)
+    started = time.monotonic()
+    now = [started]
+
+    def shared_cpu():  # every look at the clock finds 0.5 s gone: the CPU went to the other calls
+        now[0] += 0.5
+        return now[0]
+
+    monkeypatch.setattr(skills.time, "monotonic", shared_cpu)
+    index = skills.build(Config(), None, None)
+    assert (
+        skills.WALK_TIME_S < now[0] - started < skills.WALK_WALL_S
+    )  # the elapsed time was past the old limit
+    assert {s.short for s in index.skills} == {"mine", "plug0-skill", "plug1-skill", "plug2-skill"}
+    assert index.incomplete == []
+
+
+def test_the_budget_counts_cpu_time_and_keeps_a_ceiling_on_elapsed_time(monkeypatch):
+    budget = skills._Budget()
+    started = time.monotonic()
+    monkeypatch.setattr(skills.time, "monotonic", lambda: started + skills.WALK_TIME_S + 1)
+    assert not budget.spent()  # waited for the CPU, did not use it
+    monkeypatch.setattr(skills.time, "monotonic", lambda: started + skills.WALK_WALL_S + 1)
+    assert budget.spent()  # a disk that slow ends the walk
+    assert skills._Budget(cpu_deadline=time.thread_time() - 1).spent()
+    assert skills._Budget(dirs=skills.WALK_DIRS_TOTAL).spent()
+
+
+def test_a_walk_cut_short_says_so_in_context_and_in_search(home, monkeypatch):
+    skill(home / ".agents" / "skills", "alpha")
+    skill(home / ".agents" / "skills", "beta")
+    cfg = Config()
+    whole = skills.build(cfg, None, None, with_plugins=False)
+    assert not whole.incomplete and "incomplete" not in skills.search(cfg, whole, ["alpha"])
+    assert "skills may be missing" not in skills.for_context(cfg, whole, None)["skills_note"]
+    monkeypatch.setattr(skills, "WALK_DIRS_TOTAL", 1)
+    cut = skills.build(cfg, None, None, with_plugins=False)
+    assert cut.incomplete == [str(home / ".agents" / "skills")]
+    assert "skills may be missing" in skills.for_context(cfg, cut, None)["skills_note"]
+    assert "skills may be missing" in skills.search(cfg, cut, ["alpha"])["incomplete"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symbolic links need extra rights on Windows")

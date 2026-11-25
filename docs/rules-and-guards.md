@@ -50,7 +50,9 @@
     - Codex 式目录：往下 6 层，收集每一个 SKILL.md；
     - Claude Code 式目录：只看第一层；
     - Pi：碰到 SKILL.md 就停。
-    - 点开头的目录和 `synced` 一律跳过；一次调用最多走 4000 个目录、2 秒。
+    - 点开头的目录和 `synced` 一律跳过。
+    - 一次调用最多走 4000 个目录、用 2 秒 CPU 时间，另有 10 秒的总时间上限。按 CPU 时间算，是因为客户端常常同时发出几个调用，它们互相拖慢：只按总时间算的话，四个调用一起发，后面的插件目录就读不到了。
+    - 读不完时，`context()` 的 `skills_note` 和 `skill(query=…)` 的 `incomplete` 都会说「可能不全」。
 - **命名**：每个技能有一个说明它在哪里的 id：
 
   - `project:.codex/skills/openspec-flow`

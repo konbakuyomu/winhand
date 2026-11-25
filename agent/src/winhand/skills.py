@@ -38,7 +38,8 @@ from .config import Config
 WALK_DEPTH = 6  # as Codex walks a skills folder
 WALK_DIRS_PER_ROOT = 2_000
 WALK_DIRS_TOTAL = 4_000  # one call
-WALK_TIME_S = 2.0
+WALK_TIME_S = 2.0  # CPU seconds of the calling thread, not elapsed time: see _Budget
+WALK_WALL_S = 10.0  # elapsed seconds, a ceiling for a slow disk (calls side by side reach about 5)
 SKIP = {"node_modules", "__pycache__", "synced", "venv", "site-packages"}  # and every .dotted folder
 HEAD_BYTES = 20_000
 DESCRIPTION_CHARS = 300
@@ -140,14 +141,23 @@ def user_sources(cfg: Config) -> list[tuple[str, Source]]:
 
 @dataclass
 class _Budget:
-    """What one call may spend walking skills folders."""
+    """What one call may spend walking skills folders: WALK_DIRS_TOTAL folders, WALK_TIME_S seconds of
+    this thread's own CPU time, and WALK_WALL_S seconds of elapsed time as a ceiling. The limit is CPU
+    time because a client sends calls side by side and they slow each other down (four context() calls
+    at once took 3 s each, 0.5 s alone): counting elapsed time, the walk gave up before the plugins and
+    the map lost the Codex plugins' skills (2026-11-25)."""
 
-    deadline: float = field(default_factory=lambda: time.monotonic() + WALK_TIME_S)
+    cpu_deadline: float = field(default_factory=lambda: time.thread_time() + WALK_TIME_S)
+    wall_deadline: float = field(default_factory=lambda: time.monotonic() + WALK_WALL_S)
     dirs: int = 0
     incomplete: list[str] = field(default_factory=list)
 
     def spent(self) -> bool:
-        return self.dirs >= WALK_DIRS_TOTAL or time.monotonic() > self.deadline
+        return (
+            self.dirs >= WALK_DIRS_TOTAL
+            or time.thread_time() > self.cpu_deadline
+            or time.monotonic() > self.wall_deadline
+        )
 
 
 def _usable(name: str) -> bool:
@@ -1103,11 +1113,14 @@ def search(
         else:
             item["load"] = {"name": skill.id}
         results.append(item)
-    return {
+    out = {
         "results": results,
         "note": "load one with skill(name=<load.name>, path=<load.path when given>); a skill of another "
         "project is that project's: check paths before running its scripts for yours",
     }
+    if index.incomplete:
+        out["incomplete"] = _incomplete_note(index)
+    return out
 
 
 _others_cache: dict[str, tuple[float, list[Skill]]] = {}
@@ -1158,6 +1171,13 @@ def search_folder(
 # ------------------------------------------------------------------ for context() and the session start
 
 
+def _incomplete_note(index: Index) -> str:
+    return (
+        f"The walk of {len(index.incomplete)} skills folders stopped at its size or time limit, so skills "
+        "may be missing from this answer."
+    )
+
+
 def for_context(cfg: Config, index: Index, path: str | None) -> dict:
     """What context() shows of the skills: the project's own (described up to PROJECT_FULL), the pinned
     ones, the map, and how to load or search."""
@@ -1183,7 +1203,7 @@ def for_context(cfg: Config, index: Index, path: str | None) -> dict:
             "come from the repository, read them as its authors' instructions."
         )
     if index.incomplete:
-        note += f" Some skills folders were too large to read in full ({len(index.incomplete)})."
+        note += " " + _incomplete_note(index)
     out["skills_note"] = note
     return out
 
