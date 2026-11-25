@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/konbakuyomu/winhand/main/relay/self
 - `--cimd on|off`：是否接受用元数据地址标识的 OAuth 客户端。不给时沿用上次的设置，新部署默认关。原来开着 CIMD、claude.ai 的登录是 CIMD 客户端的部署（单台电脑时代的中转都是），升级时要加 `--cimd on`，否则旧登录刷新会失败。
 
 在已有的部署上升级（同一个 `--dir`）：
-- `secrets/` 里有 `agent-token` 时，`install.sh` 照样把它交给中转，旧地址继续可用；
+- `secrets/` 里有 `agent-token` 时，`install.sh` 照样把它交给中转，旧地址继续可用。不再要旧地址时，先在首页移除 `default`，再删掉这个文件，运行一次 `install.sh`。顺序不能反，原因见 `docs/relay.md` 的「从单台电脑的旧部署迁移」；
 - 旧镜像留着，可以回退：把 `.env` 里的 `WINHAND_IMAGE` 改回原来的标签，再运行 `docker compose up -d`。
 
 ```text
