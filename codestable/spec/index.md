@@ -53,7 +53,7 @@ WinHand 让 AI 通过一个 MCP 服务操作一台 Windows 电脑：跑命令和
     - digest 按没截断的全文算。电脑上记最近 64 份，winhand 重启后对不上，就给全文。
   - 超过预算的文件给 `#` 标题目录（最多 60 条）加文件的最后一段；`truncated` 写明给了哪几行，剩下的用哪条 `fs_read` 读。以前截掉的是后面，正好是主人最新追加的授权。取舍见 `.agents/notes/implemented/feature/2026-11-17-context-per-file-delta.md`。
   - 技能分三步：找全、摆少、要用时搜（`agent/src/winhand/skills.py`）。
-    - 找全：一张来源表，按各家自己的读法读项目链、用户目录，以及已启用的 Claude Code 和 Codex 插件。每个技能有一个说明它在哪里的 id。
+    - 找全：一张来源表，按各家自己的读法读项目链、用户目录，以及已启用的 Claude Code 和 Codex 插件。每个技能有一个说明它在哪里的 id。读目录有预算，按调用自己的 CPU 时间算，同时发出几个调用也不互相挤占；读不完时 context() 和 skill(query=…) 的回答里会写「可能不全」。
     - 摆少：开场、context() 和 instructions 只给一张能力地图，包括钉住的技能、8 个领域、带专属技能的项目，以及「先搜」的约定。context(path) 另外列出这个项目自己的技能。
     - 要用时搜：skill(query=…) 用中英文词在全机检索。没受信的项目不能顶替同名的用户技能。
     - 细节见 `docs/rules-and-guards.md`，取舍见 `.agents/notes/implemented/feature/2026-11-23-skill-sources-map-and-search.md`。

@@ -158,4 +158,4 @@ Status: implemented
 - **验证**：
   - `agent/tests/test_skills.py` 覆盖：项目链、四种目录、递归、id、去重、信任三种模式、Claude 和 Codex 插件、宿主开关、地图、中文检索、配额、跨项目加载、子目录、报告、读取预算。
   - 旧测试改为新的语义，全套测试通过。
-  - 本机在 md2visio、Trellis、dev-board 上的实测，记在 `codestable/issues/005-o-技能分层发现与按需展示.md` 的执行记录里。
+  - 本机在 md2visio、Trellis、dev-board 上的实测，记在 `codestable/issues/005-x-技能分层发现与按需展示.md` 的执行记录里。
