@@ -29,6 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/konbakuyomu/winhand/main/relay/self
 - `--source` 用本地检出代替下载；
 - `--no-build` 用已有的 `winhand-relay:local` 镜像；
 - `--cimd on|off`：是否接受用元数据地址标识的 OAuth 客户端。不给时沿用上次的设置，新部署默认关。原来开着 CIMD、claude.ai 的登录是 CIMD 客户端的部署（单台电脑时代的中转都是），升级时要加 `--cimd on`，否则旧登录刷新会失败。
+- `--hook on|off`：是否为云端会话开场的 hook 服务（`/pc/<名称>/hook/session-start`）。`on` 在 `secrets/hook-token` 不存在时生成它，不打印，要用时到这个文件里读；`off` 删掉它。不给时沿用上次的设置：文件在就继续服务。没有这个文件时，hook 的路径回 404。设置步骤见 `docs/rules-and-guards.md` 的「云端会话开场就带上本机规矩」。
 
 在已有的部署上升级（同一个 `--dir`）：
 - `secrets/` 里有 `agent-token` 时，`install.sh` 照样把它交给中转，旧地址继续可用。不再要旧地址时，先在首页移除 `default`，再删掉这个文件，运行一次 `install.sh`。顺序不能反，原因见 `docs/relay.md` 的「从单台电脑的旧部署迁移」；
@@ -55,7 +56,7 @@ Claude → HTTPS（Caddy）→ 127.0.0.1:8787 上的 workerd → OAuth + Bridge 
 | `OWNER_PASSPHRASE_FILE` | 主人口令所在的文件（至少 24 个字符） |
 | `AGENT_TOKEN_FILE` | 可选：单台电脑旧部署的设备令牌（至少 32 个字符）。新部署不用，电脑在首页配对 |
 | `PROXY_TOKEN_FILE` | Caddy 和 workerd 之间的口令（至少 32 个字符） |
-| `HOOK_TOKEN_FILE` | 可选，云端会话开场取规矩用 |
+| `HOOK_TOKEN_FILE` | 可选：云端会话开场取规矩用的 hook 令牌（至少 32 个字符）。`install.sh --hook on` 生成 `secrets/hook-token` 并设上它 |
 
 密钥只放在文件里，不进命令行参数和日志；读取时去掉 UTF-8 BOM 和行尾空白（PowerShell 管道写的文件常带 BOM）。各个密钥要互不相同。
 

@@ -14,6 +14,10 @@ services:
       # Only a relay that still serves the computer of the single-computer days has secrets/agent-token;
       # install.sh then sets AGENT_TOKEN_FILE=/run/secrets/agent-token in .env. Empty: no old addresses.
       AGENT_TOKEN_FILE: ${AGENT_TOKEN_FILE:-}
+      # Only a relay whose secrets/ has hook-token serves the SessionStart hooks of cloud sessions
+      # (/pc/<name>/hook/session-start); `install.sh --hook on` makes it and sets
+      # HOOK_TOKEN_FILE=/run/secrets/hook-token in .env. Empty: those paths answer 404.
+      HOOK_TOKEN_FILE: ${HOOK_TOKEN_FILE:-}
       # on: accept OAuth clients identified by a metadata document URL (claude.ai signs in that way
       # where CIMD is on). A relay whose existing sign-ins were made that way must keep it on.
       CIMD: ${CIMD:-}

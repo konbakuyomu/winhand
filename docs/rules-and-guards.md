@@ -261,6 +261,8 @@ timeout_s = 30                       # 每个 hook 最多等多久
    npx wrangler deploy
    ```
 
+   自托管的中转不用 `winhand bridge token`：在服务器上运行安装脚本时加 `--hook on`（见 `relay/selfhost/README.md`），令牌生成在服务器的 `secrets/hook-token`，不会打印。第 3 步要用它时，在服务器上读这个文件，别经过聊天。
+
 2. 把 hook 放进仓库：`winhand bridge init --write <仓库目录>`，然后提交并推送。它会合并进 `.claude/settings.json`，保留已有内容；只想看片段时去掉 `--write`。所有仓库用同一份配置：仓库由云端的 `git remote get-url origin` 决定，本机按仓库名找到检出目录（同 `context(repo=…)`）。
 3. 在云端环境里放令牌（会话标题栏的云环境菜单 → Edit），`winhand bridge init` 会打印具体做法：
    - 推荐用 Network secrets（Pro/Max 才有）：网站填中转的域名，Path prefixes 留空（只填 `/hook/` 会挡住一次性文件链接），自定义请求头 `X-Winhand-Hook-Token`，前缀留空。令牌由代理在请求离开容器后加上，不进容器；

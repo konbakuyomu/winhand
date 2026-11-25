@@ -9,13 +9,15 @@ export function validate(settings) {
   }
   // AGENT_TOKEN is optional: only a relay that still serves the computer of the single-computer days
   // (at the old addresses) has it. Computers are otherwise paired from the home page.
-  const names = ['OWNER_PASSPHRASE', 'PROXY_TOKEN', ...(settings.AGENT_TOKEN ? ['AGENT_TOKEN'] : [])];
+  // HOOK_TOKEN is optional too: only a relay that serves the SessionStart hooks of cloud sessions has it.
+  // It travels in a header set by the cloud environment, so it must not be one of the other secrets.
+  const names = ['OWNER_PASSPHRASE', 'PROXY_TOKEN', ...(settings.AGENT_TOKEN ? ['AGENT_TOKEN'] : []), ...(settings.HOOK_TOKEN ? ['HOOK_TOKEN'] : [])];
   for (const name of names) {
     const minimum = name === 'OWNER_PASSPHRASE' ? 24 : 32;
     if (typeof settings[name] !== 'string' || settings[name].length < minimum) throw new Error(`${name} must contain at least ${minimum} characters`);
   }
   if (new Set(names.map(k => settings[k])).size !== names.length) {
-    throw new Error('Use independent owner, agent and proxy secrets');
+    throw new Error('Use independent owner, agent, hook and proxy secrets');
   }
   return origin.origin;
 }
