@@ -10,7 +10,9 @@
 # --source <local checkout> (use these files instead of downloading), --no-build (use the image
 # winhand-relay:local that is already there), --cimd on|off (accept OAuth clients identified by a
 # metadata document URL; a relay whose Claude sign-ins were made that way must keep it on; kept
-# from the previous run when not given).
+# from the previous run when not given), --hook on|off (serve the SessionStart hooks of cloud
+# sessions: on makes secrets/hook-token when it is missing, off removes it; the token is never
+# printed, read it from that file; kept from the previous run when not given).
 set -euo pipefail
 
 REPO="konbakuyomu/winhand"
@@ -20,6 +22,7 @@ SOURCE=""
 HOST=""
 BUILD=1
 CIMD=""
+HOOK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir) DIR="$2"; shift 2 ;;
@@ -27,7 +30,8 @@ while [ $# -gt 0 ]; do
     --source) SOURCE="$2"; shift 2 ;;
     --no-build) BUILD=""; shift ;;
     --cimd) CIMD="$2"; shift 2 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    --hook) HOOK="$2"; shift 2 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) HOST="$1"; shift ;;
   esac
 done
@@ -38,6 +42,7 @@ die() { printf 'winhand: %s\n' "$*" >&2; exit 1; }
 [ -n "$HOST" ] || die "give the relay's domain, e.g.: bash install.sh mcp.example.com"
 printf '%s' "$HOST" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$' || die "not a domain name: $HOST"
 case "$CIMD" in on|off|"") ;; *) die "--cimd takes on or off" ;; esac
+case "$HOOK" in on|off|"") ;; *) die "--hook takes on or off" ;; esac
 command -v docker >/dev/null || die "Docker is needed: https://docs.docker.com/engine/install/"
 docker compose version >/dev/null 2>&1 || die "the Docker Compose plugin is needed (docker compose)"
 docker info >/dev/null 2>&1 || die "Docker is installed but not usable here: run as root or start the Docker service"
@@ -76,6 +81,13 @@ if [ ! -s secrets/owner-passphrase ]; then
   printf '%s' "$NEW_PASSPHRASE" > secrets/owner-passphrase
 fi
 [ -s secrets/proxy-token ] || head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 43 > secrets/proxy-token
+# The hook token of the cloud sessions' SessionStart hooks: made on request, never printed.
+NEW_HOOK=""
+if [ "$HOOK" = on ] && [ ! -s secrets/hook-token ]; then
+  head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 43 > secrets/hook-token
+  NEW_HOOK=1
+fi
+[ "$HOOK" != off ] || rm -f secrets/hook-token
 
 # 3. Build while the running relay keeps serving. The image it runs stays as winhand-relay:previous.
 PREVIOUS=""
@@ -101,6 +113,8 @@ printf 'WINHAND_HOST=%s\nPROXY_TOKEN=%s\nWINHAND_IMAGE=winhand-relay:local\n' "$
 [ "$CIMD" != "on" ] || printf 'CIMD=on\n' >> .env
 # A relay from the single-computer days keeps serving its computer at the old addresses.
 [ ! -s secrets/agent-token ] || printf 'AGENT_TOKEN_FILE=/run/secrets/agent-token\n' >> .env
+# The hooks of cloud sessions (winhand bridge init) are served only while secrets/hook-token exists.
+[ ! -s secrets/hook-token ] || printf 'HOOK_TOKEN_FILE=/run/secrets/hook-token\n' >> .env
 cp code/selfhost/compose.yaml code/selfhost/Caddyfile .
 
 # 5. Start, and check: the relay answers, and a computer that was online is back (its reconnect
@@ -138,5 +152,8 @@ say "the relay is running: https://$HOST/"
 if [ -n "$NEW_PASSPHRASE" ]; then
   say "owner passphrase (shown only now; also in $DIR/secrets/owner-passphrase):"
   printf '\n    %s\n\n' "$NEW_PASSPHRASE"
+fi
+if [ -n "$NEW_HOOK" ]; then
+  say "hook token made in $DIR/secrets/hook-token (not printed: read it there and put the same value in the cloud environment's Network secret, see docs/rules-and-guards.md)"
 fi
 say "next: open https://$HOST/ , pair a computer and run the command it gives in that computer's PowerShell."
